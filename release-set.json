@@ -6,6 +6,7 @@
     "unifi-10.2": {
       "manifest": "unifi-10.2/engine-build.json",
       "build_digest": "d6d8fce9d6c4a6e286d70c2bb31f9ad0aa56d4cb3cfdf2131bfbe4d9c1b8bfcc",
+      "require_executable_hashes": true,
       "status": "experimental",
       "source_commit": "cab9e34"
     }

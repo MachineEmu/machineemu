@@ -55,6 +55,25 @@ def test_registry_rejects_executable_digest_drift(tmp_path):
         EngineRegistry.load(release_set, bundle).resolve("track", "target")
 
 
+def test_registry_requires_hashes_for_published_release(tmp_path):
+    bundle = tmp_path / "bundles"
+    bundle.mkdir()
+    (bundle / "qemu").write_bytes(b"qemu")
+    release_set = tmp_path / "release-set.json"
+    release_set.write_text(json.dumps({
+        "schema_version": 1,
+        "engines": {"track": {"manifest": "manifest.json", "build_digest": "a" * 64,
+                                "require_executable_hashes": True}},
+    }), encoding="utf-8")
+    (bundle / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "track_id": "track", "build_digest": "a" * 64,
+        "source_revision": "commit", "targets": ["target"], "dirty_source": False,
+        "executables": {"target": "qemu"},
+    }), encoding="utf-8")
+    with pytest.raises(EngineRegistryError, match="no executable digest"):
+        EngineRegistry.load(release_set, bundle).resolve("track", "target")
+
+
 def test_registry_rejects_digest_drift(tmp_path):
     release_set = tmp_path / "release-set.json"
     release_set.write_text(json.dumps({

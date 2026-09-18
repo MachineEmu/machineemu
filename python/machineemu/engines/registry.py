@@ -41,6 +41,9 @@ class EngineRegistry:
                 raise EngineRegistryError(f"engines.{track_id}.manifest must be relative")
             if not isinstance(digest, str) or len(digest) != 64:
                 raise EngineRegistryError(f"engines.{track_id}.build_digest must be SHA-256")
+            require_hashes = entry.get("require_executable_hashes", False)
+            if not isinstance(require_hashes, bool):
+                raise EngineRegistryError(f"engines.{track_id}.require_executable_hashes must be boolean")
         return cls(release_set, bundle_root.resolve(), engines)
 
     def resolve(self, track_id: str, target: str) -> tuple[EngineManifest, Path]:
@@ -65,6 +68,8 @@ class EngineRegistry:
         if executable.is_symlink() or not executable.is_file():
             raise EngineRegistryError(f"engine executable is missing: {executable}")
         expected_sha256 = manifest.executable_sha256.get(target)
+        if entry.get("require_executable_hashes", False) and expected_sha256 is None:
+            raise EngineRegistryError(f"engine manifest has no executable digest for {target}")
         if expected_sha256 is not None:
             digest = hashlib.sha256()
             try:
