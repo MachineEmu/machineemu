@@ -21,6 +21,7 @@ class EngineManifest:
     source_revision: str
     targets: tuple[str, ...]
     executables: dict[str, Path]
+    executable_sha256: dict[str, str]
     dirty_source: bool
 
     def executable(self, target: str) -> Path:
@@ -81,8 +82,23 @@ def load_manifest(path: Path, *, require_clean: bool = False) -> EngineManifest:
         raise EngineManifestError("dirty_source must be boolean")
     if require_clean and dirty_source:
         raise EngineManifestError("dirty engine builds cannot be used for release")
+    hashes_value = value.get("executable_sha256", {})
+    if not isinstance(hashes_value, dict):
+        raise EngineManifestError("executable_sha256 must be a mapping")
+    executable_sha256: dict[str, str] = {}
+    for target in targets:
+        digest = hashes_value.get(target)
+        if digest is None:
+            continue
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise EngineManifestError(f"executable_sha256.{target} must be a SHA-256 hex digest")
+        try:
+            int(digest, 16)
+        except ValueError as exc:
+            raise EngineManifestError(f"executable_sha256.{target} must be hexadecimal") from exc
+        executable_sha256[target] = digest
     return EngineManifest(path, track_id, build_digest, source_revision,
-                          tuple(targets), executables, dirty_source)
+                          tuple(targets), executables, executable_sha256, dirty_source)
 
 
 def manifest_digest(value: dict[str, Any]) -> str:

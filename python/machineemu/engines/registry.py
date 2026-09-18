@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,17 @@ class EngineRegistry:
         if manifest.build_digest != entry["build_digest"]:
             raise EngineRegistryError(f"engine build digest does not match release set for {track_id}")
         executable = manifest.executable(target)
-        if not executable.is_file():
+        if executable.is_symlink() or not executable.is_file():
             raise EngineRegistryError(f"engine executable is missing: {executable}")
+        expected_sha256 = manifest.executable_sha256.get(target)
+        if expected_sha256 is not None:
+            digest = hashlib.sha256()
+            try:
+                with executable.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+            except OSError as exc:
+                raise EngineRegistryError(f"cannot read engine executable: {executable}") from exc
+            if digest.hexdigest() != expected_sha256:
+                raise EngineRegistryError(f"engine executable digest mismatch for {target}")
         return manifest, executable
