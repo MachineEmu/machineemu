@@ -67,3 +67,18 @@ def test_instance_store_publishes_immutable_snapshot(tmp_path):
     assert manifest["instance_id"] == "instance-1"
     with pytest.raises(RuntimeStateError, match="already exists"):
         store.snapshot(record, "cold-boot")
+
+
+def test_instance_store_stages_verified_restore_without_touching_live_state(tmp_path):
+    profile = _profile(tmp_path)
+    store = InstanceStore(tmp_path / "state")
+    record = store.ensure("instance-1", profile)
+    source = tmp_path / "disk.img"
+    source.write_bytes(b"disk")
+    store.import_state_file(record, source, "disk.img")
+    store.snapshot(record, "cold-boot")
+    staged = store.stage_snapshot_restore(record, "cold-boot")
+    assert (staged / "disk.img").read_bytes() == b"disk"
+    assert (record.state_dir / "disk.img").read_bytes() == b"disk"
+    with pytest.raises(RuntimeStateError, match="already exists"):
+        store.stage_snapshot_restore(record, "cold-boot")

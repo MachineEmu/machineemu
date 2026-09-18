@@ -153,9 +153,57 @@ class InstanceStore:
                 "instance_id": record.instance_id, "files": snapshot_files,
             }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             staging.replace(destination)
+        except RuntimeStateError:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
         except (OSError, TypeError) as exc:
             shutil.rmtree(staging, ignore_errors=True)
             raise RuntimeStateError(f"cannot publish snapshot {snapshot_id}: {exc}") from exc
+        return destination
+
+    def stage_snapshot_restore(self, record: InstanceRecord, snapshot_id: str) -> Path:
+        """Verify a snapshot and stage a complete restore set without touching live state."""
+        if not _ID.fullmatch(snapshot_id):
+            raise RuntimeStateError("snapshot_id must be an opaque runtime identifier")
+        snapshot = record.state_dir / "snapshots" / snapshot_id
+        manifest = snapshot / "snapshot.json"
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read snapshot manifest {manifest}: {exc}") from exc
+        if value.get("instance_id") != record.instance_id or value.get("snapshot_id") != snapshot_id:
+            raise RuntimeStateError("snapshot identity does not match requested instance")
+        files = value.get("files")
+        if not isinstance(files, dict) or not files:
+            raise RuntimeStateError("snapshot contains no state files")
+        restore_root = record.state_dir / "restore-staging"
+        restore_root.mkdir(exist_ok=True)
+        destination = restore_root / snapshot_id
+        if destination.exists():
+            raise RuntimeStateError(f"restore staging already exists: {snapshot_id}")
+        staging = Path(tempfile.mkdtemp(prefix=f".{snapshot_id}.", dir=restore_root))
+        try:
+            for name, metadata in files.items():
+                if not self._safe_name(name) or not isinstance(metadata, dict):
+                    raise RuntimeStateError("snapshot contains an invalid state file")
+                source = snapshot / name
+                if not source.is_file() or source.is_symlink():
+                    raise RuntimeStateError(f"snapshot state file is unavailable: {name}")
+                digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                if metadata.get("sha256") != f"sha256:{digest}":
+                    raise RuntimeStateError(f"snapshot digest mismatch: {name}")
+                shutil.copy2(source, staging / name)
+            (staging / "restore.json").write_text(json.dumps({
+                "schema_version": 1, "snapshot_id": snapshot_id,
+                "instance_id": record.instance_id, "state": "staged",
+            }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            staging.replace(destination)
+        except RuntimeStateError:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        except (OSError, TypeError) as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise RuntimeStateError(f"cannot stage snapshot restore {snapshot_id}: {exc}") from exc
         return destination
 
     @staticmethod
