@@ -76,6 +76,22 @@ class SessionStore:
         self._atomic_json(manifest, value)
         return SessionRecord(session_id, instance_id, runtime_dir, state_dir, artifact_dir, manifest)
 
+    def update(self, record: SessionRecord, state: str, *, pid: int | None = None,
+               exit_code: int | None = None) -> None:
+        """Persist a controlled lifecycle transition in the session manifest."""
+        if state not in {"created", "running", "stopping", "stopped", "failed"}:
+            raise RuntimeStateError(f"unknown session state: {state}")
+        try:
+            value = json.loads(record.manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read session manifest {record.manifest}: {exc}") from exc
+        value["state"] = state
+        if pid is not None:
+            value["pid"] = pid
+        if exit_code is not None:
+            value["exit_code"] = exit_code
+        self._atomic_json(record.manifest, value)
+
     @staticmethod
     def _atomic_json(path: Path, value: dict[str, Any]) -> None:
         try:
