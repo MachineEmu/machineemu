@@ -1,15 +1,14 @@
 /** Small browser client for the initial MachineEmu session contract. */
 
-export interface SessionRequest {
-  instance_id: string;
-  session_id: string;
-}
+import type { paths } from "./api-types";
 
-export interface SessionManifest extends Record<string, unknown> {
-  session_id: string;
-  instance_id: string;
-  state: string;
-}
+export type SessionRequest = paths["/api/v1/sessions/reconcile"]["post"]["requestBody"]["content"]["application/json"];
+export type HealthResponse = paths["/api/v1/health"]["get"]["responses"][200]["content"]["application/json"];
+export type SessionManifest = paths["/api/v1/sessions/{instance_id}/{session_id}"]["get"]["responses"][200]["content"]["application/json"];
+export type ReconcileResponse = paths["/api/v1/sessions/reconcile"]["post"]["responses"][200]["content"]["application/json"];
+export type StartResponse = paths["/api/v1/sessions/{instance_id}/{session_id}/start"]["post"]["responses"][200]["content"]["application/json"];
+export type StopResponse = paths["/api/v1/sessions/{instance_id}/{session_id}/stop"]["post"]["responses"][200]["content"]["application/json"];
+
 
 export interface MachineEmuClientOptions {
   baseUrl?: string;
@@ -28,7 +27,7 @@ export class MachineEmuClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async health(): Promise<{ status: string }> {
+  async health(): Promise<HealthResponse> {
     return this.request("/api/v1/health");
   }
 
@@ -36,17 +35,17 @@ export class MachineEmuClient {
     return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}`);
   }
 
-  async reconcileSession(request: SessionRequest): Promise<{ session_id: string; state: string }> {
+  async reconcileSession(request: SessionRequest): Promise<ReconcileResponse> {
     return this.request("/api/v1/sessions/reconcile", { method: "POST", body: request });
   }
 
-  async startSession(instanceId: string, sessionId: string): Promise<{ session_id: string; pid: number; state: string }> {
+  async startSession(instanceId: string, sessionId: string): Promise<StartResponse> {
     return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/start`, {
       method: "POST",
     });
   }
 
-  async stopSession(instanceId: string, sessionId: string): Promise<{ session_id: string; exit_code: number; state: string }> {
+  async stopSession(instanceId: string, sessionId: string): Promise<StopResponse> {
     return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/stop`, {
       method: "POST",
     });
