@@ -1,0 +1,14 @@
+{
+  "name": "machineemu-web-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "generate:api-types": "openapi-typescript ../contracts/openapi.json -o src/api-types.d.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.8.0",
+    "typescript": "5.9.3"
+  }
+}
