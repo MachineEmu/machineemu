@@ -35,6 +35,9 @@ def test_session_store_separates_runtime_state_and_artifacts(tmp_path):
     assert record.state_dir == (tmp_path / "state/instances/instance-1").resolve()
     assert record.artifact_dir == (tmp_path / "artifacts/sessions/session-1").resolve()
     assert json.loads(record.manifest.read_text())["engine"]["build_digest"] == "e" * 64
+    manifest = json.loads(record.manifest.read_text())
+    assert manifest["configuration"]["machine"] == "virt"
+    assert manifest["assets"] == {}
     assert (record.runtime_dir / "sockets").is_dir()
 
 

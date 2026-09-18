@@ -70,6 +70,8 @@ class SessionStore:
                 "build_digest": profile.engine.build_digest,
                 "source_revision": profile.engine.source_revision,
             },
+            "configuration": profile.configuration,
+            "assets": {name: str(path) for name, path in profile.assets.items()},
             "state": "created",
             "artifact_directory": str(artifact_dir),
         }
