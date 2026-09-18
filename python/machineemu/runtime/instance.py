@@ -117,6 +117,47 @@ class InstanceStore:
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeStateError(f"cannot read instance manifest {record.manifest}: {exc}") from exc
 
+    def snapshot(self, record: InstanceRecord, snapshot_id: str,
+                 files: list[str] | None = None) -> Path:
+        """Capture imported state files into an immutable, atomically published snapshot."""
+        if not _ID.fullmatch(snapshot_id):
+            raise RuntimeStateError("snapshot_id must be an opaque runtime identifier")
+        try:
+            value = json.loads(record.manifest.read_text(encoding="utf-8"))
+            state_files = value.get("state_files", {})
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read instance manifest {record.manifest}: {exc}") from exc
+        selected = list(state_files) if files is None else files
+        if not selected or len(set(selected)) != len(selected):
+            raise RuntimeStateError("snapshot file set must be non-empty and unique")
+        for name in selected:
+            if not self._safe_name(name) or name not in state_files:
+                raise RuntimeStateError(f"snapshot state file is not imported: {name}")
+            if not (record.state_dir / name).is_file():
+                raise RuntimeStateError(f"snapshot state file is unavailable: {name}")
+        snapshots = record.state_dir / "snapshots"
+        destination = snapshots / snapshot_id
+        if destination.exists():
+            raise RuntimeStateError(f"snapshot already exists: {snapshot_id}")
+        snapshots.mkdir(exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{snapshot_id}.", dir=snapshots))
+        snapshot_files = {}
+        try:
+            for name in selected:
+                source = record.state_dir / name
+                target = staging / name
+                shutil.copy2(source, target)
+                snapshot_files[name] = state_files[name]
+            (staging / "snapshot.json").write_text(json.dumps({
+                "schema_version": 1, "snapshot_id": snapshot_id,
+                "instance_id": record.instance_id, "files": snapshot_files,
+            }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            staging.replace(destination)
+        except (OSError, TypeError) as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise RuntimeStateError(f"cannot publish snapshot {snapshot_id}: {exc}") from exc
+        return destination
+
     @staticmethod
     def _safe_name(name: object) -> bool:
         return isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name) is not None

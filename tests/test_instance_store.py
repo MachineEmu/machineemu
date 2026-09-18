@@ -52,3 +52,18 @@ def test_instance_store_records_only_imported_backing_chain(tmp_path):
         store.record_backing_chain(record, "overlay.img", ["missing.img"])
     with pytest.raises(RuntimeStateError, match="cycle"):
         store.record_backing_chain(record, "overlay.img", ["base.img", "base.img"])
+
+
+def test_instance_store_publishes_immutable_snapshot(tmp_path):
+    profile = _profile(tmp_path)
+    store = InstanceStore(tmp_path / "state")
+    record = store.ensure("instance-1", profile)
+    source = tmp_path / "disk.img"
+    source.write_bytes(b"disk")
+    store.import_state_file(record, source, "disk.img")
+    snapshot = store.snapshot(record, "cold-boot")
+    assert (snapshot / "disk.img").read_bytes() == b"disk"
+    manifest = json.loads((snapshot / "snapshot.json").read_text())
+    assert manifest["instance_id"] == "instance-1"
+    with pytest.raises(RuntimeStateError, match="already exists"):
+        store.snapshot(record, "cold-boot")
