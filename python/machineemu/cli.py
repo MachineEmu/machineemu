@@ -67,6 +67,13 @@ def _parser() -> argparse.ArgumentParser:
     validated = commands.add_parser("state-validate", help="validate a state tree against an inventory")
     validated.add_argument("--source", type=Path, required=True)
     validated.add_argument("--inventory", type=Path, required=True)
+    imported_state = commands.add_parser("state-import", help="import a file guarded by a state inventory")
+    imported_state.add_argument("--operator-config", type=Path, required=True)
+    imported_state.add_argument("--instance-id", required=True)
+    imported_state.add_argument("--source", type=Path, required=True)
+    imported_state.add_argument("--inventory", type=Path, required=True)
+    imported_state.add_argument("--source-path", required=True)
+    imported_state.add_argument("--name", required=True)
     return parser
 
 
@@ -85,6 +92,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "state-validate":
             expected = json.loads(args.inventory.read_text(encoding="utf-8"))
             print(json.dumps(validate_inventory(args.source, expected), indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "state-import":
+            config = OperatorConfig.load(args.operator_config)
+            inventory = json.loads(args.inventory.read_text(encoding="utf-8"))
+            app = OperatorApplication(config)
+            record = app.instances.open(args.instance_id)
+            digest, destination = app.instances.import_verified_file(
+                record, args.source, inventory, args.source_path, args.name,
+            )
+            print(json.dumps({"instance_id": args.instance_id, "name": args.name,
+                              "sha256": digest, "path": str(destination)}, sort_keys=True))
             return 0
 
         if args.command == "session-create":

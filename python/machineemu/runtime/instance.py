@@ -64,6 +64,24 @@ class InstanceStore:
             raise RuntimeStateError(f"cannot write instance manifest {manifest}: {exc}") from exc
         return InstanceRecord(instance_id, state_dir, manifest)
 
+    def open(self, instance_id: str) -> InstanceRecord:
+        """Open an existing durable instance without needing its profile source."""
+        if not isinstance(instance_id, str) or not _ID.fullmatch(instance_id):
+            raise RuntimeStateError("instance_id must be an opaque runtime identifier")
+        state_dir = self.root / "instances" / instance_id
+        manifest = state_dir / "instance.json"
+        if not state_dir.is_dir() or manifest.is_symlink() or not manifest.is_file():
+            raise RuntimeStateError(f"instance manifest is unavailable: {manifest}")
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read instance manifest {manifest}: {exc}") from exc
+        if not isinstance(value, dict) or value.get("schema_version") != 1:
+            raise RuntimeStateError("instance manifest schema_version must be 1")
+        if value.get("instance_id") != instance_id:
+            raise RuntimeStateError("instance manifest identity does not match requested instance")
+        return InstanceRecord(instance_id, state_dir, manifest)
+
     def import_state_file(self, record: InstanceRecord, source: Path, name: str,
                           expected: str | None = None) -> tuple[str, Path]:
         """Copy one mutable state file atomically and record its digest."""

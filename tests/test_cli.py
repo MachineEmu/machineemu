@@ -2,6 +2,8 @@ import json
 from types import SimpleNamespace
 
 from machineemu.cli import main
+from machineemu.runtime import InstanceStore, inventory_json
+from tests.test_runtime_state import _profile
 
 
 def test_asset_import_cli(tmp_path, capsys):
@@ -10,6 +12,28 @@ def test_asset_import_cli(tmp_path, capsys):
     assert main(["asset-import", "--asset-root", str(tmp_path / "assets"), "--source", str(source)]) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["reference"].startswith("sha256:")
+
+
+def test_state_import_cli_uses_inventory_guard(tmp_path, capsys):
+    config = tmp_path / "operator.json"
+    config.write_text(json.dumps({"schema_version": 1, "roots": {
+        "engine_root": "engines", "asset_root": "assets", "state_root": "state",
+        "runtime_root": "runtime", "artifact_root": "artifacts",
+    }}), encoding="utf-8")
+    profile = _profile(tmp_path)
+    InstanceStore(tmp_path / "state").ensure("instance-1", profile)
+    source = tmp_path / "legacy"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"disk")
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps(inventory_json(source)), encoding="utf-8")
+    assert main([
+        "state-import", "--operator-config", str(config), "--instance-id", "instance-1",
+        "--source", str(source), "--inventory", str(inventory), "--source-path", "disk.img",
+        "--name", "disk.img",
+    ]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["sha256"].startswith("sha256:")
 
 
 def test_profile_check_cli(tmp_path, capsys):

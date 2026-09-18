@@ -21,6 +21,15 @@ def test_instance_store_rejects_path_like_identity(tmp_path):
         InstanceStore(tmp_path / "state").ensure("../bad", _profile(tmp_path))
 
 
+def test_instance_store_opens_existing_identity(tmp_path):
+    profile = _profile(tmp_path)
+    store = InstanceStore(tmp_path / "state")
+    record = store.ensure("instance-1", profile)
+    assert store.open("instance-1") == record
+    with pytest.raises(RuntimeStateError, match="unavailable"):
+        store.open("missing")
+
+
 def test_instance_store_imports_state_with_digest_provenance(tmp_path):
     profile = _profile(tmp_path)
     store = InstanceStore(tmp_path / "state")
