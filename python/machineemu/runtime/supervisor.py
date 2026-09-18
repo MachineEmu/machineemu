@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import asyncio
 import json
 import os
+import signal
+import time
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -61,3 +63,41 @@ class SessionSupervisor:
             self.store.update(record, "failed", metadata={"failure": "process is not alive"})
             return "failed"
         return "running"
+
+    def stop_recovered(self, record: SessionRecord, timeout: float = 5.0) -> int:
+        """Stop a session after a supervisor restart using its recorded PID."""
+        if timeout < 0:
+            raise RuntimeStateError("stop timeout must be non-negative")
+        try:
+            manifest = json.loads(record.manifest.read_text(encoding="utf-8"))
+            pid = manifest.get("pid")
+            state = manifest.get("state")
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read session manifest: {exc}") from exc
+        if state != "running":
+            raise RuntimeStateError(f"session is not running: {state}")
+        if not isinstance(pid, int) or pid <= 0:
+            raise RuntimeStateError("session manifest has no valid process PID")
+        self.store.update(record, "stopping", pid=pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            self.store.update(record, "stopped", exit_code=0)
+            return 0
+        except PermissionError as exc:
+            self.store.update(record, "failed", metadata={"failure": f"stop: {exc}"})
+            raise RuntimeStateError(f"cannot stop process {pid}: {exc}") from exc
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                self.store.update(record, "stopped", exit_code=0)
+                return 0
+            time.sleep(0.05)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        self.store.update(record, "stopped", exit_code=-signal.SIGKILL)
+        return -signal.SIGKILL

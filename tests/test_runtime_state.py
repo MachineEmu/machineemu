@@ -1,10 +1,11 @@
 import json
+import signal
 
 import pytest
 
 from machineemu.engines import EngineRegistry
 from machineemu.profiles import resolve_profile
-from machineemu.runtime import RuntimeStateError, SessionStore
+from machineemu.runtime import RuntimeStateError, SessionStore, SessionSupervisor
 
 
 def _profile(tmp_path):
@@ -64,3 +65,20 @@ def test_session_store_reopens_and_validates_manifest(tmp_path):
     assert opened == created
     with pytest.raises(RuntimeStateError, match="identity"):
         store.open("other-instance", "session-1")
+
+
+def test_recovered_stop_uses_bounded_term(monkeypatch, tmp_path):
+    store = SessionStore(tmp_path / "run", tmp_path / "state", tmp_path / "artifacts")
+    record = store.create("instance-1", "session-1", _profile(tmp_path))
+    store.update(record, "running", pid=1234)
+    signals = []
+
+    def fake_kill(pid, sig):
+        signals.append((pid, sig))
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr("machineemu.runtime.supervisor.os.kill", fake_kill)
+    assert SessionSupervisor(store).stop_recovered(record, timeout=1) == 0
+    assert signals == [(1234, signal.SIGTERM), (1234, 0)]
+    assert json.loads(record.manifest.read_text())["state"] == "stopped"

@@ -55,6 +55,12 @@ def _parser() -> argparse.ArgumentParser:
     reconciled.add_argument("--operator-config", type=Path, required=True)
     reconciled.add_argument("--instance-id", required=True)
     reconciled.add_argument("--session-id", required=True)
+
+    stopped = commands.add_parser("session-stop", help="stop a running session with bounded escalation")
+    stopped.add_argument("--operator-config", type=Path, required=True)
+    stopped.add_argument("--instance-id", required=True)
+    stopped.add_argument("--session-id", required=True)
+    stopped.add_argument("--timeout", type=float, default=5.0)
     return parser
 
 
@@ -113,6 +119,14 @@ def main(argv: list[str] | None = None) -> int:
             record = store.open(args.instance_id, args.session_id)
             state = SessionSupervisor(store).recover(record)
             print(json.dumps({"session_id": record.session_id, "state": state}, sort_keys=True))
+            return 0
+
+        if args.command == "session-stop":
+            config = OperatorConfig.load(args.operator_config)
+            store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
+            record = store.open(args.instance_id, args.session_id)
+            exit_code = SessionSupervisor(store).stop_recovered(record, args.timeout)
+            print(json.dumps({"session_id": record.session_id, "exit_code": exit_code}, sort_keys=True))
             return 0
 
         asset_store = AssetStore(args.asset_root) if args.asset_root else None
