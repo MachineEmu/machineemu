@@ -25,6 +25,8 @@ jobs:
         run: .venv/bin/python -m pytest -q
       - name: Check OpenAPI contract
         run: PYTHONPATH=python .venv/bin/python scripts/check_openapi.py
+      - name: Check release metadata
+        run: .venv/bin/python scripts/check_release_set.py release-set.json
 
   package:
     runs-on: ubuntu-latest
