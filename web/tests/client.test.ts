@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { MachineEmuClient } from "../src/client";
+import { createCatalogSession } from "../src/catalog-flow";
 
 describe("MachineEmuClient", () => {
   it("sends authenticated read requests with encoded session IDs", async () => {
@@ -56,5 +57,22 @@ describe("MachineEmuClient", () => {
     expect(calls[0].url).toBe("http://127.0.0.1/api/v1/catalog/profiles/demo%2Flab");
     expect(calls[1].url).toBe("http://127.0.0.1/api/v1/catalog/sessions");
     expect(await calls[1].json()).toEqual({ profile_id: "demo", instance_id: "instance", session_id: "session" });
+  });
+
+  it("orchestrates catalog selection before session creation", async () => {
+    const calls: string[] = [];
+    const client = {
+      listProfiles: async () => [{ id: "demo", machine: "virt" } as never],
+      createCatalogSession: async (request: { profile_id: string; instance_id: string; session_id: string }) => {
+        calls.push(`${request.profile_id}:${request.instance_id}:${request.session_id}`);
+        return { session_id: request.session_id, manifest: "/runtime/manifest.json", state: "created" } as never;
+      },
+    };
+    const result = await createCatalogSession(client, {
+      profileId: "demo", instanceId: "instance", sessionId: "session",
+    });
+    expect(result.profile.id).toBe("demo");
+    expect(result.session.state).toBe("created");
+    expect(calls).toEqual(["demo:instance:session"]);
   });
 });
