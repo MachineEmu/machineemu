@@ -78,6 +78,28 @@ class SessionStore:
         self._atomic_json(manifest, value)
         return SessionRecord(session_id, instance_id, runtime_dir, state_dir, artifact_dir, manifest)
 
+    def open(self, instance_id: str, session_id: str) -> SessionRecord:
+        """Reopen an existing session after validating its owned paths and manifest."""
+        instance_id = _validate_id(instance_id, "instance_id")
+        session_id = _validate_id(session_id, "session_id")
+        runtime_dir = self.runtime_root / "sessions" / session_id
+        state_dir = self.state_root / "instances" / instance_id
+        artifact_dir = self.artifact_root / "sessions" / session_id
+        manifest = runtime_dir / "manifest.json"
+        if not manifest.is_file() or manifest.is_symlink():
+            raise RuntimeStateError(f"session manifest is unavailable: {manifest}")
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read session manifest {manifest}: {exc}") from exc
+        if not isinstance(value, dict) or value.get("schema_version") != 1:
+            raise RuntimeStateError("session manifest schema_version must be 1")
+        if value.get("session_id") != session_id or value.get("instance_id") != instance_id:
+            raise RuntimeStateError("session manifest identity does not match requested session")
+        if not runtime_dir.is_dir() or not state_dir.is_dir() or not artifact_dir.is_dir():
+            raise RuntimeStateError("session directory layout is incomplete")
+        return SessionRecord(session_id, instance_id, runtime_dir, state_dir, artifact_dir, manifest)
+
     def update(self, record: SessionRecord, state: str, *, pid: int | None = None,
                exit_code: int | None = None, metadata: dict[str, Any] | None = None) -> None:
         """Persist a controlled lifecycle transition in the session manifest."""

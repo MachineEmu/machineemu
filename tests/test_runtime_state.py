@@ -54,3 +54,13 @@ def test_session_store_rejects_duplicate_session(tmp_path):
     store.create("instance-1", "session-1", profile)
     with pytest.raises(RuntimeStateError, match="already exists"):
         store.create("instance-2", "session-1", profile)
+
+
+def test_session_store_reopens_and_validates_manifest(tmp_path):
+    store = SessionStore(tmp_path / "run", tmp_path / "state", tmp_path / "artifacts")
+    profile = _profile(tmp_path)
+    created = store.create("instance-1", "session-1", profile)
+    opened = store.open("instance-1", "session-1")
+    assert opened == created
+    with pytest.raises(RuntimeStateError, match="identity"):
+        store.open("other-instance", "session-1")

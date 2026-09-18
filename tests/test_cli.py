@@ -72,3 +72,10 @@ def test_session_create_cli_writes_manifest(tmp_path, capsys):
     manifest = json.loads((tmp_path / "runtime/sessions/session-1/manifest.json").read_text())
     assert output["session_id"] == "session-1"
     assert manifest["profile_id"] == "demo"
+
+    assert main([
+        "session-inspect", "--operator-config", str(config),
+        "--instance-id", "instance-1", "--session-id", "session-1",
+    ]) == 0
+    inspected = json.loads(capsys.readouterr().out)
+    assert inspected["session_id"] == "session-1"

@@ -37,6 +37,11 @@ def _parser() -> argparse.ArgumentParser:
     created.add_argument("--target", required=True)
     created.add_argument("--instance-id", required=True)
     created.add_argument("--session-id", required=True)
+
+    inspected = commands.add_parser("session-inspect", help="inspect an existing session manifest")
+    inspected.add_argument("--operator-config", type=Path, required=True)
+    inspected.add_argument("--instance-id", required=True)
+    inspected.add_argument("--session-id", required=True)
     return parser
 
 
@@ -66,6 +71,14 @@ def main(argv: list[str] | None = None) -> int:
                 "state_dir": str(record.state_dir),
                 "artifact_dir": str(record.artifact_dir),
             }, sort_keys=True))
+            return 0
+
+        if args.command == "session-inspect":
+            config = OperatorConfig.load(args.operator_config)
+            record = SessionStore(
+                config.runtime_root, config.state_root, config.artifact_root,
+            ).open(args.instance_id, args.session_id)
+            print(record.manifest.read_text(encoding="utf-8"), end="")
             return 0
 
         asset_store = AssetStore(args.asset_root) if args.asset_root else None
