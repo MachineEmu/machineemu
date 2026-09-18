@@ -3,6 +3,9 @@
 MachineEmu is the runtime, API, browser client, catalog, and domain integration
 repository. It consumes immutable engine bundles produced by `machineemu/qemu`.
 
+The repository is currently licensed under AGPL-3.0-or-later. Third-party and
+restricted inputs retain their own licensing and distribution requirements.
+
 This checkout is the first migration bootstrap. Source code is intentionally not
 copied until the M0 ledger and baseline are reviewed.
 
