@@ -12,6 +12,7 @@ from machineemu.engines import EngineRegistry
 from machineemu.profiles import build_launch_plan, resolve_profile, resolve_profile_value
 
 from .config import OperatorConfig
+from .instance import InstanceStore
 from .state import SessionRecord, SessionStore
 from .supervisor import RunningSession, SessionSupervisor
 
@@ -23,6 +24,7 @@ class OperatorApplication:
                  bundle_root: Path | None = None, catalog: ProfileCatalog | None = None):
         self.config = config
         self.store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
+        self.instances = InstanceStore(config.state_root)
         self.assets = AssetStore(config.asset_root)
         self.release_set = release_set
         self.bundle_root = bundle_root
@@ -35,6 +37,7 @@ class OperatorApplication:
         registry = EngineRegistry.load(self.release_set, self.bundle_root)
         profile = resolve_profile(profile_path, registry, target=target, asset_store=self.assets)
         plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / session_id)
+        self.instances.ensure(instance_id, profile)
         record = self.store.create(instance_id, session_id, profile)
         self.store.update(record, "created", metadata={"launch_plan": plan.manifest})
         return record
@@ -52,6 +55,7 @@ class OperatorApplication:
         registry = EngineRegistry.load(self.release_set, self.bundle_root)
         profile = resolve_profile_value(value, registry, target=selected_target, asset_store=self.assets)
         plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / session_id)
+        self.instances.ensure(instance_id, profile)
         record = self.store.create(instance_id, session_id, profile)
         self.store.update(record, "created", metadata={"launch_plan": plan.manifest})
         return record

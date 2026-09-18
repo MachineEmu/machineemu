@@ -31,3 +31,4 @@ def test_application_creates_and_reads_recorded_plan(tmp_path):
     command, qmp = app.recorded_plan(record)
     assert command[0].endswith("bin/qemu")
     assert qmp.name == "qmp.sock"
+    assert (tmp_path / "state/instances/instance/instance.json").is_file()
