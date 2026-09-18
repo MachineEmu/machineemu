@@ -1,0 +1,165 @@
+schema_version: 1
+source:
+  repository: unifi-qemu
+  path: ../unifi-qemu
+  revision: 5093ae5ed1c00f9fdec94cda58289a1393ddd27d
+  dirty_at_capture: true
+  note: >-
+    The source checkout has uncommitted implementation and generated-state
+    changes. This ledger records scope; port commits must name a reviewed
+    source revision and must not copy dirty caches, credentials, or restricted assets.
+entries:
+  - id: qemu-patches
+    source_paths: [qemu/patches, qemu/hw, qemu/mt7981, qemu/udmpro]
+    capability: patched QEMU engine and device integration
+    owner: machineemu/qemu
+    disposition: port
+    support_status: baseline
+    dependencies: [qemu-source, meson, ninja]
+    evidence: [qemu/tests, qemu/build manifests]
+    state_policy: engine source only; no build trees or runtime state
+    milestone: M1
+    status: queued
+  - id: qemu-analysis
+    source_paths: [qemu/analysis-patches, crates/analysis-profile]
+    capability: analysis engine track and profile helper
+    owner: machineemu/qemu
+    disposition: port
+    support_status: experimental
+    dependencies: [qemu-patches, rust-toolchain]
+    evidence: [smoke, probes, artifacts]
+    state_policy: preserve reports as external artifacts; never commit samples
+    milestone: M4
+    status: queued
+  - id: qemu-rust-crates
+    source_paths: [crates/board-core, crates/board-ffi, crates/board-tools, crates/mt7981-machine, crates/udmpro-machine, crates/bcm5616x-machine, crates/net-offload]
+    capability: board models, FFI, tools, and network offload
+    owner: machineemu/qemu
+    disposition: port
+    support_status: baseline
+    dependencies: [qemu-patches, rust-toolchain]
+    evidence: [crates/*/tests, Cargo.lock]
+    state_policy: source and fixtures only; exclude target/
+    milestone: M1
+    status: queued
+  - id: helper-crates
+    source_paths: [crates/display-stream, crates/spice-audio, crates/remote-device-bridge, crates/remote-device-protocol]
+    capability: display, audio, and remote-device helpers
+    owner: machineemu/qemu
+    disposition: port
+    support_status: baseline
+    dependencies: [qemu-rust-crates]
+    evidence: [crates/*/tests, protocol fixtures]
+    state_policy: protocol fixtures public; captures external
+    milestone: M1
+    status: queued
+  - id: runtime-lifecycle
+    source_paths: [console/lifecycle.py, console/broker.py, console/qmp.py, console/launch_plan.py]
+    capability: process ownership, QMP, launch planning, cleanup, recovery
+    owner: machineemu/machineemu:runtime
+    disposition: adapt
+    support_status: baseline
+    dependencies: [qemu-engine-bundle]
+    evidence: [console/tests, tests/test_supervisor.py, tests/test_qmp.py]
+    state_policy: instance state and session journals remain operator-owned
+    milestone: M1
+    status: partial
+  - id: runtime-state
+    source_paths: [runtime, artifacts, fixtures]
+    capability: disks, NVRAM, TPM, snapshots, artifacts, and recovery state
+    owner: machineemu/machineemu:runtime
+    disposition: adapt
+    support_status: baseline
+    dependencies: [runtime-lifecycle]
+    evidence: [tests/test_instance_store.py, tests/test_migration_inventory.py]
+    state_policy: inventory first; import only verified regular files; snapshots cold-restore
+    milestone: M2
+    status: partial
+  - id: profile-config
+    source_paths: [config, config-temp]
+    capability: launch profiles and operator configuration
+    owner: machineemu/machineemu:catalog
+    disposition: adapt
+    support_status: baseline
+    dependencies: [runtime-lifecycle, external-assets]
+    evidence: [config/operator.example.json, tests/test_profile_resolve.py]
+    state_policy: profiles contain digests and logical names, never host paths or secrets
+    milestone: M1
+    status: partial
+  - id: firmware-domain
+    source_paths: [console/firmware, console/boards.py]
+    capability: firmware preparation and board-specific diagnostics
+    owner: machineemu/machineemu:domains/unifi
+    disposition: adapt
+    support_status: baseline
+    dependencies: [profile-config, external-assets]
+    evidence: [console/tests/test_pc_profile.py, console/tests/test_render.py]
+    state_policy: generated firmware is an artifact with input/output digests
+    milestone: M3
+    status: queued
+  - id: analysis-domain
+    source_paths: [assets/analysis, probes, smoke]
+    capability: analysis identity, probes, and verification
+    owner: machineemu/machineemu:domains/analysis
+    disposition: adapt
+    support_status: experimental
+    dependencies: [qemu-analysis, runtime-state]
+    evidence: [probes, smoke, artifacts/malware-analysis-runs]
+    state_policy: reports and samples stay external; record provenance only
+    milestone: M4
+    status: queued
+  - id: compatibility-shims
+    source_paths: [compat/bt, compat/wifi]
+    capability: Bluetooth and Wi-Fi compatibility adapters
+    owner: machineemu/machineemu:domains/unifi
+    disposition: adapt
+    support_status: experimental
+    dependencies: [runtime-lifecycle]
+    evidence: [compat tests, docs]
+    state_policy: host setup and cleanup are explicit operator operations
+    milestone: M3
+    status: queued
+  - id: web-api
+    source_paths: [console/web, web, console/web/app.py, console/web/schemas.py]
+    capability: browser UI, auth, leases, and remote-device routes
+    owner: machineemu/machineemu:web-and-api
+    disposition: adapt
+    support_status: baseline
+    dependencies: [runtime-lifecycle, profile-config]
+    evidence: [tests/test_api.py, web/tests]
+    state_policy: no credentials or host paths in API responses or browser storage
+    milestone: M1
+    status: partial
+  - id: host-tooling
+    source_paths: [scripts, tools, nix, kernel]
+    capability: builds, preparation, kernel and host setup
+    owner: owning repository
+    disposition: port
+    support_status: mixed
+    dependencies: [qemu-patches]
+    evidence: [scripts, nix checks, kernel tests]
+    state_policy: privileged setup documented and separately gated
+    milestone: M3
+    status: queued
+  - id: external-assets
+    source_paths: [ISOs, assets, public/virtual-display-drivers]
+    capability: firmware, guest media, prepared disks, drivers
+    owner: external asset store
+    disposition: archive
+    support_status: restricted
+    dependencies: []
+    evidence: [asset manifests, operator records]
+    state_policy: do not publish; import by digest with license and provenance
+    milestone: M1
+    status: policy-defined
+  - id: research-and-docs
+    source_paths: [docs, findings, plans, LICENSE]
+    capability: research, attribution, operating procedures, licenses
+    owner: machineemu/machineemu:docs
+    disposition: port
+    support_status: reference
+    dependencies: []
+    evidence: [docs/migration, docs/operations]
+    state_policy: preserve attribution and archive superseded proposals
+    milestone: M0
+    status: partial
