@@ -16,6 +16,7 @@ Install JavaScript tooling, generate API types, and type-check with:
 bun install
 bun run generate:api-types
 bun run typecheck
+bun test
 ```
 
 The initial client intentionally covers health, inspection, reconciliation,
