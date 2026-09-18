@@ -77,7 +77,7 @@ class SessionStore:
         return SessionRecord(session_id, instance_id, runtime_dir, state_dir, artifact_dir, manifest)
 
     def update(self, record: SessionRecord, state: str, *, pid: int | None = None,
-               exit_code: int | None = None) -> None:
+               exit_code: int | None = None, metadata: dict[str, Any] | None = None) -> None:
         """Persist a controlled lifecycle transition in the session manifest."""
         if state not in {"created", "running", "stopping", "stopped", "failed"}:
             raise RuntimeStateError(f"unknown session state: {state}")
@@ -90,6 +90,8 @@ class SessionStore:
             value["pid"] = pid
         if exit_code is not None:
             value["exit_code"] = exit_code
+        if metadata:
+            value.update(metadata)
         self._atomic_json(record.manifest, value)
 
     @staticmethod
