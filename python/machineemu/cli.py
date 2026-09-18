@@ -11,7 +11,7 @@ import sys
 from machineemu.assets import AssetError, AssetStore
 from machineemu.engines import EngineRegistry
 from machineemu.profiles import ProfileError, resolve_profile
-from machineemu.runtime import OperatorApplication, OperatorConfig
+from machineemu.runtime import OperatorApplication, OperatorConfig, inventory_json
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -61,6 +61,9 @@ def _parser() -> argparse.ArgumentParser:
     stopped.add_argument("--instance-id", required=True)
     stopped.add_argument("--session-id", required=True)
     stopped.add_argument("--timeout", type=float, default=5.0)
+
+    inventoried = commands.add_parser("state-inventory", help="hash a state tree without modifying it")
+    inventoried.add_argument("--source", type=Path, required=True)
     return parser
 
 
@@ -70,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "asset-import":
             reference, path = AssetStore(args.asset_root).import_file(args.source, args.expected)
             print(json.dumps({"reference": reference, "path": str(path)}, sort_keys=True))
+            return 0
+
+        if args.command == "state-inventory":
+            print(json.dumps(inventory_json(args.source), indent=2, sort_keys=True))
             return 0
 
         if args.command == "session-create":
