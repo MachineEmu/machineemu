@@ -39,6 +39,12 @@ def resolve_profile(path: Path, registry: EngineRegistry, *, target: str,
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ProfileError(f"cannot read profile {path}: {exc}") from exc
+    return resolve_profile_value(value, registry, target=target, asset_store=asset_store)
+
+
+def resolve_profile_value(value: Any, registry: EngineRegistry, *, target: str,
+                          asset_store: AssetStore | None = None) -> ResolvedProfile:
+    """Resolve already-loaded profile data (for catalog-backed callers)."""
     if not isinstance(value, dict) or value.get("schema_version") != 1:
         raise ProfileError("profile schema_version must be 1")
     profile_id = _required_string(value.get("id"), "profile.id")

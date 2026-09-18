@@ -74,7 +74,7 @@ def test_api_start_and_stop_delegate_to_application(monkeypatch, tmp_path):
     assert stopped.json() == {"session_id": "session-1", "exit_code": 0, "state": "stopped"}
 
 
-def test_api_catalog_is_read_only_and_id_indexed(tmp_path):
+def test_api_catalog_is_read_only_and_id_indexed(tmp_path, monkeypatch):
     config = OperatorConfig(
         tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
         tmp_path / "runtime", tmp_path / "artifacts",
@@ -85,10 +85,23 @@ def test_api_catalog_is_read_only_and_id_indexed(tmp_path):
         "schema_version": 1, "id": "demo", "domain": "lab", "machine": "virt",
         "engine": {"track": "track"},
     }), encoding="utf-8")
+    application = OperatorApplication(config)
     client = TestClient(
-        create_app(OperatorApplication(config), token="test-token", catalog_root=catalog),
+        create_app(application, token="test-token", catalog_root=catalog),
         base_url="http://127.0.0.1",
     )
     headers = {"X-MachineEmu-Token": "test-token"}
     assert client.get("/api/v1/catalog/profiles", headers=headers).json()[0]["id"] == "demo"
     assert client.get("/api/v1/catalog/profiles/demo", headers=headers).json()["machine"] == "virt"
+
+    class Record:
+        session_id = "session-1"
+        manifest = tmp_path / "manifest.json"
+
+    Record.manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(application, "create_catalog_session", lambda *args, **kwargs: Record())
+    created = client.post("/api/v1/catalog/sessions", headers={**headers, "Origin": "http://127.0.0.1"}, json={
+        "profile_id": "demo", "instance_id": "instance-1", "session_id": "session-1",
+    })
+    assert created.status_code == 201
+    assert created.json()["session_id"] == "session-1"

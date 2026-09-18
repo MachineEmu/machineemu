@@ -1,6 +1,48 @@
 {
   "components": {
     "schemas": {
+      "CreateCatalogSessionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "instance_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "profile_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "session_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          }
+        },
+        "required": [
+          "instance_id",
+          "session_id",
+          "profile_id"
+        ],
+        "title": "CreateCatalogSessionRequest",
+        "type": "object"
+      },
       "CreateSessionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -184,6 +226,48 @@
           }
         },
         "summary": "Catalog Profile"
+      }
+    },
+    "/api/v1/catalog/sessions": {
+      "post": {
+        "operationId": "create_catalog_session_api_v1_catalog_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCatalogSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Create Catalog Session Api V1 Catalog Sessions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Catalog Session"
       }
     },
     "/api/v1/health": {

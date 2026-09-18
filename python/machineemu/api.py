@@ -26,6 +26,11 @@ class CreateSessionRequest(SessionRequest):
     target: str = Field(min_length=1, max_length=128)
 
 
+class CreateCatalogSessionRequest(SessionRequest):
+    profile_id: str = Field(min_length=1, max_length=64)
+    target: str | None = Field(default=None, max_length=128)
+
+
 def _loopback_host(host: str) -> bool:
     hostname = host.rsplit(":", 1)[0].strip("[]").lower()
     return hostname in {"localhost", "127.0.0.1", "::1"}
@@ -37,6 +42,8 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
     app = FastAPI(title="MachineEmu", version="0.1.0")
     app.state.token = token or secrets.token_urlsafe(32)
     app.state.catalog = ProfileCatalog(catalog_root) if catalog_root is not None else None
+    if app.state.catalog is not None and application.catalog is None:
+        application.catalog = app.state.catalog
 
     @app.middleware("http")
     async def security(request: Request, call_next):
@@ -79,6 +86,17 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
             return app.state.catalog.get(profile_id)
         except CatalogError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/catalog/sessions", status_code=201)
+    async def create_catalog_session(request: CreateCatalogSessionRequest) -> dict[str, str]:
+        try:
+            record = application.create_catalog_session(
+                request.profile_id, target=request.target,
+                instance_id=request.instance_id, session_id=request.session_id,
+            )
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"session_id": record.session_id, "manifest": str(record.manifest), "state": "created"}
 
     @app.post("/api/v1/sessions/reconcile")
     async def reconcile(request: SessionRequest) -> dict[str, str]:

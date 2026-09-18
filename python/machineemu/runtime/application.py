@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Sequence
 
 from machineemu.assets import AssetStore
+from machineemu.catalog import ProfileCatalog
 from machineemu.engines import EngineRegistry
-from machineemu.profiles import build_launch_plan, resolve_profile
+from machineemu.profiles import build_launch_plan, resolve_profile, resolve_profile_value
 
 from .config import OperatorConfig
 from .state import SessionRecord, SessionStore
@@ -19,12 +20,13 @@ class OperatorApplication:
     """Coordinate validated operations without owning a server or event loop."""
 
     def __init__(self, config: OperatorConfig, *, release_set: Path | None = None,
-                 bundle_root: Path | None = None):
+                 bundle_root: Path | None = None, catalog: ProfileCatalog | None = None):
         self.config = config
         self.store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
         self.assets = AssetStore(config.asset_root)
         self.release_set = release_set
         self.bundle_root = bundle_root
+        self.catalog = catalog
 
     def create_session(self, profile_path: Path, *, target: str, instance_id: str,
                        session_id: str) -> SessionRecord:
@@ -32,6 +34,23 @@ class OperatorApplication:
             raise ValueError("release set and bundle root are required to create a session")
         registry = EngineRegistry.load(self.release_set, self.bundle_root)
         profile = resolve_profile(profile_path, registry, target=target, asset_store=self.assets)
+        plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / session_id)
+        record = self.store.create(instance_id, session_id, profile)
+        self.store.update(record, "created", metadata={"launch_plan": plan.manifest})
+        return record
+
+    def create_catalog_session(self, profile_id: str, *, target: str | None,
+                               instance_id: str, session_id: str) -> SessionRecord:
+        if self.catalog is None:
+            raise ValueError("catalog is not configured")
+        if self.release_set is None or self.bundle_root is None:
+            raise ValueError("release set and bundle root are required to create a session")
+        value = self.catalog.get(profile_id)
+        selected_target = target or value.get("target")
+        if not isinstance(selected_target, str) or not selected_target:
+            raise ValueError("catalog profile has no target; target is required")
+        registry = EngineRegistry.load(self.release_set, self.bundle_root)
+        profile = resolve_profile_value(value, registry, target=selected_target, asset_store=self.assets)
         plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / session_id)
         record = self.store.create(instance_id, session_id, profile)
         self.store.update(record, "created", metadata={"launch_plan": plan.manifest})
