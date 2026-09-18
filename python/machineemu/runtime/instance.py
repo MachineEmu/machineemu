@@ -206,6 +206,54 @@ class InstanceStore:
             raise RuntimeStateError(f"cannot stage snapshot restore {snapshot_id}: {exc}") from exc
         return destination
 
+    def apply_staged_restore(self, record: InstanceRecord, snapshot_id: str,
+                             *, instance_state: str) -> None:
+        """Apply a staged restore only after the caller proves the instance is stopped."""
+        if instance_state != "stopped":
+            raise RuntimeStateError("snapshot restore requires a stopped instance")
+        staged = record.state_dir / "restore-staging" / snapshot_id
+        restore_manifest = staged / "restore.json"
+        snapshot_manifest = record.state_dir / "snapshots" / snapshot_id / "snapshot.json"
+        try:
+            restore = json.loads(restore_manifest.read_text(encoding="utf-8"))
+            snapshot = json.loads(snapshot_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read staged restore {snapshot_id}: {exc}") from exc
+        if restore.get("instance_id") != record.instance_id or restore.get("state") != "staged":
+            raise RuntimeStateError("staged restore identity or state is invalid")
+        files = snapshot.get("files")
+        if not isinstance(files, dict) or not files:
+            raise RuntimeStateError("snapshot contains no state files")
+        backup = Path(tempfile.mkdtemp(prefix=f".restore-backup-{snapshot_id}.", dir=record.state_dir))
+        replaced: list[str] = []
+        try:
+            for name in files:
+                source = staged / name
+                if not self._safe_name(name) or not source.is_file() or source.is_symlink():
+                    raise RuntimeStateError(f"staged state file is unavailable: {name}")
+                live = record.state_dir / name
+                if live.exists():
+                    shutil.copy2(live, backup / name)
+                shutil.copy2(source, live)
+                replaced.append(name)
+            value = json.loads(record.manifest.read_text(encoding="utf-8"))
+            value["state"] = "stopped"
+            value["last_restore"] = {"snapshot_id": snapshot_id, "state": "applied"}
+            self._atomic_json(record.manifest, value)
+        except (OSError, json.JSONDecodeError, RuntimeStateError) as exc:
+            for name in replaced:
+                saved = backup / name
+                live = record.state_dir / name
+                if saved.is_file():
+                    shutil.copy2(saved, live)
+                else:
+                    live.unlink(missing_ok=True)
+            if isinstance(exc, RuntimeStateError):
+                raise
+            raise RuntimeStateError(f"cannot apply staged restore {snapshot_id}: {exc}") from exc
+        finally:
+            shutil.rmtree(backup, ignore_errors=True)
+
     @staticmethod
     def _safe_name(name: object) -> bool:
         return isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name) is not None

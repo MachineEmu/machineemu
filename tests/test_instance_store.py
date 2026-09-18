@@ -82,3 +82,20 @@ def test_instance_store_stages_verified_restore_without_touching_live_state(tmp_
     assert (record.state_dir / "disk.img").read_bytes() == b"disk"
     with pytest.raises(RuntimeStateError, match="already exists"):
         store.stage_snapshot_restore(record, "cold-boot")
+
+
+def test_instance_store_applies_restore_only_when_stopped(tmp_path):
+    profile = _profile(tmp_path)
+    store = InstanceStore(tmp_path / "state")
+    record = store.ensure("instance-1", profile)
+    source = tmp_path / "disk.img"
+    source.write_bytes(b"before")
+    store.import_state_file(record, source, "disk.img")
+    store.snapshot(record, "cold-boot")
+    (record.state_dir / "disk.img").write_bytes(b"after")
+    store.stage_snapshot_restore(record, "cold-boot")
+    with pytest.raises(RuntimeStateError, match="stopped"):
+        store.apply_staged_restore(record, "cold-boot", instance_state="running")
+    store.apply_staged_restore(record, "cold-boot", instance_state="stopped")
+    assert (record.state_dir / "disk.img").read_bytes() == b"before"
+    assert json.loads(record.manifest.read_text())["last_restore"]["state"] == "applied"
