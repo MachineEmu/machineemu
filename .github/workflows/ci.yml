@@ -38,3 +38,22 @@ jobs:
         with:
           name: machineemu-distributions
           path: dist/
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Verify generated API types
+        working-directory: web
+        run: |
+          bun run generate:api-types
+          git diff --exit-code -- src/api-types.d.ts
+      - name: Test and type-check web client
+        working-directory: web
+        run: |
+          bun test
+          bun run typecheck

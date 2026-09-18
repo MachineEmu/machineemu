@@ -66,7 +66,7 @@ export class MachineEmuClient {
     });
   }
 
-  private async request<T>(path: string, init: RequestInit & { body?: unknown } = {}): Promise<T> {
+  private async request<T>(path: string, init: { method?: string; headers?: HeadersInit; body?: unknown } = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("X-MachineEmu-Token", this.token);
     headers.set("Accept", "application/json");
@@ -75,7 +75,11 @@ export class MachineEmuClient {
       headers.set("Content-Type", "application/json");
       body = JSON.stringify(body);
     }
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, { ...init, headers, body: body as BodyInit | null | undefined });
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: init.method,
+      headers,
+      body: body as BodyInit | null | undefined,
+    });
     if (!response.ok) throw new Error(`MachineEmu API request failed: ${response.status}`);
     return (await response.json()) as T;
   }
