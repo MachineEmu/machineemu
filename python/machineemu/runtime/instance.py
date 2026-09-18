@@ -12,6 +12,7 @@ import tempfile
 
 from machineemu.profiles import ResolvedProfile
 
+from .migration import validate_inventory
 from .state import RuntimeStateError
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -95,6 +96,43 @@ class InstanceStore:
             if destination.exists():
                 destination.unlink(missing_ok=True)
             raise RuntimeStateError(f"cannot publish state file {name}: {exc}") from exc
+        return digest, destination
+
+    def import_verified_file(self, record: InstanceRecord, source_root: Path,
+                             inventory: dict[str, object], source_path: str,
+                             name: str) -> tuple[str, Path]:
+        """Import one file only after its complete source tree passes inventory validation."""
+        validation = validate_inventory(source_root, inventory)
+        if not validation.get("valid"):
+            errors = validation.get("errors")
+            detail = errors[0] if isinstance(errors, list) and errors else "inventory validation failed"
+            raise RuntimeStateError(str(detail))
+        root = source_root.resolve()
+        candidate = (root / source_path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeStateError("state source path escapes inventory root") from exc
+        if candidate.is_symlink() or not candidate.is_file():
+            raise RuntimeStateError("state source must be a regular file within inventory root")
+        expected_files = inventory.get("files")
+        expected = next(
+            (item.get("sha256") for item in expected_files
+             if isinstance(item, dict) and item.get("path") == source_path),
+            None,
+        ) if isinstance(expected_files, list) else None
+        if not isinstance(expected, str):
+            raise RuntimeStateError(f"state source is absent from inventory: {source_path}")
+        digest, destination = self.import_state_file(record, candidate, name, expected)
+        try:
+            value = json.loads(record.manifest.read_text(encoding="utf-8"))
+            value["state_files"][name]["source"] = {
+                "path": source_path,
+                "inventory_schema_version": inventory.get("schema_version"),
+            }
+            self._atomic_json(record.manifest, value)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise RuntimeStateError(f"cannot record imported state provenance: {exc}") from exc
         return digest, destination
 
     def record_backing_chain(self, record: InstanceRecord, name: str,

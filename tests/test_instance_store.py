@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from machineemu.runtime import InstanceStore, RuntimeStateError
+from machineemu.runtime import InstanceStore, RuntimeStateError, inventory_json
 from tests.test_runtime_state import _profile
 
 
@@ -33,6 +33,38 @@ def test_instance_store_imports_state_with_digest_provenance(tmp_path):
     assert value["state_files"]["disk.qcow2"]["sha256"] == digest
     with pytest.raises(RuntimeStateError, match="already exists"):
         store.import_state_file(record, source, "disk.qcow2")
+
+
+def test_instance_store_imports_only_from_unchanged_inventory(tmp_path):
+    profile = _profile(tmp_path)
+    store = InstanceStore(tmp_path / "state")
+    record = store.ensure("instance-1", profile)
+    source_root = tmp_path / "legacy"
+    source_root.mkdir()
+    source = source_root / "disk.qcow2"
+    source.write_bytes(b"legacy disk")
+    inventory = inventory_json(source_root)
+    digest, destination = store.import_verified_file(
+        record, source_root, inventory, "disk.qcow2", "disk.qcow2"
+    )
+    value = json.loads(record.manifest.read_text())
+    assert destination.read_bytes() == b"legacy disk"
+    assert value["state_files"]["disk.qcow2"]["sha256"] == digest
+    assert value["state_files"]["disk.qcow2"]["source"]["path"] == "disk.qcow2"
+
+
+def test_instance_store_rejects_changed_verified_inventory(tmp_path):
+    profile = _profile(tmp_path)
+    store = InstanceStore(tmp_path / "state")
+    record = store.ensure("instance-1", profile)
+    source_root = tmp_path / "legacy"
+    source_root.mkdir()
+    source = source_root / "disk.qcow2"
+    source.write_bytes(b"legacy disk")
+    inventory = inventory_json(source_root)
+    source.write_bytes(b"changed")
+    with pytest.raises(RuntimeStateError, match="differ"):
+        store.import_verified_file(record, source_root, inventory, "disk.qcow2", "disk.qcow2")
 
 
 def test_instance_store_records_only_imported_backing_chain(tmp_path):
