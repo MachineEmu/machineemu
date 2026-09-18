@@ -49,6 +49,12 @@ class OperatorApplication:
         if self.release_set is None or self.bundle_root is None:
             raise ValueError("release set and bundle root are required to create a session")
         value = self.catalog.get(profile_id)
+        external_assets = value.get("external_assets", [])
+        if isinstance(external_assets, list) and any(
+            isinstance(item, dict) and item.get("required") is True
+            for item in external_assets
+        ) and not value.get("assets"):
+            raise ValueError("catalog profile requires imported assets before launch")
         selected_target = target or value.get("target")
         if not isinstance(selected_target, str) or not selected_target:
             raise ValueError("catalog profile has no target; target is required")
