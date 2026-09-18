@@ -11,7 +11,7 @@ import sys
 from machineemu.assets import AssetError, AssetStore
 from machineemu.engines import EngineRegistry
 from machineemu.profiles import ProfileError, resolve_profile
-from machineemu.runtime import OperatorApplication, OperatorConfig, inventory_json
+from machineemu.runtime import OperatorApplication, OperatorConfig, inventory_json, validate_inventory
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -64,6 +64,9 @@ def _parser() -> argparse.ArgumentParser:
 
     inventoried = commands.add_parser("state-inventory", help="hash a state tree without modifying it")
     inventoried.add_argument("--source", type=Path, required=True)
+    validated = commands.add_parser("state-validate", help="validate a state tree against an inventory")
+    validated.add_argument("--source", type=Path, required=True)
+    validated.add_argument("--inventory", type=Path, required=True)
     return parser
 
 
@@ -77,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "state-inventory":
             print(json.dumps(inventory_json(args.source), indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "state-validate":
+            expected = json.loads(args.inventory.read_text(encoding="utf-8"))
+            print(json.dumps(validate_inventory(args.source, expected), indent=2, sort_keys=True))
             return 0
 
         if args.command == "session-create":

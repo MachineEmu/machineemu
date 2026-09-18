@@ -47,3 +47,25 @@ def inventory_json(root: Path) -> dict[str, object]:
         "files": [asdict(entry) for entry in entries],
         "file_count": len(entries),
     }
+
+
+def validate_inventory(root: Path, expected: dict[str, object]) -> dict[str, object]:
+    """Compare a source tree with a captured inventory without modifying either."""
+    errors: list[str] = []
+    try:
+        actual = inventory_json(root)
+    except RuntimeStateError as exc:
+        return {"schema_version": 1, "valid": False, "errors": [str(exc)]}
+    if expected.get("schema_version") != 1:
+        errors.append("inventory schema_version must be 1")
+    expected_files = expected.get("files")
+    if not isinstance(expected_files, list):
+        errors.append("inventory files must be a list")
+    elif actual["files"] != expected_files:
+        errors.append("source files or digests differ from captured inventory")
+    return {
+        "schema_version": 1,
+        "valid": not errors,
+        "errors": errors,
+        "file_count": actual["file_count"],
+    }
