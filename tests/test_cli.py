@@ -123,7 +123,7 @@ def test_session_start_uses_recorded_plan(monkeypatch, tmp_path, capsys):
         captured["qmp_socket"] = qmp_socket
         return SimpleNamespace(process=SimpleNamespace(pid=4242))
 
-    monkeypatch.setattr("machineemu.cli.SessionSupervisor.start", fake_start)
+    monkeypatch.setattr("machineemu.cli.OperatorApplication.start_session", fake_start)
     assert main([
         "session-start", "--operator-config", str(config),
         "--instance-id", "instance-1", "--session-id", "session-1",

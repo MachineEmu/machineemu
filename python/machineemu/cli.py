@@ -10,8 +10,8 @@ import sys
 
 from machineemu.assets import AssetError, AssetStore
 from machineemu.engines import EngineRegistry
-from machineemu.profiles import ProfileError, build_launch_plan, resolve_profile
-from machineemu.runtime import OperatorConfig, SessionStore, SessionSupervisor
+from machineemu.profiles import ProfileError, resolve_profile
+from machineemu.runtime import OperatorApplication, OperatorConfig
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -74,19 +74,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "session-create":
             config = OperatorConfig.load(args.operator_config)
-            registry = EngineRegistry.load(args.release_set, args.bundle_root)
-            profile = resolve_profile(
-                args.profile, registry, target=args.target,
-                asset_store=AssetStore(config.asset_root),
+            app = OperatorApplication(config, release_set=args.release_set, bundle_root=args.bundle_root)
+            record = app.create_session(
+                args.profile, target=args.target,
+                instance_id=args.instance_id, session_id=args.session_id,
             )
-            store = SessionStore(
-                config.runtime_root, config.state_root, config.artifact_root,
-            )
-            plan = build_launch_plan(
-                profile, config.runtime_root / "sessions" / args.session_id,
-            )
-            record = store.create(args.instance_id, args.session_id, profile)
-            store.update(record, "created", metadata={"launch_plan": plan.manifest})
             print(json.dumps({
                 "session_id": record.session_id,
                 "instance_id": record.instance_id,
@@ -99,9 +91,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "session-inspect":
             config = OperatorConfig.load(args.operator_config)
-            record = SessionStore(
-                config.runtime_root, config.state_root, config.artifact_root,
-            ).open(args.instance_id, args.session_id)
+            record = OperatorApplication(config).open_session(args.instance_id, args.session_id)
             print(record.manifest.read_text(encoding="utf-8"), end="")
             return 0
 
@@ -110,41 +100,35 @@ def main(argv: list[str] | None = None) -> int:
             if command and command[0] == "--":
                 command = command[1:]
             config = OperatorConfig.load(args.operator_config)
-            store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
-            record = store.open(args.instance_id, args.session_id)
-            try:
-                session_manifest = json.loads(record.manifest.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ValueError(f"cannot read session launch plan: {exc}") from exc
-            launch_plan = session_manifest.get("launch_plan")
+            app = OperatorApplication(config)
+            record = app.open_session(args.instance_id, args.session_id)
+            launch_plan = None
             if not command:
-                if not isinstance(launch_plan, dict) or not isinstance(launch_plan.get("argv"), list):
-                    raise ValueError("session manifest has no launch plan; provide a command after --")
-                command = launch_plan["argv"]
+                command, recorded_qmp = app.recorded_plan(record)
+            else:
+                recorded_qmp = None
             qmp_socket = args.qmp_socket
-            if qmp_socket is None and isinstance(launch_plan, dict):
-                raw_socket = launch_plan.get("qmp_socket")
-                if isinstance(raw_socket, str) and raw_socket:
-                    qmp_socket = Path(raw_socket)
+            if qmp_socket is None:
+                qmp_socket = recorded_qmp
             if qmp_socket is None:
                 raise ValueError("session-start requires --qmp-socket when no launch plan endpoint exists")
-            running = asyncio.run(SessionSupervisor(store).start(record, command, qmp_socket))
+            running = asyncio.run(app.start_session(record, command, qmp_socket))
             print(json.dumps({"session_id": record.session_id, "pid": running.process.pid}, sort_keys=True))
             return 0
 
         if args.command == "session-reconcile":
             config = OperatorConfig.load(args.operator_config)
-            store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
-            record = store.open(args.instance_id, args.session_id)
-            state = SessionSupervisor(store).recover(record)
+            app = OperatorApplication(config)
+            record = app.open_session(args.instance_id, args.session_id)
+            state = app.reconcile_session(record)
             print(json.dumps({"session_id": record.session_id, "state": state}, sort_keys=True))
             return 0
 
         if args.command == "session-stop":
             config = OperatorConfig.load(args.operator_config)
-            store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
-            record = store.open(args.instance_id, args.session_id)
-            exit_code = SessionSupervisor(store).stop_recovered(record, args.timeout)
+            app = OperatorApplication(config)
+            record = app.open_session(args.instance_id, args.session_id)
+            exit_code = app.stop_session(record, args.timeout)
             print(json.dumps({"session_id": record.session_id, "exit_code": exit_code}, sort_keys=True))
             return 0
 
