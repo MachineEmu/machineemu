@@ -13,6 +13,7 @@ from machineemu.profiles import build_launch_plan, resolve_profile, resolve_prof
 
 from .config import OperatorConfig
 from .instance import InstanceStore
+from .migration import inventory_json
 from .state import SessionRecord, SessionStore
 from .supervisor import RunningSession, SessionSupervisor
 
@@ -68,6 +69,11 @@ class OperatorApplication:
 
     def open_session(self, instance_id: str, session_id: str) -> SessionRecord:
         return self.store.open(instance_id, session_id)
+
+    def inventory_instance(self, instance_id: str) -> dict[str, object]:
+        """Return a read-only inventory for an existing durable instance."""
+        record = self.instances.open(instance_id)
+        return inventory_json(record.state_dir)
 
     async def start_session(self, record: SessionRecord, command: Sequence[str], qmp_socket: Path) -> RunningSession:
         return await SessionSupervisor(self.store).start(record, command, qmp_socket)

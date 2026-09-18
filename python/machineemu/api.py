@@ -126,6 +126,14 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/api/v1/instances/{instance_id}/state/inventory")
+    async def instance_state_inventory(instance_id: str) -> dict:
+        """Hash managed instance state without modifying it."""
+        try:
+            return application.inventory_instance(instance_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/api/v1/sessions/{instance_id}/{session_id}/start")
     async def start(instance_id: str, session_id: str) -> dict[str, int | str]:
         try:

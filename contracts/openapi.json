@@ -292,6 +292,48 @@
         "summary": "Health"
       }
     },
+    "/api/v1/instances/{instance_id}/state/inventory": {
+      "get": {
+        "description": "Hash managed instance state without modifying it.",
+        "operationId": "instance_state_inventory_api_v1_instances__instance_id__state_inventory_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Instance State Inventory Api V1 Instances  Instance Id  State Inventory Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Instance State Inventory"
+      }
+    },
     "/api/v1/sessions": {
       "post": {
         "operationId": "create_session_api_v1_sessions_post",

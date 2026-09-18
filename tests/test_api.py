@@ -45,6 +45,27 @@ def test_api_requires_same_origin_for_mutations(tmp_path):
     assert response.status_code == 403
 
 
+def test_api_instance_inventory_is_read_only(tmp_path):
+    config = OperatorConfig(
+        tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
+        tmp_path / "runtime", tmp_path / "artifacts",
+    )
+    state = config.state_root / "instances/instance-1"
+    state.mkdir(parents=True)
+    (state / "instance.json").write_text(json.dumps({
+        "schema_version": 1, "instance_id": "instance-1", "profile_id": "demo",
+    }), encoding="utf-8")
+    (state / "disk.img").write_bytes(b"disk")
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"),
+                        base_url="http://127.0.0.1")
+    response = client.get("/api/v1/instances/instance-1/state/inventory",
+                          headers={"X-MachineEmu-Token": "test-token"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_count"] == 2
+    assert [item["path"] for item in payload["files"]] == ["disk.img", "instance.json"]
+
+
 def test_api_start_and_stop_delegate_to_application(monkeypatch, tmp_path):
     config = OperatorConfig(
         tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
