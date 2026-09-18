@@ -16,8 +16,15 @@ machineemu --help
 
 Before publishing a release, verify that `release-set.json` names the exact
 engine manifest and `build_digest` that operators will install. The engine
-manifest must have `dirty_source: false`, and the bundle executable must exist
-for every advertised target.
+manifest must have `dirty_source: false`, the release entry must set
+`require_executable_hashes: true`, and the bundle executable must exist with a
+matching SHA-256 digest for every advertised target. Run both checks from the
+two repositories:
+
+```sh
+python scripts/check_release_set.py release-set.json
+python ../qemu/scripts/validate_engine_bundle.py /path/to/engine-build.json
+```
 
 The package does not bundle QEMU binaries. Install the engine bundle separately,
 then use `profile-check` or `session-create` with the matching release set.
