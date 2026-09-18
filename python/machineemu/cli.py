@@ -50,6 +50,11 @@ def _parser() -> argparse.ArgumentParser:
     started.add_argument("--session-id", required=True)
     started.add_argument("--qmp-socket", type=Path, required=True)
     started.add_argument("exec_command", nargs=argparse.REMAINDER, help="command to execute after --")
+
+    reconciled = commands.add_parser("session-reconcile", help="reconcile a persisted session PID")
+    reconciled.add_argument("--operator-config", type=Path, required=True)
+    reconciled.add_argument("--instance-id", required=True)
+    reconciled.add_argument("--session-id", required=True)
     return parser
 
 
@@ -100,6 +105,14 @@ def main(argv: list[str] | None = None) -> int:
             record = store.open(args.instance_id, args.session_id)
             running = asyncio.run(SessionSupervisor(store).start(record, command, args.qmp_socket))
             print(json.dumps({"session_id": record.session_id, "pid": running.process.pid}, sort_keys=True))
+            return 0
+
+        if args.command == "session-reconcile":
+            config = OperatorConfig.load(args.operator_config)
+            store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
+            record = store.open(args.instance_id, args.session_id)
+            state = SessionSupervisor(store).recover(record)
+            print(json.dumps({"session_id": record.session_id, "state": state}, sort_keys=True))
             return 0
 
         asset_store = AssetStore(args.asset_root) if args.asset_root else None

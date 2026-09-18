@@ -93,3 +93,29 @@ def test_session_start_requires_explicit_command(tmp_path, capsys):
         "--qmp-socket", str(tmp_path / "qmp.sock"),
     ]) == 2
     assert "requires a command" in capsys.readouterr().err
+
+
+def test_session_reconcile_marks_missing_pid_failed(tmp_path, capsys):
+    config = tmp_path / "operator.json"
+    config.write_text(json.dumps({"schema_version": 1, "roots": {
+        "engine_root": "engines", "asset_root": "assets", "state_root": "state",
+        "runtime_root": "runtime", "artifact_root": "artifacts",
+    }}), encoding="utf-8")
+    runtime = tmp_path / "runtime/sessions/session-1"
+    state = tmp_path / "state/instances/instance-1"
+    artifact = tmp_path / "artifacts/sessions/session-1"
+    for path in (runtime, state, artifact):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "state": "running",
+    }), encoding="utf-8")
+
+    assert main([
+        "session-reconcile", "--operator-config", str(config),
+        "--instance-id", "instance-1", "--session-id", "session-1",
+    ]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output == {"session_id": "session-1", "state": "failed"}
+    manifest = json.loads((runtime / "manifest.json").read_text())
+    assert manifest["failure"] == "missing process PID"
