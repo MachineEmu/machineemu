@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "release": "unreleased",
+  "host_architectures": ["x86_64-linux"],
+  "engines": {},
+  "profiles": {},
+  "status": "bootstrap"
+}
