@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+from pathlib import Path
 import secrets
 
 from fastapi import FastAPI, HTTPException, Request
@@ -17,6 +18,11 @@ class SessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     instance_id: str = Field(min_length=1, max_length=64)
     session_id: str = Field(min_length=1, max_length=64)
+
+
+class CreateSessionRequest(SessionRequest):
+    profile_path: str = Field(min_length=1, max_length=4096)
+    target: str = Field(min_length=1, max_length=128)
 
 
 def _loopback_host(host: str) -> bool:
@@ -62,6 +68,17 @@ def create_app(application: OperatorApplication, *, token: str | None = None) ->
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"session_id": record.session_id, "state": state}
 
+    @app.post("/api/v1/sessions", status_code=201)
+    async def create_session(request: CreateSessionRequest) -> dict[str, str]:
+        try:
+            record = application.create_session(
+                Path(request.profile_path), target=request.target,
+                instance_id=request.instance_id, session_id=request.session_id,
+            )
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"session_id": record.session_id, "manifest": str(record.manifest), "state": "created"}
+
     @app.get("/api/v1/sessions/{instance_id}/{session_id}")
     async def inspect(instance_id: str, session_id: str) -> dict:
         try:
@@ -69,5 +86,23 @@ def create_app(application: OperatorApplication, *, token: str | None = None) ->
             return json.loads(record.manifest.read_text(encoding="utf-8"))
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/sessions/{instance_id}/{session_id}/start")
+    async def start(instance_id: str, session_id: str) -> dict[str, int | str]:
+        try:
+            record = application.open_session(instance_id, session_id)
+            running = await application.start_recorded_session(record)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"session_id": record.session_id, "pid": running.process.pid, "state": "running"}
+
+    @app.post("/api/v1/sessions/{instance_id}/{session_id}/stop")
+    async def stop(instance_id: str, session_id: str) -> dict[str, int | str]:
+        try:
+            record = application.open_session(instance_id, session_id)
+            exit_code = application.stop_session(record)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"session_id": record.session_id, "exit_code": exit_code, "state": "stopped"}
 
     return app

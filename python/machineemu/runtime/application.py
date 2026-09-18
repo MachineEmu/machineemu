@@ -43,6 +43,10 @@ class OperatorApplication:
     async def start_session(self, record: SessionRecord, command: Sequence[str], qmp_socket: Path) -> RunningSession:
         return await SessionSupervisor(self.store).start(record, command, qmp_socket)
 
+    async def start_recorded_session(self, record: SessionRecord) -> RunningSession:
+        command, qmp_socket = self.recorded_plan(record)
+        return await self.start_session(record, command, qmp_socket)
+
     def reconcile_session(self, record: SessionRecord) -> str:
         return SessionSupervisor(self.store).recover(record)
 
