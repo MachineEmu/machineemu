@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "udm-pro-lab",
+  "domain": "device-research",
+  "engine": {
+    "track": "unifi-10.2"
+  },
+  "machine": "udm-pro",
+  "target": "aarch64-softmmu",
+  "resources": {
+    "memory": "2GiB",
+    "vcpus": 4,
+    "accelerator": "tcg"
+  },
+  "external_assets": [
+    {
+      "id": "udm-pro-prepared-bundle",
+      "kind": "prepared-firmware-bundle",
+      "required": true,
+      "note": "Import and verify the operator-prepared kernel, initramfs, boot image, and SPI image before launch."
+    }
+  ],
+  "devices": {
+    "lcd": true,
+    "bluetooth": true
+  },
+  "network": {
+    "mode": "bridge",
+    "operator_approval_required": true
+  },
+  "state": {
+    "disk": "ephemeral-copy",
+    "identity": "per-instance",
+    "runtime": "per-session"
+  },
+  "policy": {
+    "host_usb": "deny",
+    "clipboard": "deny",
+    "artifact_retention": "required"
+  }
+}
