@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from machineemu.assets import AssetError, AssetStore
 from machineemu.engines import EngineManifest, EngineRegistry, EngineRegistryError
 
 
@@ -22,6 +23,7 @@ class ResolvedProfile:
     configuration: dict[str, Any]
     engine: EngineManifest
     executable: Path
+    assets: dict[str, Path]
 
 
 def _required_string(value: Any, name: str) -> str:
@@ -30,7 +32,8 @@ def _required_string(value: Any, name: str) -> str:
     return value
 
 
-def resolve_profile(path: Path, registry: EngineRegistry, *, target: str) -> ResolvedProfile:
+def resolve_profile(path: Path, registry: EngineRegistry, *, target: str,
+                    asset_store: AssetStore | None = None) -> ResolvedProfile:
     """Resolve a profile without creating state or starting a process."""
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -53,8 +56,17 @@ def resolve_profile(path: Path, registry: EngineRegistry, *, target: str) -> Res
     for name, digest in assets.items():
         if not isinstance(name, str) or not name or not isinstance(digest, str) or not digest.startswith("sha256:"):
             raise ProfileError(f"profile.assets.{name} must be a sha256 reference")
+    resolved_assets: dict[str, Path] = {}
+    if assets and asset_store is None:
+        raise ProfileError("profile assets require an asset store")
+    if asset_store is not None:
+        for name, reference in assets.items():
+            try:
+                resolved_assets[name] = asset_store.resolve(reference)
+            except AssetError as exc:
+                raise ProfileError(f"asset {name!r} is unavailable: {exc}") from exc
     try:
         manifest, executable = registry.resolve(track, target)
     except EngineRegistryError as exc:
         raise ProfileError(str(exc)) from exc
-    return ResolvedProfile(profile_id, machine, target, value, manifest, executable)
+    return ResolvedProfile(profile_id, machine, target, value, manifest, executable, resolved_assets)

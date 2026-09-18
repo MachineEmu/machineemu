@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from machineemu.assets import AssetStore
 from machineemu.engines import EngineRegistry
 from machineemu.profiles import ProfileError, resolve_profile
 
@@ -36,7 +37,6 @@ def test_profile_resolves_engine_without_starting_process(tmp_path):
         "engine": {"track": "track"},
         "machine": "virt",
         "resources": {"memory": "1GiB", "vcpus": 2},
-        "assets": {"disk": "sha256:" + "d" * 64},
     }), encoding="utf-8")
     resolved = resolve_profile(profile, _registry(tmp_path), target="aarch64-softmmu")
     assert resolved.profile_id == "debian-aarch64"
@@ -54,3 +54,21 @@ def test_profile_rejects_host_path_asset(tmp_path):
     }), encoding="utf-8")
     with pytest.raises(ProfileError, match="sha256"):
         resolve_profile(profile, _registry(tmp_path), target="aarch64-softmmu")
+
+
+def test_profile_resolves_content_addressed_assets(tmp_path):
+    source = tmp_path / "disk.qcow2"
+    source.write_bytes(b"disk")
+    store = AssetStore(tmp_path / "assets")
+    reference, stored = store.import_file(source)
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "schema_version": 1,
+        "id": "asset-backed",
+        "engine": {"track": "track"},
+        "machine": "virt",
+        "assets": {"disk": reference},
+    }), encoding="utf-8")
+
+    resolved = resolve_profile(profile, _registry(tmp_path), target="aarch64-softmmu", asset_store=store)
+    assert resolved.assets == {"disk": stored}
