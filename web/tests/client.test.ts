@@ -39,4 +39,22 @@ describe("MachineEmuClient", () => {
     expect(calls[0].headers.get("Content-Type")).toBe("application/json");
     expect(await calls[0].json()).toEqual({ instance_id: "instance", session_id: "session" });
   });
+
+  it("uses catalog IDs for profile selection and session creation", async () => {
+    const calls: Request[] = [];
+    const client = new MachineEmuClient({
+      baseUrl: "http://127.0.0.1",
+      token: "token",
+      fetchImpl: async (input, init) => {
+        calls.push(new Request(input, init));
+        return new Response(JSON.stringify({ id: "demo", machine: "virt" }), { status: 200 });
+      },
+    });
+
+    await client.getProfile("demo/lab");
+    await client.createCatalogSession({ profile_id: "demo", instance_id: "instance", session_id: "session" });
+    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/catalog/profiles/demo%2Flab");
+    expect(calls[1].url).toBe("http://127.0.0.1/api/v1/catalog/sessions");
+    expect(await calls[1].json()).toEqual({ profile_id: "demo", instance_id: "instance", session_id: "session" });
+  });
 });

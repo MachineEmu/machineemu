@@ -8,6 +8,9 @@ export type SessionManifest = paths["/api/v1/sessions/{instance_id}/{session_id}
 export type ReconcileResponse = paths["/api/v1/sessions/reconcile"]["post"]["responses"][200]["content"]["application/json"];
 export type StartResponse = paths["/api/v1/sessions/{instance_id}/{session_id}/start"]["post"]["responses"][200]["content"]["application/json"];
 export type StopResponse = paths["/api/v1/sessions/{instance_id}/{session_id}/stop"]["post"]["responses"][200]["content"]["application/json"];
+export type CatalogProfile = paths["/api/v1/catalog/profiles"]["get"]["responses"][200]["content"]["application/json"][number];
+export type CatalogSessionRequest = paths["/api/v1/catalog/sessions"]["post"]["requestBody"]["content"]["application/json"];
+export type CatalogSessionResponse = paths["/api/v1/catalog/sessions"]["post"]["responses"][201]["content"]["application/json"];
 
 
 export interface MachineEmuClientOptions {
@@ -29,6 +32,18 @@ export class MachineEmuClient {
 
   async health(): Promise<HealthResponse> {
     return this.request("/api/v1/health");
+  }
+
+  async listProfiles(): Promise<CatalogProfile[]> {
+    return this.request("/api/v1/catalog/profiles");
+  }
+
+  async getProfile(profileId: string): Promise<CatalogProfile> {
+    return this.request(`/api/v1/catalog/profiles/${encodeURIComponent(profileId)}`);
+  }
+
+  async createCatalogSession(request: CatalogSessionRequest): Promise<CatalogSessionResponse> {
+    return this.request("/api/v1/catalog/sessions", { method: "POST", body: request });
   }
 
   async inspectSession(instanceId: string, sessionId: string): Promise<SessionManifest> {
