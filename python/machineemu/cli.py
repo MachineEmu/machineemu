@@ -10,6 +10,7 @@ import sys
 from machineemu.assets import AssetError, AssetStore
 from machineemu.engines import EngineRegistry
 from machineemu.profiles import ProfileError, resolve_profile
+from machineemu.runtime import OperatorConfig, SessionStore
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,6 +28,15 @@ def _parser() -> argparse.ArgumentParser:
     checked.add_argument("--profile", type=Path, required=True)
     checked.add_argument("--target", required=True)
     checked.add_argument("--asset-root", type=Path)
+
+    created = commands.add_parser("session-create", help="create isolated state for a validated profile")
+    created.add_argument("--operator-config", type=Path, required=True)
+    created.add_argument("--release-set", type=Path, required=True)
+    created.add_argument("--bundle-root", type=Path, required=True)
+    created.add_argument("--profile", type=Path, required=True)
+    created.add_argument("--target", required=True)
+    created.add_argument("--instance-id", required=True)
+    created.add_argument("--session-id", required=True)
     return parser
 
 
@@ -36,6 +46,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "asset-import":
             reference, path = AssetStore(args.asset_root).import_file(args.source, args.expected)
             print(json.dumps({"reference": reference, "path": str(path)}, sort_keys=True))
+            return 0
+
+        if args.command == "session-create":
+            config = OperatorConfig.load(args.operator_config)
+            registry = EngineRegistry.load(args.release_set, args.bundle_root)
+            profile = resolve_profile(
+                args.profile, registry, target=args.target,
+                asset_store=AssetStore(config.asset_root),
+            )
+            record = SessionStore(
+                config.runtime_root, config.state_root, config.artifact_root,
+            ).create(args.instance_id, args.session_id, profile)
+            print(json.dumps({
+                "session_id": record.session_id,
+                "instance_id": record.instance_id,
+                "manifest": str(record.manifest),
+                "runtime_dir": str(record.runtime_dir),
+                "state_dir": str(record.state_dir),
+                "artifact_dir": str(record.artifact_dir),
+            }, sort_keys=True))
             return 0
 
         asset_store = AssetStore(args.asset_root) if args.asset_root else None
