@@ -17,6 +17,7 @@ bun install
 bun run generate:api-types
 bun run typecheck
 bun test
+bun run build
 ```
 
 The initial client intentionally covers health, inspection, reconciliation,
