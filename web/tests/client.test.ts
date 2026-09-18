@@ -24,6 +24,21 @@ describe("MachineEmuClient", () => {
     expect(calls[0].headers.get("X-MachineEmu-Token")).toBe("token");
   });
 
+  it("requests a read-only instance state inventory", async () => {
+    const calls: Request[] = [];
+    const client = new MachineEmuClient({
+      baseUrl: "http://127.0.0.1", token: "token",
+      fetchImpl: async (input, init) => {
+        calls.push(new Request(input, init));
+        return new Response(JSON.stringify({ schema_version: 1, files: [], file_count: 0 }), { status: 200 });
+      },
+    });
+    const result = await client.inventoryInstanceState("instance/one");
+    expect(result.file_count).toBe(0);
+    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/instances/instance%2Fone/state/inventory");
+    expect(calls[0].method).toBe("GET");
+  });
+
   it("sends same-origin mutation bodies as JSON", async () => {
     const calls: Request[] = [];
     const client = new MachineEmuClient({
