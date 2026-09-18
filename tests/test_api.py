@@ -72,3 +72,23 @@ def test_api_start_and_stop_delegate_to_application(monkeypatch, tmp_path):
     assert started.json() == {"session_id": "session-1", "pid": 1234, "state": "running"}
     stopped = client.post("/api/v1/sessions/instance-1/session-1/stop", headers=headers)
     assert stopped.json() == {"session_id": "session-1", "exit_code": 0, "state": "stopped"}
+
+
+def test_api_catalog_is_read_only_and_id_indexed(tmp_path):
+    config = OperatorConfig(
+        tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
+        tmp_path / "runtime", tmp_path / "artifacts",
+    )
+    catalog = tmp_path / "catalog"
+    catalog.mkdir()
+    (catalog / "demo.json").write_text(json.dumps({
+        "schema_version": 1, "id": "demo", "domain": "lab", "machine": "virt",
+        "engine": {"track": "track"},
+    }), encoding="utf-8")
+    client = TestClient(
+        create_app(OperatorApplication(config), token="test-token", catalog_root=catalog),
+        base_url="http://127.0.0.1",
+    )
+    headers = {"X-MachineEmu-Token": "test-token"}
+    assert client.get("/api/v1/catalog/profiles", headers=headers).json()[0]["id"] == "demo"
+    assert client.get("/api/v1/catalog/profiles/demo", headers=headers).json()["machine"] == "virt"
