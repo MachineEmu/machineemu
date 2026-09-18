@@ -97,6 +97,30 @@ class InstanceStore:
             raise RuntimeStateError(f"cannot publish state file {name}: {exc}") from exc
         return digest, destination
 
+    def record_backing_chain(self, record: InstanceRecord, name: str,
+                             backing_chain: list[str]) -> None:
+        """Record a validated backing chain using only imported state files."""
+        if not self._safe_name(name) or not isinstance(backing_chain, list):
+            raise RuntimeStateError("state backing-chain input is invalid")
+        if name in backing_chain or len(set(backing_chain)) != len(backing_chain):
+            raise RuntimeStateError("state backing chain contains a cycle or duplicate")
+        try:
+            value = json.loads(record.manifest.read_text(encoding="utf-8"))
+            files = value.get("state_files", {})
+            if name not in files:
+                raise RuntimeStateError(f"state file is not imported: {name}")
+            for parent in backing_chain:
+                if not self._safe_name(parent) or parent not in files:
+                    raise RuntimeStateError(f"backing state file is not imported: {parent}")
+            files[name]["backing_chain"] = list(backing_chain)
+            self._atomic_json(record.manifest, value)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read instance manifest {record.manifest}: {exc}") from exc
+
+    @staticmethod
+    def _safe_name(name: object) -> bool:
+        return isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name) is not None
+
     @staticmethod
     def _atomic_json(path: Path, value: dict) -> None:
         try:

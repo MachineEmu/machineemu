@@ -33,3 +33,22 @@ def test_instance_store_imports_state_with_digest_provenance(tmp_path):
     assert value["state_files"]["disk.qcow2"]["sha256"] == digest
     with pytest.raises(RuntimeStateError, match="already exists"):
         store.import_state_file(record, source, "disk.qcow2")
+
+
+def test_instance_store_records_only_imported_backing_chain(tmp_path):
+    profile = _profile(tmp_path)
+    store = InstanceStore(tmp_path / "state")
+    record = store.ensure("instance-1", profile)
+    base = tmp_path / "base.img"
+    overlay = tmp_path / "overlay.img"
+    base.write_bytes(b"base")
+    overlay.write_bytes(b"overlay")
+    store.import_state_file(record, base, "base.img")
+    store.import_state_file(record, overlay, "overlay.img")
+    store.record_backing_chain(record, "overlay.img", ["base.img"])
+    value = json.loads(record.manifest.read_text())
+    assert value["state_files"]["overlay.img"]["backing_chain"] == ["base.img"]
+    with pytest.raises(RuntimeStateError, match="not imported"):
+        store.record_backing_chain(record, "overlay.img", ["missing.img"])
+    with pytest.raises(RuntimeStateError, match="cycle"):
+        store.record_backing_chain(record, "overlay.img", ["base.img", "base.img"])
