@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 import sys
@@ -10,7 +11,7 @@ import sys
 from machineemu.assets import AssetError, AssetStore
 from machineemu.engines import EngineRegistry
 from machineemu.profiles import ProfileError, resolve_profile
-from machineemu.runtime import OperatorConfig, SessionStore
+from machineemu.runtime import OperatorConfig, SessionStore, SessionSupervisor
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -42,6 +43,13 @@ def _parser() -> argparse.ArgumentParser:
     inspected.add_argument("--operator-config", type=Path, required=True)
     inspected.add_argument("--instance-id", required=True)
     inspected.add_argument("--session-id", required=True)
+
+    started = commands.add_parser("session-start", help="start a session command and attach QMP")
+    started.add_argument("--operator-config", type=Path, required=True)
+    started.add_argument("--instance-id", required=True)
+    started.add_argument("--session-id", required=True)
+    started.add_argument("--qmp-socket", type=Path, required=True)
+    started.add_argument("exec_command", nargs=argparse.REMAINDER, help="command to execute after --")
     return parser
 
 
@@ -79,6 +87,19 @@ def main(argv: list[str] | None = None) -> int:
                 config.runtime_root, config.state_root, config.artifact_root,
             ).open(args.instance_id, args.session_id)
             print(record.manifest.read_text(encoding="utf-8"), end="")
+            return 0
+
+        if args.command == "session-start":
+            command = list(args.exec_command)
+            if command and command[0] == "--":
+                command = command[1:]
+            if not command:
+                raise ValueError("session-start requires a command after --")
+            config = OperatorConfig.load(args.operator_config)
+            store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
+            record = store.open(args.instance_id, args.session_id)
+            running = asyncio.run(SessionSupervisor(store).start(record, command, args.qmp_socket))
+            print(json.dumps({"session_id": record.session_id, "pid": running.process.pid}, sort_keys=True))
             return 0
 
         asset_store = AssetStore(args.asset_root) if args.asset_root else None

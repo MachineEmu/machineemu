@@ -79,3 +79,17 @@ def test_session_create_cli_writes_manifest(tmp_path, capsys):
     ]) == 0
     inspected = json.loads(capsys.readouterr().out)
     assert inspected["session_id"] == "session-1"
+
+
+def test_session_start_requires_explicit_command(tmp_path, capsys):
+    config = tmp_path / "operator.json"
+    config.write_text(json.dumps({"schema_version": 1, "roots": {
+        "engine_root": "engines", "asset_root": "assets", "state_root": "state",
+        "runtime_root": "runtime", "artifact_root": "artifacts",
+    }}), encoding="utf-8")
+    assert main([
+        "session-start", "--operator-config", str(config),
+        "--instance-id", "instance-1", "--session-id", "session-1",
+        "--qmp-socket", str(tmp_path / "qmp.sock"),
+    ]) == 2
+    assert "requires a command" in capsys.readouterr().err
