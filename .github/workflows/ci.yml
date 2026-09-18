@@ -20,8 +20,7 @@ jobs:
         run: uv venv --python ${{ matrix.python-version }} .venv
       - name: Install test dependencies and package
         run: |
-          uv pip install --python .venv/bin/python pytest
-          uv pip install --python .venv/bin/python --no-deps .
+          uv pip install --python .venv/bin/python '.[api,test]'
       - name: Test
         run: .venv/bin/python -m pytest -q
 
