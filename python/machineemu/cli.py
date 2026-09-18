@@ -48,7 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     started.add_argument("--operator-config", type=Path, required=True)
     started.add_argument("--instance-id", required=True)
     started.add_argument("--session-id", required=True)
-    started.add_argument("--qmp-socket", type=Path, required=True)
+    started.add_argument("--qmp-socket", type=Path)
     started.add_argument("exec_command", nargs=argparse.REMAINDER, help="command to execute after --")
 
     reconciled = commands.add_parser("session-reconcile", help="reconcile a persisted session PID")
@@ -109,12 +109,26 @@ def main(argv: list[str] | None = None) -> int:
             command = list(args.exec_command)
             if command and command[0] == "--":
                 command = command[1:]
-            if not command:
-                raise ValueError("session-start requires a command after --")
             config = OperatorConfig.load(args.operator_config)
             store = SessionStore(config.runtime_root, config.state_root, config.artifact_root)
             record = store.open(args.instance_id, args.session_id)
-            running = asyncio.run(SessionSupervisor(store).start(record, command, args.qmp_socket))
+            try:
+                session_manifest = json.loads(record.manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"cannot read session launch plan: {exc}") from exc
+            launch_plan = session_manifest.get("launch_plan")
+            if not command:
+                if not isinstance(launch_plan, dict) or not isinstance(launch_plan.get("argv"), list):
+                    raise ValueError("session manifest has no launch plan; provide a command after --")
+                command = launch_plan["argv"]
+            qmp_socket = args.qmp_socket
+            if qmp_socket is None and isinstance(launch_plan, dict):
+                raw_socket = launch_plan.get("qmp_socket")
+                if isinstance(raw_socket, str) and raw_socket:
+                    qmp_socket = Path(raw_socket)
+            if qmp_socket is None:
+                raise ValueError("session-start requires --qmp-socket when no launch plan endpoint exists")
+            running = asyncio.run(SessionSupervisor(store).start(record, command, qmp_socket))
             print(json.dumps({"session_id": record.session_id, "pid": running.process.pid}, sort_keys=True))
             return 0
 

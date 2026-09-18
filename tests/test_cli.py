@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from machineemu.cli import main
 
@@ -84,7 +85,7 @@ def test_session_create_cli_writes_manifest(tmp_path, capsys):
     assert inspected["session_id"] == "session-1"
 
 
-def test_session_start_requires_explicit_command(tmp_path, capsys):
+def test_session_start_requires_manifest_or_explicit_command(tmp_path, capsys):
     config = tmp_path / "operator.json"
     config.write_text(json.dumps({"schema_version": 1, "roots": {
         "engine_root": "engines", "asset_root": "assets", "state_root": "state",
@@ -93,9 +94,43 @@ def test_session_start_requires_explicit_command(tmp_path, capsys):
     assert main([
         "session-start", "--operator-config", str(config),
         "--instance-id", "instance-1", "--session-id", "session-1",
-        "--qmp-socket", str(tmp_path / "qmp.sock"),
     ]) == 2
-    assert "requires a command" in capsys.readouterr().err
+    assert "manifest" in capsys.readouterr().err
+
+
+def test_session_start_uses_recorded_plan(monkeypatch, tmp_path, capsys):
+    config = tmp_path / "operator.json"
+    config.write_text(json.dumps({"schema_version": 1, "roots": {
+        "engine_root": "engines", "asset_root": "assets", "state_root": "state",
+        "runtime_root": "runtime", "artifact_root": "artifacts",
+    }}), encoding="utf-8")
+    runtime = tmp_path / "runtime/sessions/session-1"
+    state = tmp_path / "state/instances/instance-1"
+    artifact = tmp_path / "artifacts/sessions/session-1"
+    for path in (runtime / "control", runtime / "sockets", runtime / "logs", state, artifact):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "state": "created", "launch_plan": {
+            "argv": ["/opt/qemu", "-machine", "virt"],
+            "qmp_socket": str(runtime / "sockets/qmp.sock"),
+        },
+    }), encoding="utf-8")
+    captured = {}
+
+    async def fake_start(self, record, command, qmp_socket, **kwargs):
+        captured["command"] = command
+        captured["qmp_socket"] = qmp_socket
+        return SimpleNamespace(process=SimpleNamespace(pid=4242))
+
+    monkeypatch.setattr("machineemu.cli.SessionSupervisor.start", fake_start)
+    assert main([
+        "session-start", "--operator-config", str(config),
+        "--instance-id", "instance-1", "--session-id", "session-1",
+    ]) == 0
+    assert captured["command"] == ["/opt/qemu", "-machine", "virt"]
+    assert captured["qmp_socket"].name == "qmp.sock"
+    assert json.loads(capsys.readouterr().out)["pid"] == 4242
 
 
 def test_session_reconcile_marks_missing_pid_failed(tmp_path, capsys):
