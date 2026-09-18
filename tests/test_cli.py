@@ -27,7 +27,8 @@ def test_profile_check_cli(tmp_path, capsys):
     }}), encoding="utf-8")
     profile = tmp_path / "profile.json"
     profile.write_text(json.dumps({
-        "schema_version": 1, "id": "demo", "engine": {"track": "track"}, "machine": "virt"
+        "schema_version": 1, "id": "demo", "engine": {"track": "track"}, "machine": "virt",
+        "resources": {"memory": "1GiB", "vcpus": 1},
     }), encoding="utf-8")
 
     assert main([
@@ -55,7 +56,8 @@ def test_session_create_cli_writes_manifest(tmp_path, capsys):
     }}), encoding="utf-8")
     profile = tmp_path / "profile.json"
     profile.write_text(json.dumps({
-        "schema_version": 1, "id": "demo", "engine": {"track": "track"}, "machine": "virt"
+        "schema_version": 1, "id": "demo", "engine": {"track": "track"}, "machine": "virt",
+        "resources": {"memory": "1GiB", "vcpus": 1},
     }), encoding="utf-8")
     config = tmp_path / "operator.json"
     config.write_text(json.dumps({"schema_version": 1, "roots": {
@@ -72,6 +74,7 @@ def test_session_create_cli_writes_manifest(tmp_path, capsys):
     manifest = json.loads((tmp_path / "runtime/sessions/session-1/manifest.json").read_text())
     assert output["session_id"] == "session-1"
     assert manifest["profile_id"] == "demo"
+    assert manifest["launch_plan"]["argv"][0].endswith("bin/qemu")
 
     assert main([
         "session-inspect", "--operator-config", str(config),

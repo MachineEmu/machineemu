@@ -10,7 +10,7 @@ import sys
 
 from machineemu.assets import AssetError, AssetStore
 from machineemu.engines import EngineRegistry
-from machineemu.profiles import ProfileError, resolve_profile
+from machineemu.profiles import ProfileError, build_launch_plan, resolve_profile
 from machineemu.runtime import OperatorConfig, SessionStore, SessionSupervisor
 
 
@@ -79,9 +79,14 @@ def main(argv: list[str] | None = None) -> int:
                 args.profile, registry, target=args.target,
                 asset_store=AssetStore(config.asset_root),
             )
-            record = SessionStore(
+            store = SessionStore(
                 config.runtime_root, config.state_root, config.artifact_root,
-            ).create(args.instance_id, args.session_id, profile)
+            )
+            plan = build_launch_plan(
+                profile, config.runtime_root / "sessions" / args.session_id,
+            )
+            record = store.create(args.instance_id, args.session_id, profile)
+            store.update(record, "created", metadata={"launch_plan": plan.manifest})
             print(json.dumps({
                 "session_id": record.session_id,
                 "instance_id": record.instance_id,
