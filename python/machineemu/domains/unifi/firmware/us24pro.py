@@ -46,10 +46,16 @@ def prepare(source: Path, output: Path, options: PrepareOptions) -> PreparedFirm
         raise FirmwareError("US24PRO password patches require verified cfg and persistent flash support")
     if options.boot_template or options.spi_template:
         raise FirmwareError("current US24PRO adapter has no file-backed flash contract")
-    if options.factory_lab_key is not None:
-        raise FirmwareError("US24PRO lab signing is not yet migrated")
     info, kernel, rootfs = _read(source)
     changes: list[dict[str, str]] = []
+    if options.factory_lab_key is not None:
+        from .us24pro_lab import lab_factory
+        entries, _ = read_cpio(rootfs, allow_root_clamped_links=True)
+        entries, eeprom, public_key, modification = lab_factory(entries, options.factory_lab_key)
+        rootfs = write_cpio(entries)
+        (output / "eeprom.bin").write_bytes(eeprom)
+        (output / "factory-lab-public.pem").write_bytes(public_key)
+        changes.append(modification)
     if options.bypass_factory_signature:
         entries, _ = read_cpio(rootfs, allow_root_clamped_links=True)
         entries, modification = bypass_signature(entries)

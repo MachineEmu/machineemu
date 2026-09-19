@@ -48,6 +48,7 @@ from machineemu.domains.unifi.firmware import squashfs
 from machineemu.domains.unifi.firmware.squashfs import SquashFS, library_path
 from machineemu.domains.unifi.firmware import udm_pro, udm_pro_factory_auth
 from machineemu.domains.unifi.firmware import us24pro_signature
+from machineemu.domains.unifi.firmware import us24pro_lab
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -193,6 +194,31 @@ def test_us24pro_signature_bypass_is_hash_pinned_and_keeps_archive_safety(
     assert change["type"] == "bypass-factory-signature"
     with pytest.raises(FirmwareError, match="non-hardlinked"):
         us24pro_signature.bypass_signature([archive_entry("bin/ubntbox", bytes(binary), links=2)])
+
+
+def test_us24pro_lab_signing_uses_synthetic_identity_and_keeps_a_public_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Public:
+        def public_numbers(self):
+            return type("Numbers", (), {"n": (1 << 4095) + 1})()
+
+    class Key:
+        def public_key(self):
+            return Public()
+
+    binary = bytearray(us24pro_lab.MODULUS_OFFSET + 588)
+    binary[us24pro_signature.OFFSET : us24pro_signature.OFFSET + 4] = us24pro_signature.BEFORE
+    monkeypatch.setattr(us24pro_lab, "UBNTBOX_SHA256", hashlib.sha256(binary).hexdigest())
+    monkeypatch.setattr(us24pro_lab, "load_lab_key", lambda path: Key())
+    monkeypatch.setattr(us24pro_lab, "sign_factory_image", lambda image, key, serial, iv: (image, b"public"))
+    entries, eeprom, public, change = us24pro_lab.lab_factory(
+        [archive_entry("bin/ubntbox", bytes(binary), 0o100755)], tmp_path / "outside.pem"
+    )
+    assert entries[0].data[us24pro_lab.MODULUS_OFFSET : us24pro_lab.MODULUS_OFFSET + 588] != bytes(588)
+    assert eeprom[:6] == bytes.fromhex("525400555301")
+    assert public == b"public"
+    assert change["uuid"] == us24pro_lab.UUID.decode()
 
 
 def test_udm_lab_signing_keeps_the_verifier_and_emits_only_public_material(
