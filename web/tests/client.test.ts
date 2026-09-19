@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { MachineEmuClient } from "../src/client";
+import { MachineEmuApiError, MachineEmuClient } from "../src/client";
 import { createCatalogSession } from "../src/catalog-flow";
 
 describe("MachineEmuClient", () => {
@@ -54,6 +54,24 @@ describe("MachineEmuClient", () => {
     expect(calls[0].method).toBe("POST");
     expect(calls[0].headers.get("Content-Type")).toBe("application/json");
     expect(await calls[0].json()).toEqual({ instance_id: "instance", session_id: "session" });
+  });
+
+  it("preserves a safe API error detail for the interface", async () => {
+    const client = new MachineEmuClient({
+      token: "token",
+      fetchImpl: async () => new Response(JSON.stringify({ detail: "catalog is not configured" }), {
+        status: 404, headers: { "Content-Type": "application/json" },
+      }),
+    });
+
+    try {
+      await client.listProfiles();
+      throw new Error("expected request to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MachineEmuApiError);
+      expect((error as MachineEmuApiError).status).toBe(404);
+      expect((error as Error).message).toBe("catalog is not configured");
+    }
   });
 
   it("uses catalog IDs for profile selection and session creation", async () => {

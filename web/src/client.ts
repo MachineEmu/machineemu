@@ -20,6 +20,14 @@ export interface MachineEmuClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** An API response that the UI can safely present without guessing its cause. */
+export class MachineEmuApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "MachineEmuApiError";
+  }
+}
+
 export class MachineEmuClient {
   private readonly baseUrl: string;
   private readonly token: string;
@@ -85,7 +93,16 @@ export class MachineEmuClient {
       headers,
       body: body as BodyInit | null | undefined,
     });
-    if (!response.ok) throw new Error(`MachineEmu API request failed: ${response.status}`);
+    if (!response.ok) {
+      let message = `MachineEmu API request failed (${response.status}).`;
+      try {
+        const payload = await response.json() as { detail?: unknown };
+        if (typeof payload.detail === "string" && payload.detail) message = payload.detail;
+      } catch {
+        // A proxy may return an empty or non-JSON error body. The status is still useful.
+      }
+      throw new MachineEmuApiError(response.status, message);
+    }
     return (await response.json()) as T;
   }
 }

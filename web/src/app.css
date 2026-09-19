@@ -1,0 +1,30 @@
+:root {
+  color: #17212b;
+  background: #f4f7f8;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+
+.machineemu-page { max-width: 760px; margin: 0 auto; padding: 48px 24px; }
+.machineemu-header { border-bottom: 1px solid #d6dfe3; margin-bottom: 28px; padding-bottom: 22px; }
+.eyebrow { color: #57707b; font-size: .75rem; font-weight: 700; letter-spacing: .08em; margin: 0 0 8px; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); margin: 0; }
+h2 { margin: 0; }
+.service-state { margin: 10px 0 0; }
+.state-ready { color: #147a4c; }
+.state-unavailable, .notice-error { color: #a32d2d; }
+.panel { background: #fff; border: 1px solid #d6dfe3; border-radius: 10px; padding: 24px; }
+.field { display: grid; gap: 7px; font-weight: 650; margin-top: 18px; }
+.field input, .field select { background: #fff; border: 1px solid #9aabb3; border-radius: 6px; min-height: 42px; padding: 8px 10px; }
+.actions { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+.button { background: #145a7a; border: 1px solid #145a7a; border-radius: 6px; color: #fff; min-height: 40px; padding: 8px 14px; text-decoration: none; }
+.button-secondary { background: #fff; color: #145a7a; }
+.notice { border-left: 3px solid #9aabb3; margin: 20px 0 0; padding: 10px 12px; }
+.notice-error { border-color: #a32d2d; background: #fff4f4; }
+.session-meta { color: #50616a; margin: 6px 0 0; }
+.back-link { color: #145a7a; display: inline-block; margin-bottom: 18px; }
