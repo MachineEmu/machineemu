@@ -16,7 +16,7 @@ Last updated: 2026-09-19.
 
 - U6+ firmware preparation, including its model-owned EEPROM generation through QEMU `board-tools`.
 - Compatibility adapters, analysis domain, host tooling, and the remaining runtime/profile/API migration surface.
-- Browser-client migration now has a React/Vite foundation covering health, catalog profile/session creation, session inspection, start/stop, and state inventory. The source device, display, audio, remote-device, and hardware views remain blocked on their corresponding target API contracts. Existing uncommitted browser/theme work is user-owned and must be preserved.
+- Browser-client migration now has a React/Vite foundation covering health, catalog profile/session creation, session inspection, reconciliation, start/stop, and state inventory. The source device, display, audio, remote-device, and hardware views remain blocked on their corresponding target API contracts.
 
 ## Verification baseline
 

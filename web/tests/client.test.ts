@@ -108,4 +108,14 @@ describe("MachineEmuClient", () => {
     expect(result.session.state).toBe("created");
     expect(calls).toEqual(["demo:instance:session"]);
   });
+
+  it("rejects empty catalog identifiers before making a request", async () => {
+    const client = {
+      listProfiles: async () => { throw new Error("must not be called"); },
+      createCatalogSession: async () => { throw new Error("must not be called"); },
+    } as never;
+    await expect(createCatalogSession(client, {
+      profileId: "demo", instanceId: "   ", sessionId: "session",
+    })).rejects.toThrow("Profile, instance ID, and session ID are required.");
+  });
 });

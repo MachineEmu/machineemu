@@ -127,11 +127,15 @@ function Session() {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  async function action(kind: "start" | "stop") {
+  async function action(kind: "reconcile" | "start" | "stop") {
     setBusy(true);
     setError(undefined);
     try {
-      const result = kind === "start" ? await api.startSession(instance, id) : await api.stopSession(instance, id);
+      const result = kind === "reconcile"
+        ? await api.reconcileSession({ instance_id: instance, session_id: id })
+        : kind === "start"
+          ? await api.startSession(instance, id)
+          : await api.stopSession(instance, id);
       setState(String(result.state));
       await refresh();
     } catch (reason) {
@@ -150,6 +154,9 @@ function Session() {
         <p className="session-meta"><strong>{id}</strong> · {loading ? "Loading…" : state ?? "Unknown state"}</p>
         <p className="session-meta">Instance: {instance}{files !== undefined && ` · ${files} managed state files`}</p>
         <div className="actions">
+          <button className="button button-secondary" disabled={busy || loading} onClick={() => void action("reconcile")}>
+            {busy ? "Working…" : "Recover status"}
+          </button>
           <button className="button" disabled={busy || loading || state === "running"} onClick={() => void action("start")}>
             {busy ? "Working…" : "Start"}
           </button>
