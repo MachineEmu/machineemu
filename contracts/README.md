@@ -8,5 +8,7 @@ PYTHONPATH=python python scripts/openapi.py contracts/openapi.json
 PYTHONPATH=python python scripts/check_openapi.py
 ```
 
-The contract describes the initial session lifecycle boundary. Streaming and
-remote-device contracts will be added beside it as those capabilities move.
+The contract describes the initial session lifecycle boundary and the
+authenticated ticket used to open a profile-declared UART terminal. Display,
+audio, and remote-device contracts will be added beside it as those
+capabilities move.

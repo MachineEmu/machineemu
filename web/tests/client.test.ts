@@ -73,6 +73,21 @@ describe("MachineEmuClient", () => {
     expect(await calls[0].json()).toEqual({ instance_id: "instance", session_id: "session" });
   });
 
+  it("requests a short-lived terminal ticket over the authenticated API", async () => {
+    const calls: Request[] = [];
+    const client = new MachineEmuClient({
+      baseUrl: "http://127.0.0.1", token: "token",
+      fetchImpl: async (input, init) => {
+        calls.push(new Request(input, init));
+        return new Response(JSON.stringify({ ticket: "opaque", expires_in_seconds: 30 }), { status: 200 });
+      },
+    });
+    const ticket = await client.createTerminalTicket("instance", "session/one");
+    expect(ticket.ticket).toBe("opaque");
+    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/sessions/instance/session%2Fone/terminal/ticket");
+    expect(await calls[0].json()).toEqual({});
+  });
+
   it("preserves a safe API error detail for the interface", async () => {
     const client = new MachineEmuClient({
       token: "token",

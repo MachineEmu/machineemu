@@ -88,6 +88,10 @@ class OperatorApplication:
                     capabilities["lcd_view"] = {"available": True}
                 if devices.get("bluetooth") is True:
                     capabilities["bluetooth"] = {"available": True}
+            console = configuration.get("console") if isinstance(configuration, dict) else None
+            if isinstance(console, dict) and console.get("uart") is True:
+                capabilities["uart_view"] = {"available": True}
+                capabilities["uart_control"] = {"available": True}
             summaries.append({
                 "session_id": record.session_id,
                 "instance_id": record.instance_id,
@@ -97,6 +101,19 @@ class OperatorApplication:
                 "capabilities": capabilities,
             })
         return summaries
+
+    def terminal_socket(self, record: SessionRecord) -> Path:
+        """Return the profile-declared UART endpoint only when it is owned by the session."""
+        try:
+            manifest = json.loads(record.manifest.read_text(encoding="utf-8"))
+            plan = manifest.get("launch_plan")
+            endpoint = plan.get("uart_socket") if isinstance(plan, dict) else None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot read session terminal configuration: {exc}") from exc
+        expected = record.runtime_dir / "sockets" / "uart.sock"
+        if endpoint != str(expected) or not expected.is_socket():
+            raise ValueError("session has no available UART terminal")
+        return expected
 
     def inventory_instance(self, instance_id: str) -> dict[str, object]:
         """Return a read-only inventory for an existing durable instance."""

@@ -185,6 +185,24 @@
         "title": "SessionSummary",
         "type": "object"
       },
+      "TerminalTicket": {
+        "properties": {
+          "expires_in_seconds": {
+            "title": "Expires In Seconds",
+            "type": "integer"
+          },
+          "ticket": {
+            "title": "Ticket",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticket",
+          "expires_in_seconds"
+        ],
+        "title": "TerminalTicket",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -669,6 +687,54 @@
           }
         },
         "summary": "Stop"
+      }
+    },
+    "/api/v1/sessions/{instance_id}/{session_id}/terminal/ticket": {
+      "post": {
+        "operationId": "terminal_ticket_api_v1_sessions__instance_id___session_id__terminal_ticket_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerminalTicket"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Terminal Ticket"
       }
     }
   }

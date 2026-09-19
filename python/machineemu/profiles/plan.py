@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Mapping
 
@@ -39,6 +40,18 @@ def build_launch_plan(profile: ResolvedProfile, runtime_dir: Path) -> LaunchPlan
         "-qmp", f"unix:{qmp_socket},server=on,wait=off",
         "-pidfile", str(pidfile),
     ]
+    console = profile.configuration.get("console", {})
+    if not isinstance(console, dict):
+        raise ProfileError("profile.console must be a mapping")
+    uart_socket: Path | None = None
+    if console.get("uart") is True:
+        uart_socket = runtime_dir / "sockets" / "uart.sock"
+        if len(os.fsencode(uart_socket)) > 100:
+            raise ProfileError("runtime directory is too long for a UART socket")
+        command.extend((
+            "-chardev", f"socket,id=machineemu-uart,path={uart_socket},server=on,wait=off",
+            "-serial", "chardev:machineemu-uart",
+        ))
     for name, asset in sorted(profile.assets.items()):
         if not name:
             raise ProfileError("profile asset names must be non-empty")
@@ -58,4 +71,6 @@ def build_launch_plan(profile: ResolvedProfile, runtime_dir: Path) -> LaunchPlan
         "pidfile": str(pidfile),
         "argv": command,
     }
+    if uart_socket is not None:
+        manifest["uart_socket"] = str(uart_socket)
     return LaunchPlan(tuple(command), {}, manifest)

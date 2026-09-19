@@ -21,7 +21,7 @@ def test_launch_plan_is_deterministic_and_does_not_start_process(tmp_path):
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(json.dumps({
         "schema_version": 1, "id": "demo", "engine": {"track": "track"},
-        "machine": "virt", "resources": {"memory": "1GiB", "vcpus": 2},
+        "machine": "virt", "resources": {"memory": "1GiB", "vcpus": 2}, "console": {"uart": True},
     }), encoding="utf-8")
     profile = resolve_profile(profile_path, EngineRegistry.load(release, tmp_path / "bundles"), target="aarch64-softmmu")
 
@@ -30,3 +30,5 @@ def test_launch_plan_is_deterministic_and_does_not_start_process(tmp_path):
     assert "-machine" in plan.command and "virt" in plan.command
     assert plan.manifest["engine"]["build_digest"] == digest
     assert plan.manifest["qmp_socket"].endswith("runtime/sockets/qmp.sock")
+    assert plan.manifest["uart_socket"].endswith("runtime/sockets/uart.sock")
+    assert "-serial" in plan.command and "chardev:machineemu-uart" in plan.command

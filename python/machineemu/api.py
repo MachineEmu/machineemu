@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 from pathlib import Path
 import secrets
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .catalog import CatalogError, ProfileCatalog
-from .runtime import OperatorApplication
+from .runtime import OperatorApplication, TerminalTicketStore
 
 
 class SessionRequest(BaseModel):
@@ -48,6 +49,11 @@ class SessionInventory(BaseModel):
     sessions: list[SessionSummary]
 
 
+class TerminalTicket(BaseModel):
+    ticket: str
+    expires_in_seconds: int
+
+
 def _loopback_host(host: str) -> bool:
     hostname = host.rsplit(":", 1)[0].strip("[]").lower()
     return hostname in {"localhost", "127.0.0.1", "::1"}
@@ -59,6 +65,7 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
     app = FastAPI(title="MachineEmu", version="0.1.0")
     app.state.token = token or secrets.token_urlsafe(32)
     app.state.catalog = ProfileCatalog(catalog_root) if catalog_root is not None else None
+    app.state.terminal_tickets = TerminalTicketStore()
     if app.state.catalog is not None and application.catalog is None:
         application.catalog = app.state.catalog
 
@@ -89,6 +96,86 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
     @app.get("/api/v1/sessions", response_model=SessionInventory)
     async def sessions() -> dict[str, list[dict[str, object]]]:
         return {"sessions": application.list_session_summaries()}
+
+    @app.post("/api/v1/sessions/{instance_id}/{session_id}/terminal/ticket", response_model=TerminalTicket)
+    async def terminal_ticket(instance_id: str, session_id: str) -> TerminalTicket:
+        try:
+            record = application.open_session(instance_id, session_id)
+            application.terminal_socket(record)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        ticket = app.state.terminal_tickets.issue(instance_id, session_id)
+        return TerminalTicket(ticket=ticket, expires_in_seconds=30)
+
+    @app.websocket("/ws/v1/sessions/{instance_id}/{session_id}/terminal")
+    async def terminal(websocket: WebSocket, instance_id: str, session_id: str) -> None:
+        host = websocket.headers.get("host", "")
+        scheme = "https" if websocket.url.scheme == "wss" else "http"
+        if not _loopback_host(host) or websocket.headers.get("origin") != f"{scheme}://{host}":
+            await websocket.close(code=4403)
+            return
+        ticket = websocket.query_params.get("ticket", "")
+        try:
+            record = application.open_session(instance_id, session_id)
+            endpoint = application.terminal_socket(record)
+        except (ValueError, OSError):
+            await websocket.close(code=4404)
+            return
+        if not app.state.terminal_tickets.consume(ticket, instance_id, session_id):
+            await websocket.close(code=4403)
+            return
+        try:
+            reader, writer = await asyncio.open_unix_connection(endpoint)
+        except OSError:
+            await websocket.close(code=1011)
+            return
+        await websocket.accept()
+        claimed = False
+        try:
+            await websocket.send_json({"v": 1, "type": "terminal.ready", "view_only": True})
+            while True:
+                uart_read = asyncio.create_task(reader.read(16 * 1024))
+                browser_read = asyncio.create_task(websocket.receive())
+                done, pending = await asyncio.wait({uart_read, browser_read}, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if uart_read in done:
+                    data = uart_read.result()
+                    if not data:
+                        await websocket.close(code=1011)
+                        return
+                    await websocket.send_bytes(data)
+                if browser_read in done:
+                    message = browser_read.result()
+                    if message.get("type") == "websocket.disconnect":
+                        return
+                    if isinstance(message.get("text"), str):
+                        try:
+                            control = json.loads(message["text"])
+                        except json.JSONDecodeError:
+                            await websocket.close(code=4400)
+                            return
+                        if control == {"v": 1, "type": "terminal.claim"}:
+                            claimed = True
+                            await websocket.send_json({"v": 1, "type": "terminal.claimed"})
+                        elif control == {"v": 1, "type": "terminal.release"}:
+                            claimed = False
+                            await websocket.send_json({"v": 1, "type": "terminal.released"})
+                        else:
+                            await websocket.close(code=4400)
+                            return
+                    elif isinstance(message.get("bytes"), bytes):
+                        if not claimed or len(message["bytes"]) > 16 * 1024:
+                            await websocket.close(code=4403 if not claimed else 4400)
+                            return
+                        writer.write(message["bytes"])
+                        await writer.drain()
+        except (WebSocketDisconnect, OSError, RuntimeError, asyncio.CancelledError):
+            return
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     @app.get("/api/v1/catalog/profiles")
     async def catalog_profiles() -> list[dict]:

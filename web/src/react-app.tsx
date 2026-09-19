@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router";
 import { createCatalogSession } from "./catalog-flow";
 import { MachineEmuClient, type CatalogProfile, type SessionSummary } from "./client";
@@ -239,6 +239,7 @@ function Session() {
         <p className="session-meta"><strong>{id}</strong> · {loading ? "Loading…" : state ?? "Unknown state"}</p>
         <p className="session-meta">Instance: {instance}{files !== undefined && ` · ${files} managed state files`}</p>
         <div className="actions">
+          <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/terminal?instance=${encodeURIComponent(instance)}`}>Terminal</Link>
           <button className="button button-secondary" disabled={busy || loading} onClick={() => void action("reconcile")}>
             {busy ? "Working…" : "Recover status"}
           </button>
@@ -256,6 +257,84 @@ function Session() {
   </main>;
 }
 
+function terminalUrl(instance: string, session: string, ticket: string): string {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.host}/ws/v1/sessions/${encodeURIComponent(instance)}/${encodeURIComponent(session)}/terminal?ticket=${encodeURIComponent(ticket)}`;
+}
+
+function Terminal() {
+  const api = useMemo(client, []);
+  const { id = "" } = useParams();
+  const [query] = useSearchParams();
+  const instance = query.get("instance") ?? "";
+  const socket = useRef<WebSocket | null>(null);
+  const decoder = useRef(new TextDecoder());
+  const [output, setOutput] = useState("");
+  const [input, setInput] = useState("");
+  const [connection, setConnection] = useState("Connecting…");
+  const [claimed, setClaimed] = useState(false);
+  const [error, setError] = useState<string>();
+  const validRoute = Boolean(instance && id);
+
+  const connect = useCallback(async () => {
+    if (!validRoute) return;
+    socket.current?.close();
+    setConnection("Requesting terminal access…"); setClaimed(false); setError(undefined);
+    try {
+      const ticket = await api.createTerminalTicket(instance, id);
+      const next = new WebSocket(terminalUrl(instance, id, ticket.ticket));
+      next.binaryType = "arraybuffer";
+      socket.current = next;
+      next.onopen = () => setConnection("Connected · view only");
+      next.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          try {
+            const message = JSON.parse(event.data) as { type?: string };
+            if (message.type === "terminal.claimed") { setClaimed(true); setConnection("Connected · control enabled"); }
+            if (message.type === "terminal.released") { setClaimed(false); setConnection("Connected · view only"); }
+          } catch { setError("Terminal control response was invalid."); }
+          return;
+        }
+        if (event.data instanceof ArrayBuffer) {
+          const text = decoder.current.decode(event.data, { stream: true });
+          setOutput((current) => (current + text).slice(-200_000));
+        }
+      };
+      next.onerror = () => setError("Terminal connection failed.");
+      next.onclose = () => { setClaimed(false); setConnection("Disconnected"); };
+    } catch (reason) { setError(errorMessage(reason, "Unable to open the terminal.")); setConnection("Unavailable"); }
+  }, [api, id, instance, validRoute]);
+
+  useEffect(() => { void connect(); return () => socket.current?.close(); }, [connect]);
+  function control(type: "terminal.claim" | "terminal.release") {
+    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ v: 1, type }));
+  }
+  function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!claimed || !input || socket.current?.readyState !== WebSocket.OPEN) return;
+    socket.current.send(new TextEncoder().encode(`${input}\n`));
+    setInput("");
+  }
+
+  return <main className="machineemu-page">
+    <Link className="back-link" to={`/sessions/${encodeURIComponent(id)}?instance=${encodeURIComponent(instance)}`}>← Session</Link><Header />
+    <section className="panel" aria-labelledby="terminal-title"><h2 id="terminal-title">UART terminal</h2>
+      {!validRoute ? <ErrorNotice>The terminal URL must include an instance ID.</ErrorNotice> : <>
+        <p className="session-meta" role="status">{connection}</p>
+        <div className="actions">
+          {claimed ? <button className="button button-secondary" onClick={() => control("terminal.release")}>Release control</button>
+            : <button className="button" disabled={connection !== "Connected · view only"} onClick={() => control("terminal.claim")}>Take control</button>}
+          <button className="button button-secondary" onClick={() => void connect()}>Reconnect</button>
+        </div>
+        {error && <ErrorNotice>{error}</ErrorNotice>}
+        <pre className="terminal-output" aria-label="UART output">{output || "Waiting for UART output…"}</pre>
+        <form className="terminal-input" onSubmit={send}><label>Send line<input value={input} disabled={!claimed} onChange={(event) => setInput(event.target.value)} /></label><button className="button" disabled={!claimed || !input}>Send</button></form>
+        <p className="session-meta">Input remains disabled until you explicitly take control. Output is capped locally at 200 kB.</p>
+      </>}
+    </section>
+  </main>;
+}
+
 function NotFound() {
   return <main className="machineemu-page"><Header /><section className="panel"><h2>Page not found</h2><p><Link to="/">Return to the catalog</Link>.</p></section></main>;
 }
@@ -265,6 +344,7 @@ export function App() {
     <Route path="/" element={<Catalog />} />
     <Route path="/profiles/:id" element={<ProfileRoute />} />
     <Route path="/sessions" element={<Sessions />} />
+    <Route path="/sessions/:id/terminal" element={<Terminal />} />
     <Route path="/sessions/:id" element={<Session />} />
     <Route path="*" element={<NotFound />} />
   </Routes>;

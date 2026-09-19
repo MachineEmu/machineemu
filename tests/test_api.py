@@ -1,10 +1,16 @@
 import json
+from pathlib import Path
+import shutil
+import socket
+import tempfile
+import threading
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from machineemu.api import create_app
 from machineemu.runtime import OperatorApplication, OperatorConfig
+from machineemu.runtime.terminal import TerminalTicketStore
 
 
 def test_api_health_and_session_inspection(tmp_path):
@@ -73,6 +79,100 @@ def test_api_requires_same_origin_for_mutations(tmp_path):
         "instance_id": "instance", "session_id": "session",
     }, headers=headers)
     assert response.status_code == 403
+
+
+def test_terminal_ticket_is_one_time_and_requires_a_declared_socket(tmp_path):
+    # Unix-domain socket paths are capped near 108 bytes, unlike ordinary runtime files.
+    short_root = Path(tempfile.mkdtemp(prefix="me-", dir="/tmp"))
+    config = OperatorConfig(
+        short_root / "engines", short_root / "assets", short_root / "state",
+        short_root / "runtime", short_root / "artifacts",
+    )
+    runtime = config.runtime_root / "sessions/session-1"
+    state = config.state_root / "instances/instance-1"
+    artifact = config.artifact_root / "sessions/session-1"
+    for path in (runtime / "sockets", state, artifact):
+        path.mkdir(parents=True)
+    uart = runtime / "sockets/uart.sock"
+    listener: socket.socket | None = None
+    try:
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(uart))
+        (runtime / "manifest.json").write_text(json.dumps({
+            "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1", "state": "running",
+            "launch_plan": {"uart_socket": str(uart)},
+        }), encoding="utf-8")
+        app = create_app(OperatorApplication(config), token="test-token")
+        client = TestClient(app, base_url="http://127.0.0.1")
+        headers = {"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"}
+        response = client.post("/api/v1/sessions/instance-1/session-1/terminal/ticket", headers=headers)
+        assert response.status_code == 200
+        ticket = response.json()["ticket"]
+        assert app.state.terminal_tickets.consume(ticket, "instance-1", "session-1") is True
+        assert app.state.terminal_tickets.consume(ticket, "instance-1", "session-1") is False
+    finally:
+        if listener is not None:
+            listener.close()
+        shutil.rmtree(short_root)
+
+
+def test_terminal_ticket_store_binds_tickets_to_a_session():
+    store = TerminalTicketStore()
+    ticket = store.issue("instance-1", "session-1")
+    assert store.consume(ticket, "instance-2", "session-1") is False
+
+
+def test_terminal_websocket_is_ticketed_view_only_until_control_is_claimed(tmp_path):
+    short_root = Path(tempfile.mkdtemp(prefix="me-", dir="/tmp"))
+    config = OperatorConfig(
+        short_root / "engines", short_root / "assets", short_root / "state",
+        short_root / "runtime", short_root / "artifacts",
+    )
+    runtime = config.runtime_root / "sessions/session-1"
+    state = config.state_root / "instances/instance-1"
+    artifact = config.artifact_root / "sessions/session-1"
+    for path in (runtime / "sockets", state, artifact):
+        path.mkdir(parents=True)
+    uart = runtime / "sockets/uart.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    received: list[bytes] = []
+    try:
+        listener.bind(str(uart))
+        listener.listen(1)
+        (runtime / "manifest.json").write_text(json.dumps({
+            "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1", "state": "running",
+            "launch_plan": {"uart_socket": str(uart)},
+        }), encoding="utf-8")
+
+        def serial_peer() -> None:
+            connection, _ = listener.accept()
+            with connection:
+                connection.sendall(b"ready\n")
+                data = connection.recv(1024)
+                received.append(data)
+                connection.sendall(b"echo:" + data)
+
+        peer = threading.Thread(target=serial_peer)
+        peer.start()
+        app = create_app(OperatorApplication(config), token="test-token")
+        client = TestClient(app, base_url="http://127.0.0.1")
+        headers = {"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"}
+        ticket = client.post("/api/v1/sessions/instance-1/session-1/terminal/ticket", headers=headers).json()["ticket"]
+        with client.websocket_connect(
+            f"/ws/v1/sessions/instance-1/session-1/terminal?ticket={ticket}",
+            headers={"host": "127.0.0.1", "origin": "http://127.0.0.1"},
+        ) as terminal:
+            assert terminal.receive_json() == {"v": 1, "type": "terminal.ready", "view_only": True}
+            assert terminal.receive_bytes() == b"ready\n"
+            terminal.send_json({"v": 1, "type": "terminal.claim"})
+            assert terminal.receive_json() == {"v": 1, "type": "terminal.claimed"}
+            terminal.send_bytes(b"help\n")
+            assert terminal.receive_bytes() == b"echo:help\n"
+        peer.join(timeout=1)
+        assert received == [b"help\n"]
+    finally:
+        listener.close()
+        shutil.rmtree(short_root)
 
 
 def test_api_instance_inventory_is_read_only(tmp_path):

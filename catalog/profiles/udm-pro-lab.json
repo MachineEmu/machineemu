@@ -24,6 +24,9 @@
     "lcd": true,
     "bluetooth": true
   },
+  "console": {
+    "uart": true
+  },
   "network": {
     "mode": "bridge",
     "operator_approval_required": true

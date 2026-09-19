@@ -178,6 +178,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{instance_id}/{session_id}/terminal/ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Terminal Ticket */
+        post: operations["terminal_ticket_api_v1_sessions__instance_id___session_id__terminal_ticket_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -242,6 +259,13 @@ export interface components {
             session_id: string;
             /** State */
             state: string;
+        };
+        /** TerminalTicket */
+        TerminalTicket: {
+            /** Expires In Seconds */
+            expires_in_seconds: number;
+            /** Ticket */
+            ticket: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -589,6 +613,38 @@ export interface operations {
                     "application/json": {
                         [key: string]: number | string;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    terminal_ticket_api_v1_sessions__instance_id___session_id__terminal_ticket_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instance_id: string;
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalTicket"];
                 };
             };
             /** @description Validation Error */
