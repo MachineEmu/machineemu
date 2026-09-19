@@ -31,6 +31,16 @@ from machineemu.domains.unifi.firmware.udm_pro_gpt import (
     gpt_header,
     protective_mbr,
 )
+from machineemu.domains.unifi.firmware.udm_pro_spi import (
+    EEPROM_OFFSET,
+    EEPROM_SIZE,
+    PARTITIONS,
+    SIZE,
+    SYSTEM_ID,
+    eeprom,
+    legacy_crc32,
+    write_template,
+)
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -189,3 +199,26 @@ def test_udm_pro_gpt_template_has_deterministic_valid_layout() -> None:
     assert len(mbr) == SECTOR
     assert mbr[450] == 0xEE
     assert mbr[510:] == b"\x55\xaa"
+
+
+def test_udm_pro_spi_identity_is_deterministic_and_retargetable(tmp_path: Path) -> None:
+    identity = eeprom()
+    assert len(identity) == EEPROM_SIZE
+    assert identity[:16].hex() == "5254004d50015254004d5002ea150777"
+    assert int.from_bytes(identity[0x8004:0x8008], "little") == legacy_crc32(identity[0x800C:0x8071])
+    assert [(offset, size, label) for offset, size, label, _ in PARTITIONS][-1] == (0x200000, 0x600000, "config")
+
+    retargeted = eeprom(0xEA2A)
+    assert int.from_bytes(retargeted[0x0C:0x0E], "big") == 0xEA2A
+    assert int.from_bytes(retargeted[0x8012:0x8014], "big") == 0xEA2A
+    assert retargeted[0x8004:0x8008] != identity[0x8004:0x8008]
+    with pytest.raises(FirmwareError, match="non-zero"):
+        eeprom(0)
+
+    path = write_template(tmp_path / "spi.img", system_id=0xEA2A)
+    data = path.read_bytes()
+    assert len(data) == SIZE
+    for offset in (0, EEPROM_OFFSET):
+        assert data[offset:offset + EEPROM_SIZE] == retargeted
+    assert set(data[EEPROM_SIZE:EEPROM_OFFSET]) == {0xFF}
+    assert SYSTEM_ID == 0xEA15
