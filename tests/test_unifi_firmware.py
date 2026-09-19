@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import struct
+import zlib
+from pathlib import Path
+
+import pytest
+
+from machineemu.domains.unifi.firmware import FirmwareError, PrepareOptions, container, fit, load_bundle
+
+
+def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
+    strings = bytearray()
+    offsets: dict[str, int] = {}
+    body = bytearray()
+
+    def emit(current: tuple[str, dict[str, bytes], list[object]]) -> None:
+        name, properties, children = current
+        body.extend(struct.pack(">I", 1) + name.encode() + b"\0")
+        body.extend(bytes(-len(body) % 4))
+        for key, value in properties.items():
+            if key not in offsets:
+                offsets[key] = len(strings)
+                strings.extend(key.encode() + b"\0")
+            body.extend(struct.pack(">III", 3, len(value), offsets[key]) + value)
+            body.extend(bytes(-len(body) % 4))
+        for child in children:
+            emit(child)  # type: ignore[arg-type]
+        body.extend(struct.pack(">I", 2))
+
+    emit(node)
+    body.extend(struct.pack(">I", 9))
+    header = struct.pack(
+        ">10I", 0xD00DFEED, 56 + len(body) + len(strings), 56, 56 + len(body),
+        40, 17, 16, 0, len(strings), len(body),
+    )
+    return header + bytes(16) + body + strings
+
+
+def fit_fixture() -> bytes:
+    kernel = bytearray(256)
+    kernel[56:60] = b"ARM\x64"
+    dtb = pack_fdt(("", {"model": b"U6+\0"}, []))
+    images = []
+    for name, kind, content in (("kernel-1", "kernel", bytes(kernel)), ("fdt-u6-plus", "flat_dt", dtb)):
+        images.append((name, {"data": content, "type": kind.encode() + b"\0", "arch": b"arm64\0", "compression": b"none\0"}, [("hash", {"algo": b"sha256\0", "value": hashlib.sha256(content).digest()}, [])]))
+    return pack_fdt(("", {}, [("images", {}, images), ("configurations", {}, [("config-a642", {"kernel": b"kernel-1\0", "fdt": b"fdt-u6-plus\0"}, [])])]))
+
+
+def container_fixture(payload: bytes) -> bytes:
+    header = b"UBNTBZ.MT7981.test".ljust(0x104, b"\0")
+    header += struct.pack(">I", zlib.crc32(header)) + bytes(4)
+    record = b"EMMC" + b"kernel0".ljust(16, b"\0") + bytes(12) + struct.pack(">6I", 0, 1, 0, 0, len(payload), len(payload))
+    return header + record + payload + struct.pack(">II", zlib.crc32(record + payload), 0) + b"ENDS" + bytes(260)
+
+
+def test_container_and_fit_are_content_checked(tmp_path: Path) -> None:
+    source = tmp_path / "firmware.bin"
+    source.write_bytes(container_fixture(fit_fixture()))
+    version, sections = container(source)
+    assert version == "BZ.MT7981.test"
+    selected, parts = fit(sections[0].read(source), ("fdt-u6-plus",))
+    assert selected == "config-a642"
+    assert parts["kernel"][56:60] == b"ARM\x64"
+
+    changed = bytearray(source.read_bytes())
+    changed[sections[0].offset] ^= 1
+    source.write_bytes(changed)
+    with pytest.raises(FirmwareError, match="CRC mismatch"):
+        container(source)
+
+
+def test_prepared_bundle_rejects_changed_artifacts(tmp_path: Path) -> None:
+    image = tmp_path / "Image"
+    dtb = tmp_path / "board.dtb"
+    image.write_bytes(b"kernel")
+    dtb.write_bytes(b"dtb")
+    outputs = {
+        path.name: {"path": path.name, "size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for path in (image, dtb)
+    }
+    manifest = {
+        "version": 1,
+        "info": {"device": "u6plus"},
+        "adapter": "mt7981",
+        "outputs": outputs,
+        "boot": {"kernel": "Image", "dtb": "board.dtb", "initrd": None},
+        "settings": {"machine": {"type": "mt7981", "properties": {"secure": True, "gic-version": 3}}},
+        "storage": [
+            {"role": "emmc", "backend": "mt7981-emmc", "initialization": "copy", "persistent": True, "template": "Image"},
+            {"role": "spi", "backend": "model-memory", "initialization": "board-seeded", "persistent": False},
+        ],
+        "options": {"variant": "stock"},
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    bundle = load_bundle(tmp_path)
+    assert bundle.artifact("Image") == image
+    image.write_bytes(b"changed")
+    with pytest.raises(FirmwareError, match="changed"):
+        load_bundle(tmp_path)
+
+
+def test_public_prepare_options_do_not_expose_passwords() -> None:
+    options = PrepareOptions(passwords=(("ubnt", "private:password"),))
+    assert options.public()["password_accounts"] == ["ubnt"]
+    assert "private:password" not in repr(options)
