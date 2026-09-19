@@ -10,10 +10,10 @@ function client(): MachineEmuClient {
 function Catalog() {
   const api = useMemo(client, []);
   const navigate = useNavigate();
-  const [profiles, setProfiles] = useState<CatalogProfile[]>([]);
+  const [profiles, setProfiles] = useState<CatalogProfile[]>([]); const [healthy, setHealthy] = useState<boolean>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
-  useEffect(() => { void api.listProfiles().then(setProfiles).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to load profiles.")); }, [api]);
+  useEffect(() => { void api.listProfiles().then(setProfiles).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to load profiles.")); void api.health().then(() => setHealthy(true)).catch(() => setHealthy(false)); }, [api]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(undefined);
     const form = new FormData(event.currentTarget);
@@ -23,7 +23,7 @@ function Catalog() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to create session."); }
     finally { setBusy(false); }
   }
-  return <main className="machineemu-catalog"><header><p>LOCAL EMULATION</p><h1>MachineEmu</h1></header><form onSubmit={submit}><label>Profile<select name="profile" required>{profiles.map((profile) => <option key={String(profile.id)} value={String(profile.id)}>{String(profile.id)} ({String(profile.machine)})</option>)}</select></label><label>Instance ID<input name="instance" required /></label><label>Session ID<input name="session" required /></label><button disabled={busy || !profiles.length}>{busy ? "Creating…" : "Create session"}</button></form>{error ? <p role="alert">{error}</p> : <p role="status">{profiles.length ? "Choose a profile." : "Loading profiles…"}</p>}</main>;
+  return <main className="machineemu-catalog"><header><p>LOCAL EMULATION {healthy === undefined ? "· checking service" : healthy ? "· service ready" : "· service unavailable"}</p><h1>MachineEmu</h1></header><form onSubmit={submit}><label>Profile<select name="profile" required>{profiles.map((profile) => <option key={String(profile.id)} value={String(profile.id)}>{String(profile.id)} ({String(profile.machine)})</option>)}</select></label><label>Instance ID<input name="instance" required /></label><label>Session ID<input name="session" required /></label><button disabled={busy || !profiles.length}>{busy ? "Creating…" : "Create session"}</button></form>{error ? <p role="alert">{error}</p> : <p role="status">{profiles.length ? "Choose a profile." : "Loading profiles…"}</p>}</main>;
 }
 function Session() {
   const api = useMemo(client, []); const { id = "" } = useParams(); const [query] = useSearchParams();
