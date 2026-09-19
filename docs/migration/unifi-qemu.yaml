@@ -93,10 +93,10 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [profile-config, external-assets]
-    evidence: [console/tests/test_pc_profile.py, console/tests/test_render.py]
+    evidence: [machineemu/machineemu@6f8d5a2, machineemu/machineemu@e2b318c, machineemu/machineemu@0345af3, machineemu/machineemu@1cdbc53, tests/test_unifi_firmware.py]
     state_policy: generated firmware is an artifact with input/output digests
     milestone: M3
-    status: queued
+    status: partial
   - id: analysis-domain
     source_paths: [assets/analysis, probes, smoke]
     capability: analysis identity, probes, and verification
