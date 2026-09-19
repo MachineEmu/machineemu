@@ -11,6 +11,7 @@ from .udm_pro import inspect as inspect_udm_pro
 from .udm_pro import prepare as prepare_udm_pro
 from .us24pro import inspect as inspect_us24pro
 from .us24pro import prepare as prepare_us24pro
+from .us24pro_diagnostics import materialize_fast_sdk_delay_calibration
 from .udm_pro_disk import build_disk as build_udm_pro_disk
 from .udm_pro_disk import copy_region, partitions as udm_pro_partitions
 from .udm_pro_spi import eeprom as udm_pro_eeprom
@@ -36,6 +37,7 @@ __all__ = [
     "read_cpio",
     "prepare_udm_pro",
     "prepare_us24pro",
+    "materialize_fast_sdk_delay_calibration",
     "prepare_firmware",
     "replace_file",
     "set_passwords",
