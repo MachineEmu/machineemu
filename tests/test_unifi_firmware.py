@@ -41,6 +41,7 @@ from machineemu.domains.unifi.firmware.udm_pro_spi import (
     legacy_crc32,
     write_template,
 )
+from machineemu.domains.unifi.firmware.udm_pro_disk import copy_region, partitions
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -222,3 +223,24 @@ def test_udm_pro_spi_identity_is_deterministic_and_retargetable(tmp_path: Path) 
         assert data[offset:offset + EEPROM_SIZE] == retargeted
     assert set(data[EEPROM_SIZE:EEPROM_OFFSET]) == {0xFF}
     assert SYSTEM_ID == 0xEA15
+
+
+def test_udm_pro_disk_layout_and_region_copy_are_bounded(tmp_path: Path) -> None:
+    template = tmp_path / "template.img"
+    table = entry_table()
+    with template.open("xb") as stream:
+        stream.truncate(SECTORS * SECTOR)
+        stream.seek(SECTOR)
+        stream.write(gpt_header(1, SECTORS - 1, 2, table))
+        stream.write(table)
+    layout = partitions(template)
+    assert [name for name, _, _ in layout] == [name for name, _, _, _ in ENTRIES]
+
+    source = tmp_path / "source.bin"
+    target = tmp_path / "target.bin"
+    source.write_bytes(b"A" * 4 + bytes(4) + b"B" * 4)
+    target.write_bytes(b"x" * 12)
+    copy_region(source, target, 0, 2, 12)
+    assert target.read_bytes() == b"xxAAAA" + bytes(4) + b"BBBB"
+    with pytest.raises(FirmwareError, match="truncated"):
+        copy_region(source, target, 0, 0, 13)
