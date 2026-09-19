@@ -42,6 +42,8 @@ from machineemu.domains.unifi.firmware.udm_pro_spi import (
     write_template,
 )
 from machineemu.domains.unifi.firmware.udm_pro_disk import build_disk, copy_region, partitions
+from machineemu.domains.unifi.firmware import squashfs
+from machineemu.domains.unifi.firmware.squashfs import SquashFS, library_path
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -139,6 +141,18 @@ def test_public_prepare_options_do_not_expose_passwords() -> None:
     options = PrepareOptions(passwords=(("ubnt", "private:password"),))
     assert options.public()["password_accounts"] == ["ubnt"]
     assert "private:password" not in repr(options)
+
+
+def test_squashfs_native_library_contract_is_explicit_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MACHINEEMU_SQUASHFS_LIBRARY", "/opt/test/libsquashfs.so.1")
+    assert library_path() == "/opt/test/libsquashfs.so.1"
+    monkeypatch.setattr(squashfs, "MAX_IMAGE", 64)
+    with pytest.raises(FirmwareError, match="exceeds bounds"):
+        SquashFS(bytes(65))
+    with pytest.raises(FirmwareError, match="exceeds bounds"):
+        SquashFS(b"too short")
 
 
 def archive_entry(name: str, data: bytes = b"", mode: int = stat.S_IFREG | 0o640, links: int = 1) -> Entry:
