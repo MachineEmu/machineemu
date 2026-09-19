@@ -2,6 +2,7 @@ import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react
 import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router";
 import { createCatalogSession } from "./catalog-flow";
 import { MachineEmuClient, type CatalogProfile, type SessionSummary } from "./client";
+import { profileDetail, type ProfileDetail } from "./profile-detail";
 
 function client(): MachineEmuClient {
   const token = document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "";
@@ -93,6 +94,50 @@ function Catalog() {
         </div>
       </form>
       {error ? <ErrorNotice>{error}</ErrorNotice> : !loading && !profiles.length ? <p className="notice">The service has no catalog profiles.</p> : null}
+    </section>
+    {!loading && profiles.length ? <section className="profile-list" aria-labelledby="profiles-title">
+      <h2 id="profiles-title">Available profiles</h2>
+      {profiles.map((profile) => <Link className="session-row" key={String(profile.id)} to={`/profiles/${encodeURIComponent(String(profile.id))}`}>
+        <strong>{String(profile.id)}</strong><span>{String(profile.machine)}</span>
+      </Link>)}
+    </section> : null}
+  </main>;
+}
+
+function DetailList({ title, values }: { title: string; values: Record<string, string | number> }) {
+  const entries = Object.entries(values);
+  if (!entries.length) return null;
+  return <section className="detail-section"><h3>{title}</h3><dl>{entries.map(([name, value]) => <div key={name}><dt>{name}</dt><dd>{value}</dd></div>)}</dl></section>;
+}
+
+function Profile({ detail }: { detail: ProfileDetail }) {
+  return <>
+    <p className="session-meta">Machine: {detail.machine}{detail.target && ` · ${detail.target}`}</p>
+    <DetailList title="Resources" values={detail.resources} />
+    {detail.devices.length ? <section className="detail-section"><h3>Declared devices</h3><p>{detail.devices.join(", ")}</p></section> : null}
+    {detail.networkMode ? <section className="detail-section"><h3>Network</h3><p>{detail.networkMode}</p></section> : null}
+    {detail.assetRequirements.length ? <section className="detail-section"><h3>Required imports</h3><ul>{detail.assetRequirements.map((asset) => <li key={asset.id}><strong>{asset.id}</strong> · {asset.kind}{asset.required ? " · required" : ""}{asset.note && ` — ${asset.note}`}</li>)}</ul></section> : null}
+  </>;
+}
+
+function ProfileRoute() {
+  const api = useMemo(client, []);
+  const { id = "" } = useParams();
+  const [detail, setDetail] = useState<ProfileDetail>();
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const load = useCallback(async () => {
+    setLoading(true); setError(undefined);
+    try { setDetail(profileDetail(await api.getProfile(id))); }
+    catch (reason) { setError(errorMessage(reason, "Unable to load profile.")); }
+    finally { setLoading(false); }
+  }, [api, id]);
+  useEffect(() => { if (id) void load(); }, [id, load]);
+  return <main className="machineemu-page">
+    <Link className="back-link" to="/">← Catalog</Link><Header />
+    <section className="panel" aria-labelledby="profile-title"><h2 id="profile-title">{loading ? "Loading profile…" : detail?.id ?? "Profile"}</h2>
+      {error ? <ErrorNotice>{error}</ErrorNotice> : detail ? <Profile detail={detail} /> : null}
+      <div className="actions"><button className="button button-secondary" disabled={loading} onClick={() => void load()}>Refresh</button></div>
     </section>
   </main>;
 }
@@ -218,6 +263,7 @@ function NotFound() {
 export function App() {
   return <Routes>
     <Route path="/" element={<Catalog />} />
+    <Route path="/profiles/:id" element={<ProfileRoute />} />
     <Route path="/sessions" element={<Sessions />} />
     <Route path="/sessions/:id" element={<Session />} />
     <Route path="*" element={<NotFound />} />

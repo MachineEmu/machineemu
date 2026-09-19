@@ -32,3 +32,12 @@ h2 { margin: 0; }
 .session-row { border: 1px solid #d6dfe3; border-radius: 6px; color: inherit; display: grid; gap: 4px; padding: 13px; text-decoration: none; }
 .session-row:hover { border-color: #145a7a; }
 .session-row span { color: #50616a; font-size: .9rem; }
+.profile-list { margin-top: 30px; }
+.profile-list h2 { margin-bottom: 12px; }
+.detail-section { border-top: 1px solid #d6dfe3; margin-top: 20px; padding-top: 16px; }
+.detail-section h3 { font-size: 1rem; margin: 0 0 8px; }
+.detail-section p, .detail-section ul { margin: 0; }
+.detail-section dl { display: grid; gap: 6px; margin: 0; }
+.detail-section dl div { display: flex; gap: 8px; }
+.detail-section dt { color: #50616a; min-width: 100px; }
+.detail-section dd { margin: 0; }
