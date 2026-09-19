@@ -5,6 +5,8 @@ from .models import Bundle, FirmwareError, PrepareOptions, load_bundle
 from .patches import Entry, read_cpio, replace_file, set_passwords, write_cpio
 from .squashfs import SquashFS, library_path as squashfs_library_path
 from .udm_pro_gpt import write_template as write_udm_pro_template
+from .udm_pro import inspect as inspect_udm_pro
+from .udm_pro import prepare as prepare_udm_pro
 from .udm_pro_disk import build_disk as build_udm_pro_disk
 from .udm_pro_disk import copy_region, partitions as udm_pro_partitions
 from .udm_pro_spi import eeprom as udm_pro_eeprom
@@ -23,8 +25,10 @@ __all__ = [
     "decompress",
     "fdt",
     "fit",
+    "inspect_udm_pro",
     "load_bundle",
     "read_cpio",
+    "prepare_udm_pro",
     "replace_file",
     "set_passwords",
     "squashfs_library_path",

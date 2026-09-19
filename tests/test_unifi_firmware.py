@@ -44,6 +44,7 @@ from machineemu.domains.unifi.firmware.udm_pro_spi import (
 from machineemu.domains.unifi.firmware.udm_pro_disk import build_disk, copy_region, partitions
 from machineemu.domains.unifi.firmware import squashfs
 from machineemu.domains.unifi.firmware.squashfs import SquashFS, library_path
+from machineemu.domains.unifi.firmware import udm_pro, udm_pro_factory_auth
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -153,6 +154,29 @@ def test_squashfs_native_library_contract_is_explicit_and_bounded(
         SquashFS(bytes(65))
     with pytest.raises(FirmwareError, match="exceeds bounds"):
         SquashFS(b"too short")
+
+
+def test_udm_diagnostic_initrd_adds_an_explicit_ordered_hook() -> None:
+    initrd = write_cpio([
+        archive_entry("scripts", mode=stat.S_IFDIR | 0o755),
+        archive_entry("scripts/init-bottom", mode=stat.S_IFDIR | 0o755),
+        archive_entry("scripts/init-bottom/ORDER", b"/scripts/init-bottom/10-base\n"),
+    ])
+    entries, _ = read_cpio(udm_pro._diagnostic_initrd(initrd))
+    files = {entry.name: entry for entry in entries}
+    assert files["scripts/init-bottom/ORDER"].data.endswith(b"/scripts/init-bottom/99-qemu-diagnostic\n")
+    assert files["scripts/init-bottom/99-qemu-diagnostic"].data == udm_pro.DIAGNOSTIC_HOOK
+
+
+def test_udm_factory_auth_bypass_is_diagnostic_hash_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    data = bytearray(udm_pro_factory_auth.OFFSET + len(udm_pro_factory_auth.BEFORE))
+    data[udm_pro_factory_auth.OFFSET : udm_pro_factory_auth.OFFSET + len(udm_pro_factory_auth.BEFORE)] = udm_pro_factory_auth.BEFORE
+    monkeypatch.setattr(udm_pro_factory_auth, "SOURCE_SHA256", hashlib.sha256(data).hexdigest())
+    patched, change = udm_pro_factory_auth.bypass_factory_auth(bytes(data))
+    assert patched[udm_pro_factory_auth.OFFSET : udm_pro_factory_auth.OFFSET + len(udm_pro_factory_auth.AFTER)] == udm_pro_factory_auth.AFTER
+    assert change["type"] == "bypass-factory-auth"
+    with pytest.raises(FirmwareError, match="hash"):
+        udm_pro_factory_auth.bypass_factory_auth(b"wrong")
 
 
 def archive_entry(name: str, data: bytes = b"", mode: int = stat.S_IFREG | 0o640, links: int = 1) -> Entry:
