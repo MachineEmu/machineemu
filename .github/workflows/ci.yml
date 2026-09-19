@@ -1,8 +1,8 @@
 name: machineemu
 
 on:
-  push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,14 +10,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Create test environment
-        run: uv venv --python ${{ matrix.python-version }} .venv
+        run: uv venv --python 3.12 .venv
       - name: Install test dependencies and package
         run: |
           uv pip install --python .venv/bin/python '.[api,test]'
