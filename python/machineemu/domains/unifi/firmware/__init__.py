@@ -3,6 +3,7 @@
 from .formats import Section, container, decompress, fdt, fit, uimage
 from .models import Bundle, FirmwareError, PrepareOptions, load_bundle
 from .patches import Entry, read_cpio, replace_file, set_passwords, write_cpio
+from .udm_pro_gpt import write_template as write_udm_pro_template
 
 __all__ = [
     "Bundle",
@@ -20,4 +21,5 @@ __all__ = [
     "set_passwords",
     "uimage",
     "write_cpio",
+    "write_udm_pro_template",
 ]

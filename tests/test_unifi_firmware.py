@@ -21,6 +21,16 @@ from machineemu.domains.unifi.firmware import (
     set_passwords,
     write_cpio,
 )
+from machineemu.domains.unifi.firmware.udm_pro_gpt import (
+    ENTRIES,
+    ENTRY_SIZE,
+    LAST_USABLE,
+    SECTOR,
+    SECTORS,
+    entry_table,
+    gpt_header,
+    protective_mbr,
+)
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -154,3 +164,28 @@ def test_password_patch_never_returns_secret_metadata(monkeypatch: pytest.Monkey
     assert changed[1].data.startswith(b"root:$6$replacement:")
     assert metadata == [{"type": "set-password", "account": "root", "path": "etc/shadow", "revision": "1"}]
     assert "private:password" not in json.dumps(metadata)
+
+
+def test_udm_pro_gpt_template_has_deterministic_valid_layout() -> None:
+    table = entry_table()
+    assert len(table) == 128 * ENTRY_SIZE
+    decoded = []
+    for index in range(len(ENTRIES)):
+        entry = table[index * ENTRY_SIZE : (index + 1) * ENTRY_SIZE]
+        first, last = struct.unpack_from("<QQ", entry, 32)
+        decoded.append((entry[56:ENTRY_SIZE].decode("utf-16-le").rstrip("\0"), first, last))
+    assert decoded == [(name, first, last) for name, _, first, last in ENTRIES]
+    assert decoded[0][1] == 2048
+    assert decoded[-1][2] < LAST_USABLE
+
+    primary = bytearray(gpt_header(1, SECTORS - 1, 2, table))
+    checksum = struct.unpack_from("<I", primary, 16)[0]
+    primary[16:20] = bytes(4)
+    assert primary[:8] == b"EFI PART"
+    assert zlib.crc32(primary[:92]) == checksum
+    assert struct.unpack_from("<I", primary, 88)[0] == zlib.crc32(table)
+
+    mbr = protective_mbr()
+    assert len(mbr) == SECTOR
+    assert mbr[450] == 0xEE
+    assert mbr[510:] == b"\x55\xaa"
