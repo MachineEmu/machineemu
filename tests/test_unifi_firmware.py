@@ -41,7 +41,7 @@ from machineemu.domains.unifi.firmware.udm_pro_spi import (
     legacy_crc32,
     write_template,
 )
-from machineemu.domains.unifi.firmware.udm_pro_disk import copy_region, partitions
+from machineemu.domains.unifi.firmware.udm_pro_disk import build_disk, copy_region, partitions
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -244,3 +244,43 @@ def test_udm_pro_disk_layout_and_region_copy_are_bounded(tmp_path: Path) -> None
     assert target.read_bytes() == b"xxAAAA" + bytes(4) + b"BBBB"
     with pytest.raises(FirmwareError, match="truncated"):
         copy_region(source, target, 0, 0, 13)
+
+
+def test_udm_pro_disk_builder_copies_only_boot_regions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import machineemu.domains.unifi.firmware.udm_pro_disk as disk
+
+    layout = [
+        ("boot", 4096, 4096),
+        ("recovery", 8192, 4096),
+        ("root", 12288, 4096),
+        ("log", 16384, 4096),
+        ("persistent", 20480, 4096),
+        ("overlay", 24576, 4096),
+    ]
+    template = tmp_path / "template.img"
+    template.write_bytes(b"G" * 4096 + b"BOOT" * 1024 + b"RECV" * 1024 + b"ROOT" * 1024 + b"L" * 16384)
+    rootfs = tmp_path / "rootfs.img"
+    rootfs.write_bytes(b"R" * 4096)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(disk, "partitions", lambda value: layout)
+    monkeypatch.setattr(disk.shutil, "which", lambda value: "/usr/sbin/mke2fs")
+    monkeypatch.setattr(disk.subprocess, "run", lambda command, **kwargs: commands.append(command))
+    output = tmp_path / "output.img"
+    build_disk(template, output, rootfs, scratch)
+    data = output.read_bytes()
+    assert data[4096:8192] == b"BOOT" * 1024
+    assert data[8192:12288] == b"RECV" * 1024
+    assert data[12288:16384] != b"ROOT" * 1024
+    assert [command[command.index("-L") + 1] for command in commands] == ["root", "log", "persistent", "overlay"]
+    assert all(command[-1].endswith(".ext4") for command in commands)
+    assert not list(scratch.glob("*.ext4"))
+
+    unaligned = tmp_path / "unaligned.img"
+    unaligned.write_bytes(b"x")
+    with pytest.raises(FirmwareError, match="loop-device sector"):
+        build_disk(template, tmp_path / "bad.img", unaligned, scratch)

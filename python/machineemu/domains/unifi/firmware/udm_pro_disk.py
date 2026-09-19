@@ -6,7 +6,11 @@ regions.  They never mount, extract, or inherit guest-owned state.
 
 from __future__ import annotations
 
+import os
+import shutil
 import struct
+import subprocess
+import uuid
 from pathlib import Path
 import zlib
 
@@ -15,6 +19,9 @@ from .models import FirmwareError
 
 PARTITIONS = ("boot", "recovery", "root", "log", "persistent", "overlay")
 SECTOR = 512
+ROOTFS_ALIGNMENT = 4096
+# The hash-pinned source revision whose partition UUIDs this recipe reproduces.
+SOURCE_REVISION = "163cde709c66d596f2b1940445193aede82883bc443bca0972c94e4ea84e3cfa"
 
 
 def partitions(path: Path) -> list[tuple[str, int, int]]:
@@ -72,3 +79,50 @@ def copy_region(source: Path, target: Path, source_offset: int, target_offset: i
             else:
                 dst.seek(len(data), 1)
             remaining -= len(data)
+
+
+def build_disk(template: Path, output: Path, rootfs: Path, scratch: Path) -> None:
+    """Create fresh UDM-Pro storage without mounting or inheriting guest state.
+
+    The caller supplies a validated UDM-Pro GPT template and an aligned rootfs
+    image. Only the partition tables plus boot/recovery are copied; all
+    guest-owned partitions are freshly formatted with deterministic UUIDs.
+    """
+    if rootfs.stat().st_size % ROOTFS_ALIGNMENT:
+        raise FirmwareError("the rootfs image must be padded to a loop-device sector boundary")
+    layout = partitions(template)
+    binary = shutil.which("mke2fs")
+    if binary is None:
+        raise FirmwareError("mke2fs is required for unprivileged UDM disk construction")
+    size = template.stat().st_size
+    with output.open("xb") as stream:
+        stream.truncate(size)
+    # Preserve only structural GPT data plus the bootloader partitions; never
+    # import donor log/config/overlay state into a fresh instance.
+    copy_region(template, output, 0, 0, layout[0][1])
+    copy_region(template, output, size - 33 * SECTOR, size - 33 * SECTOR, 33 * SECTOR)
+    root_tree = scratch / "root-tree"
+    root_tree.mkdir()
+    (root_tree / "rootfs").hardlink_to(rootfs)
+    for name, offset, length in layout:
+        if name in {"boot", "recovery"}:
+            copy_region(template, output, offset, offset, length)
+            continue
+        partition = scratch / f"{name}.ext4"
+        with partition.open("xb") as stream:
+            stream.truncate(length)
+        command = [
+            binary, "-q", "-F", "-t", "ext4", "-b", "4096", "-I", "256", "-L", name,
+            "-U", str(uuid.uuid5(uuid.NAMESPACE_URL, f"{SOURCE_REVISION}/{name}")),
+            "-O", "^orphan_file,^metadata_csum_seed", "-E", "lazy_itable_init=0,lazy_journal_init=0",
+        ]
+        if name == "root":
+            command.extend(("-d", str(root_tree)))
+        subprocess.run(
+            [*command, str(partition)],
+            check=True,
+            capture_output=True,
+            env={**os.environ, "E2FSPROGS_FAKE_TIME": "0"},
+        )
+        copy_region(partition, output, 0, offset, length)
+        partition.unlink()
