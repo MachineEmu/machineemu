@@ -224,7 +224,7 @@ def test_us24pro_lab_signing_uses_synthetic_identity_and_keeps_a_public_record(
 
 def test_us24pro_calibration_patch_is_elf_mapped_and_hash_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
     data = bytearray(0x1100)
-    data[:52] = struct.pack("<16sHHIIIIIHHHHHH", b"\x7fELF\x01\x01" + bytes(10), 2, 40, 1, 0, 52, 0, 0, 0, 52, 32, 1, 0, 0, 0)
+    data[:52] = struct.pack("<16sHHIIIIIHHHHHH", b"\x7fELF\x01\x01" + bytes(10), 2, 40, 1, 0, 52, 0, 0, 52, 32, 1, 0, 0, 0)
     data[52:84] = struct.pack("<IIIIIIII", 1, 0x100, 0x1000, 0, 0x1000, 0, 0, 0)
     monkeypatch.setattr(us24pro_diagnostics, "ROUTINE_VA", 0x1000)
     data[0x100:0x100 + len(us24pro_diagnostics.BEFORE)] = us24pro_diagnostics.BEFORE
