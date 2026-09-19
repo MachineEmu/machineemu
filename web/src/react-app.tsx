@@ -191,6 +191,7 @@ function Session() {
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [qmp, setQmp] = useState<string>();
   const validRoute = Boolean(instance && id);
 
   const refresh = useCallback(async () => {
@@ -203,6 +204,7 @@ function Session() {
       ]);
       setState(String(session.state));
       setFiles(Number(inventory.file_count));
+      void api.qmpStatus(instance, id).then((value) => setQmp(value.status)).catch(() => setQmp(undefined));
     } catch (reason) {
       setError(errorMessage(reason, "Unable to inspect session."));
     } finally {
@@ -238,6 +240,7 @@ function Session() {
       {!validRoute ? <ErrorNotice>The session URL must include an instance ID.</ErrorNotice> : <>
         <p className="session-meta"><strong>{id}</strong> · {loading ? "Loading…" : state ?? "Unknown state"}</p>
         <p className="session-meta">Instance: {instance}{files !== undefined && ` · ${files} managed state files`}</p>
+        {qmp && <p className="session-meta">QMP: {qmp}</p>}
         <div className="actions">
           <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/terminal?instance=${encodeURIComponent(instance)}`}>Terminal</Link>
           <button className="button button-secondary" disabled={busy || loading} onClick={() => void action("reconcile")}>

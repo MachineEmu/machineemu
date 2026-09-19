@@ -225,6 +225,26 @@ def test_api_start_and_stop_delegate_to_application(monkeypatch, tmp_path):
     assert stopped.json() == {"session_id": "session-1", "exit_code": 0, "state": "stopped"}
 
 
+def test_api_exposes_only_qmp_status(monkeypatch, tmp_path):
+    config = OperatorConfig(tmp_path / "engines", tmp_path / "assets", tmp_path / "state", tmp_path / "runtime", tmp_path / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    state = config.state_root / "instances/instance-1"
+    artifact = config.artifact_root / "sessions/session-1"
+    for path in (runtime, state, artifact):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({"schema_version": 1, "session_id": "session-1", "instance_id": "instance-1"}), encoding="utf-8")
+    application = OperatorApplication(config)
+
+    async def fake_status(record):
+        assert record.session_id == "session-1"
+        return {"status": "running", "running": True, "singlestep": False}
+
+    monkeypatch.setattr(application, "qmp_status", fake_status)
+    client = TestClient(create_app(application, token="test-token"), base_url="http://127.0.0.1")
+    response = client.get("/api/v1/sessions/instance-1/session-1/qmp/status", headers={"X-MachineEmu-Token": "test-token"})
+    assert response.json() == {"status": "running", "running": True, "singlestep": False}
+
+
 def test_api_catalog_is_read_only_and_id_indexed(tmp_path, monkeypatch):
     config = OperatorConfig(
         tmp_path / "engines", tmp_path / "assets", tmp_path / "state",

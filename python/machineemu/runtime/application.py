@@ -15,6 +15,7 @@ from .config import OperatorConfig
 from .instance import InstanceStore
 from .migration import inventory_json
 from .state import SessionRecord, SessionStore
+from .qmp import QMPClient, QMPError
 from .supervisor import RunningSession, SessionSupervisor
 
 
@@ -114,6 +115,21 @@ class OperatorApplication:
         if endpoint != str(expected) or not expected.is_socket():
             raise ValueError("session has no available UART terminal")
         return expected
+
+    async def qmp_status(self, record: SessionRecord) -> dict[str, object]:
+        """Expose only QMP's non-mutating status query to browser callers."""
+        _, endpoint = self.recorded_plan(record)
+        expected = record.runtime_dir / "sockets" / "qmp.sock"
+        if endpoint != expected:
+            raise ValueError("session QMP endpoint is not owned by its runtime directory")
+        client = await QMPClient.connect(endpoint, timeout=1.0)
+        try:
+            result = await client.execute("query-status", timeout=1.0)
+        finally:
+            await client.close()
+        if not isinstance(result, dict) or not isinstance(result.get("status"), str):
+            raise QMPError("QMP status response is invalid")
+        return {key: result[key] for key in ("status", "running", "singlestep") if key in result}
 
     def inventory_instance(self, instance_id: str) -> dict[str, object]:
         """Return a read-only inventory for an existing durable instance."""

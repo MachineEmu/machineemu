@@ -144,6 +144,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{instance_id}/{session_id}/qmp/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Qmp Status */
+        get: operations["qmp_status_api_v1_sessions__instance_id___session_id__qmp_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{instance_id}/{session_id}/start": {
         parameters: {
             query?: never;
@@ -230,6 +247,15 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** QmpStatus */
+        QmpStatus: {
+            /** Running */
+            running?: boolean | null;
+            /** Singlestep */
+            singlestep?: boolean | null;
+            /** Status */
+            status: string;
         };
         /** SessionInventory */
         SessionInventory: {
@@ -545,6 +571,38 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    qmp_status_api_v1_sessions__instance_id___session_id__qmp_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instance_id: string;
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QmpStatus"];
                 };
             };
             /** @description Validation Error */

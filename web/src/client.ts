@@ -15,6 +15,7 @@ export type StateInventory = paths["/api/v1/instances/{instance_id}/state/invent
 export type SessionInventory = paths["/api/v1/sessions"]["get"]["responses"][200]["content"]["application/json"];
 export type SessionSummary = SessionInventory["sessions"][number];
 export type TerminalTicket = paths["/api/v1/sessions/{instance_id}/{session_id}/terminal/ticket"]["post"]["responses"][200]["content"]["application/json"];
+export type QmpStatus = paths["/api/v1/sessions/{instance_id}/{session_id}/qmp/status"]["get"]["responses"][200]["content"]["application/json"];
 
 
 export interface MachineEmuClientOptions {
@@ -75,6 +76,10 @@ export class MachineEmuClient {
     return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/terminal/ticket`, {
       method: "POST", body: {},
     });
+  }
+
+  async qmpStatus(instanceId: string, sessionId: string): Promise<QmpStatus> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/qmp/status`);
   }
 
   async reconcileSession(request: SessionRequest): Promise<ReconcileResponse> {

@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .catalog import CatalogError, ProfileCatalog
-from .runtime import OperatorApplication, TerminalTicketStore
+from .runtime import OperatorApplication, QMPError, TerminalTicketStore
 
 
 class SessionRequest(BaseModel):
@@ -52,6 +52,12 @@ class SessionInventory(BaseModel):
 class TerminalTicket(BaseModel):
     ticket: str
     expires_in_seconds: int
+
+
+class QmpStatus(BaseModel):
+    status: str
+    running: bool | None = None
+    singlestep: bool | None = None
 
 
 def _loopback_host(host: str) -> bool:
@@ -106,6 +112,13 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         ticket = app.state.terminal_tickets.issue(instance_id, session_id)
         return TerminalTicket(ticket=ticket, expires_in_seconds=30)
+
+    @app.get("/api/v1/sessions/{instance_id}/{session_id}/qmp/status", response_model=QmpStatus)
+    async def qmp_status(instance_id: str, session_id: str) -> dict[str, object]:
+        try:
+            return await application.qmp_status(application.open_session(instance_id, session_id))
+        except (ValueError, OSError, QMPError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.websocket("/ws/v1/sessions/{instance_id}/{session_id}/terminal")
     async def terminal(websocket: WebSocket, instance_id: str, session_id: str) -> None:

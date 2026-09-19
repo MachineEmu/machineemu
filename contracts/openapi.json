@@ -106,6 +106,41 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "QmpStatus": {
+        "properties": {
+          "running": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Running"
+          },
+          "singlestep": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Singlestep"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "QmpStatus",
+        "type": "object"
+      },
       "SessionInventory": {
         "properties": {
           "sessions": {
@@ -569,6 +604,54 @@
           }
         },
         "summary": "Inspect"
+      }
+    },
+    "/api/v1/sessions/{instance_id}/{session_id}/qmp/status": {
+      "get": {
+        "operationId": "qmp_status_api_v1_sessions__instance_id___session_id__qmp_status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QmpStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Qmp Status"
       }
     },
     "/api/v1/sessions/{instance_id}/{session_id}/start": {
