@@ -47,6 +47,7 @@ from machineemu.domains.unifi.firmware.udm_pro_disk import build_disk, copy_regi
 from machineemu.domains.unifi.firmware import squashfs
 from machineemu.domains.unifi.firmware.squashfs import SquashFS, library_path
 from machineemu.domains.unifi.firmware import udm_pro, udm_pro_factory_auth
+from machineemu.domains.unifi.firmware import us24pro_signature
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -179,6 +180,19 @@ def test_udm_factory_auth_bypass_is_diagnostic_hash_pinned(monkeypatch: pytest.M
     assert change["type"] == "bypass-factory-auth"
     with pytest.raises(FirmwareError, match="hash"):
         udm_pro_factory_auth.bypass_factory_auth(b"wrong")
+
+
+def test_us24pro_signature_bypass_is_hash_pinned_and_keeps_archive_safety(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = bytearray(us24pro_signature.OFFSET + 4)
+    binary[us24pro_signature.OFFSET : us24pro_signature.OFFSET + 4] = us24pro_signature.BEFORE
+    monkeypatch.setattr(us24pro_signature, "UBNTBOX_SHA256", hashlib.sha256(binary).hexdigest())
+    entries, change = us24pro_signature.bypass_signature([archive_entry("bin/ubntbox", bytes(binary), 0o100755)])
+    assert entries[0].data[us24pro_signature.OFFSET : us24pro_signature.OFFSET + 4] == us24pro_signature.AFTER
+    assert change["type"] == "bypass-factory-signature"
+    with pytest.raises(FirmwareError, match="non-hardlinked"):
+        us24pro_signature.bypass_signature([archive_entry("bin/ubntbox", bytes(binary), links=2)])
 
 
 def test_udm_lab_signing_keeps_the_verifier_and_emits_only_public_material(

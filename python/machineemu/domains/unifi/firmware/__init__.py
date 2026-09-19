@@ -9,6 +9,8 @@ from .service import prepare as prepare_firmware
 from .udm_pro_gpt import write_template as write_udm_pro_template
 from .udm_pro import inspect as inspect_udm_pro
 from .udm_pro import prepare as prepare_udm_pro
+from .us24pro import inspect as inspect_us24pro
+from .us24pro import prepare as prepare_us24pro
 from .udm_pro_disk import build_disk as build_udm_pro_disk
 from .udm_pro_disk import copy_region, partitions as udm_pro_partitions
 from .udm_pro_spi import eeprom as udm_pro_eeprom
@@ -28,10 +30,12 @@ __all__ = [
     "fdt",
     "fit",
     "inspect_udm_pro",
+    "inspect_us24pro",
     "inspect_firmware",
     "load_bundle",
     "read_cpio",
     "prepare_udm_pro",
+    "prepare_us24pro",
     "prepare_firmware",
     "replace_file",
     "set_passwords",

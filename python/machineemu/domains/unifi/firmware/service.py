@@ -15,10 +15,10 @@ import zlib
 from pathlib import Path
 from types import ModuleType
 
-from . import udm_pro
+from . import udm_pro, us24pro
 from .models import Bundle, FirmwareError, FirmwareInfo, PrepareOptions, digest, load_bundle, manifest_for, write_json
 
-RECIPES: dict[str, ModuleType] = {"udm-pro": udm_pro}
+RECIPES: dict[str, ModuleType] = {"udm-pro": udm_pro, "us24pro": us24pro}
 
 
 def recipe(device: str) -> ModuleType:
