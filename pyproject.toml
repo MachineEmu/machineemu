@@ -10,6 +10,7 @@ dependencies = []
 
 [project.optional-dependencies]
 api = ["fastapi>=0.115,<1"]
+lab = ["cryptography>=43,<51"]
 test = ["pytest>=8", "httpx2>=2"]
 
 [project.scripts]

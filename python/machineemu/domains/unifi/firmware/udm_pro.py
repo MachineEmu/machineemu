@@ -86,8 +86,6 @@ def prepare(source: Path, output: Path, options: PrepareOptions) -> PreparedFirm
     """Prepare an output directory. Publication and manifesting are coordinated above this recipe."""
     if options.rootfs != "embedded":
         raise FirmwareError("UDM rootfs is disk-backed; --rootfs external is a U6+ option")
-    if options.factory_lab_key is not None:
-        raise FirmwareError("UDM factory lab-key preparation is not yet migrated")
     if options.system_id is not None and options.spi_template is not None:
         raise FirmwareError("--system-id retargets generated SPI identity; it cannot be combined with --spi-template")
     spi_template = options.spi_template or write_spi_template(
@@ -101,6 +99,7 @@ def prepare(source: Path, output: Path, options: PrepareOptions) -> PreparedFirm
         info, images = _read(source)
         rootfs = _rootfs(source)
         changes: list[dict[str, str]] = []
+        signed_eeprom: bytes | None = None
         with SquashFS(rootfs) as fs:
             replacement: dict[str, bytes] = {}
             if options.passwords:
@@ -112,6 +111,19 @@ def prepare(source: Path, output: Path, options: PrepareOptions) -> PreparedFirm
                 entries, password_changes = set_passwords(entries, options.passwords, "etc/passwd", "etc/shadow", verified_scheme="5")
                 replacement = {entry.name: entry.data for entry in entries}
                 changes.extend(password_changes)
+            if options.factory_lab_key is not None:
+                from .udm_pro_lab import PATH, lab_factory
+
+                with spi_template.open("rb") as stream:
+                    stream.seek(0x1F0000)
+                    seed = stream.read(65536)
+                patched, signed_eeprom, public_pem, modification = lab_factory(
+                    fs.read(PATH), seed, options.factory_lab_key
+                )
+                replacement[PATH] = patched
+                (output / "eeprom.bin").write_bytes(signed_eeprom)
+                (output / "factory-lab-public.pem").write_bytes(public_pem)
+                changes.append(modification)
             if options.bypass_factory_auth:
                 from .udm_pro_factory_auth import PATH, bypass_factory_auth
                 patched, modification = bypass_factory_auth(fs.read(PATH))
@@ -140,6 +152,8 @@ def prepare(source: Path, output: Path, options: PrepareOptions) -> PreparedFirm
             shutil.rmtree(scratch)
         with spi_template.open("rb") as stream:
             factory = stream.read(2 * 1024**2)
+        if signed_eeprom is not None:
+            factory = factory[:0x1F0000] + signed_eeprom
         (output / "spi.img").write_bytes(factory + b"\xff" * (6 * 1024**2))
         return PreparedFirmware(
             info, ADAPTER,

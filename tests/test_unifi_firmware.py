@@ -181,6 +181,33 @@ def test_udm_factory_auth_bypass_is_diagnostic_hash_pinned(monkeypatch: pytest.M
         udm_pro_factory_auth.bypass_factory_auth(b"wrong")
 
 
+def test_udm_lab_signing_keeps_the_verifier_and_emits_only_public_material(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa, utils
+    from machineemu.domains.unifi.firmware import factory_signing, udm_pro_lab
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
+    key_path = tmp_path / "lab.pem"
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    original = bytearray(udm_pro_lab.MODULUS_OFFSET + udm_pro_lab.MODULUS_SIZE)
+    original[udm_pro_factory_auth.OFFSET : udm_pro_factory_auth.OFFSET + len(udm_pro_factory_auth.BEFORE)] = udm_pro_factory_auth.BEFORE
+    monkeypatch.setattr(udm_pro_lab, "SOURCE_SHA256", hashlib.sha256(original).hexdigest())
+    seed = bytearray(b"\xff" * 65536)
+    seed[:16] = bytes.fromhex("5254004d50015254004d5002ea150777")
+    patched, image, public_pem, record = udm_pro_lab.lab_factory(bytes(original), bytes(seed), key_path)
+    assert patched[:udm_pro_lab.MODULUS_OFFSET] == original[:udm_pro_lab.MODULUS_OFFSET]
+    assert patched[udm_pro_lab.MODULUS_OFFSET : udm_pro_lab.MODULUS_OFFSET + udm_pro_lab.MODULUS_SIZE] == factory_signing.encode_modulus(key.public_key().public_numbers().n)
+    public = serialization.load_pem_public_key(public_pem)
+    public.verify(image[0xBE00:0xC000], factory_signing.double_sha512(image[0x1000:0xBE00]),
+                  padding.PKCS1v15(), utils.Prehashed(hashes.SHA512()))
+    assert record["public_key_sha256"] == hashlib.sha256(public_pem).hexdigest()
+    assert key_path.read_bytes() not in public_pem
+
+
 def test_firmware_service_publishes_only_verified_idempotent_bundles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

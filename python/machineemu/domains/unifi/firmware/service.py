@@ -46,6 +46,12 @@ def _tool_versions(device: str, options: PrepareOptions) -> dict[str, str]:
         binary = shutil.which("openssl")
         if binary:
             versions["openssl"] = digest(Path(binary))
+    if options.factory_lab_key is not None:
+        try:
+            import cryptography
+        except ImportError as exc:
+            raise FirmwareError("lab signing requires cryptography; install machineemu[lab]") from exc
+        versions["cryptography"] = cryptography.__version__
     return versions
 
 
