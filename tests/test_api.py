@@ -31,6 +31,36 @@ def test_api_health_and_session_inspection(tmp_path):
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+def test_api_lists_only_public_complete_session_summaries(tmp_path):
+    config = OperatorConfig(
+        tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
+        tmp_path / "runtime", tmp_path / "artifacts",
+    )
+    runtime = config.runtime_root / "sessions/session-1"
+    state = config.state_root / "instances/instance-1"
+    artifact = config.artifact_root / "sessions/session-1"
+    for path in (runtime, state, artifact):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "profile_id": "udm-pro-lab", "machine": "udm-pro", "state": "stopped",
+        "configuration": {"devices": {"lcd": True, "bluetooth": True}},
+        "launch_plan": {"argv": ["/private/qemu"]},
+    }), encoding="utf-8")
+    # Partial directories are normal after interrupted work and are not listed.
+    (config.runtime_root / "sessions/partial").mkdir(parents=True)
+
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"),
+                        base_url="http://127.0.0.1")
+    response = client.get("/api/v1/sessions", headers={"X-MachineEmu-Token": "test-token"})
+    assert response.status_code == 200
+    assert response.json() == {"sessions": [{
+        "session_id": "session-1", "instance_id": "instance-1", "profile_id": "udm-pro-lab",
+        "machine": "udm-pro", "state": "stopped",
+        "capabilities": {"lcd_view": {"available": True}, "bluetooth": {"available": True}},
+    }]}
+
+
 def test_api_requires_same_origin_for_mutations(tmp_path):
     config = OperatorConfig(
         tmp_path / "engines", tmp_path / "assets", tmp_path / "state",

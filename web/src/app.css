@@ -28,3 +28,7 @@ h2 { margin: 0; }
 .notice-error { border-color: #a32d2d; background: #fff4f4; }
 .session-meta { color: #50616a; margin: 6px 0 0; }
 .back-link { color: #145a7a; display: inline-block; margin-bottom: 18px; }
+.session-list { display: grid; gap: 10px; margin-top: 20px; }
+.session-row { border: 1px solid #d6dfe3; border-radius: 6px; color: inherit; display: grid; gap: 4px; padding: 13px; text-decoration: none; }
+.session-row:hover { border-color: #145a7a; }
+.session-row span { color: #50616a; font-size: .9rem; }

@@ -39,6 +39,23 @@ describe("MachineEmuClient", () => {
     expect(calls[0].method).toBe("GET");
   });
 
+  it("lists public session summaries", async () => {
+    const calls: Request[] = [];
+    const client = new MachineEmuClient({
+      baseUrl: "http://127.0.0.1", token: "token",
+      fetchImpl: async (input, init) => {
+        calls.push(new Request(input, init));
+        return new Response(JSON.stringify({ sessions: [{
+          session_id: "session", instance_id: "instance", profile_id: "demo", machine: "virt",
+          state: "stopped", capabilities: {},
+        }] }), { status: 200 });
+      },
+    });
+    const sessions = await client.listSessions();
+    expect(sessions[0].session_id).toBe("session");
+    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/sessions");
+  });
+
   it("sends same-origin mutation bodies as JSON", async () => {
     const calls: Request[] = [];
     const client = new MachineEmuClient({

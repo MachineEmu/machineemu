@@ -31,6 +31,23 @@ class CreateCatalogSessionRequest(SessionRequest):
     target: str | None = Field(default=None, max_length=128)
 
 
+class Capability(BaseModel):
+    available: bool
+
+
+class SessionSummary(BaseModel):
+    session_id: str
+    instance_id: str
+    profile_id: str
+    machine: str
+    state: str
+    capabilities: dict[str, Capability] = Field(default_factory=dict)
+
+
+class SessionInventory(BaseModel):
+    sessions: list[SessionSummary]
+
+
 def _loopback_host(host: str) -> bool:
     hostname = host.rsplit(":", 1)[0].strip("[]").lower()
     return hostname in {"localhost", "127.0.0.1", "::1"}
@@ -68,6 +85,10 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
     @app.get("/api/v1/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/v1/sessions", response_model=SessionInventory)
+    async def sessions() -> dict[str, list[dict[str, object]]]:
+        return {"sessions": application.list_session_summaries()}
 
     @app.get("/api/v1/catalog/profiles")
     async def catalog_profiles() -> list[dict]:

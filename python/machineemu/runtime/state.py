@@ -100,6 +100,32 @@ class SessionStore:
             raise RuntimeStateError("session directory layout is incomplete")
         return SessionRecord(session_id, instance_id, runtime_dir, state_dir, artifact_dir, manifest)
 
+    def list_records(self) -> list[SessionRecord]:
+        """Return complete, owned session records without trusting directory names."""
+        root = self.runtime_root / "sessions"
+        if not root.is_dir() or root.is_symlink():
+            return []
+        records: list[SessionRecord] = []
+        try:
+            candidates = sorted(root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            return []
+        for runtime_dir in candidates:
+            if runtime_dir.is_symlink() or not runtime_dir.is_dir():
+                continue
+            try:
+                session_id = _validate_id(runtime_dir.name, "session_id")
+                manifest = runtime_dir / "manifest.json"
+                if manifest.is_symlink() or not manifest.is_file():
+                    continue
+                value = json.loads(manifest.read_text(encoding="utf-8"))
+                instance_id = _validate_id(value.get("instance_id"), "instance_id")
+                records.append(self.open(instance_id, session_id))
+            except (OSError, json.JSONDecodeError, RuntimeStateError):
+                # A stale or partial session must not make the directory unusable.
+                continue
+        return records
+
     def update(self, record: SessionRecord, state: str, *, pid: int | None = None,
                exit_code: int | None = None, metadata: dict[str, Any] | None = None) -> None:
         """Persist a controlled lifecycle transition in the session manifest."""

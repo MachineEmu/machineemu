@@ -12,6 +12,8 @@ export type CatalogProfile = paths["/api/v1/catalog/profiles"]["get"]["responses
 export type CatalogSessionRequest = paths["/api/v1/catalog/sessions"]["post"]["requestBody"]["content"]["application/json"];
 export type CatalogSessionResponse = paths["/api/v1/catalog/sessions"]["post"]["responses"][201]["content"]["application/json"];
 export type StateInventory = paths["/api/v1/instances/{instance_id}/state/inventory"]["get"]["responses"][200]["content"]["application/json"];
+export type SessionInventory = paths["/api/v1/sessions"]["get"]["responses"][200]["content"]["application/json"];
+export type SessionSummary = SessionInventory["sessions"][number];
 
 
 export interface MachineEmuClientOptions {
@@ -61,6 +63,11 @@ export class MachineEmuClient {
 
   async inventoryInstanceState(instanceId: string): Promise<StateInventory> {
     return this.request(`/api/v1/instances/${encodeURIComponent(instanceId)}/state/inventory`);
+  }
+
+  async listSessions(): Promise<SessionSummary[]> {
+    const inventory = await this.request<SessionInventory>("/api/v1/sessions");
+    return inventory.sessions;
   }
 
   async reconcileSession(request: SessionRequest): Promise<ReconcileResponse> {

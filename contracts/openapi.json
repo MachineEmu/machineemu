@@ -1,6 +1,19 @@
 {
   "components": {
     "schemas": {
+      "Capability": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "Capability",
+        "type": "object"
+      },
       "CreateCatalogSessionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -93,6 +106,22 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "SessionInventory": {
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSummary"
+            },
+            "title": "Sessions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "title": "SessionInventory",
+        "type": "object"
+      },
       "SessionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -114,6 +143,46 @@
           "session_id"
         ],
         "title": "SessionRequest",
+        "type": "object"
+      },
+      "SessionSummary": {
+        "properties": {
+          "capabilities": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Capability"
+            },
+            "title": "Capabilities",
+            "type": "object"
+          },
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "machine": {
+            "title": "Machine",
+            "type": "string"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "instance_id",
+          "profile_id",
+          "machine",
+          "state"
+        ],
+        "title": "SessionSummary",
         "type": "object"
       },
       "ValidationError": {
@@ -335,6 +404,22 @@
       }
     },
     "/api/v1/sessions": {
+      "get": {
+        "operationId": "sessions_api_v1_sessions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInventory"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sessions"
+      },
       "post": {
         "operationId": "create_session_api_v1_sessions_post",
         "requestBody": {

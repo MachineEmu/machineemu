@@ -70,6 +70,34 @@ class OperatorApplication:
     def open_session(self, instance_id: str, session_id: str) -> SessionRecord:
         return self.store.open(instance_id, session_id)
 
+    def list_session_summaries(self) -> list[dict[str, object]]:
+        """List public session metadata without returning host paths or launch argv."""
+        summaries: list[dict[str, object]] = []
+        for record in self.store.list_records():
+            try:
+                manifest = json.loads(record.manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(manifest, dict):
+                continue
+            configuration = manifest.get("configuration")
+            devices = configuration.get("devices") if isinstance(configuration, dict) else None
+            capabilities: dict[str, dict[str, bool]] = {}
+            if isinstance(devices, dict):
+                if devices.get("lcd") is True:
+                    capabilities["lcd_view"] = {"available": True}
+                if devices.get("bluetooth") is True:
+                    capabilities["bluetooth"] = {"available": True}
+            summaries.append({
+                "session_id": record.session_id,
+                "instance_id": record.instance_id,
+                "profile_id": manifest.get("profile_id", "unknown"),
+                "machine": manifest.get("machine", "unknown"),
+                "state": manifest.get("state", "unknown"),
+                "capabilities": capabilities,
+            })
+        return summaries
+
     def inventory_instance(self, instance_id: str) -> dict[str, object]:
         """Return a read-only inventory for an existing durable instance."""
         record = self.instances.open(instance_id)

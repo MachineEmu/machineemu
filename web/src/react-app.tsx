@@ -1,7 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router";
 import { createCatalogSession } from "./catalog-flow";
-import { MachineEmuClient, type CatalogProfile } from "./client";
+import { MachineEmuClient, type CatalogProfile, type SessionSummary } from "./client";
 
 function client(): MachineEmuClient {
   const token = document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "";
@@ -86,12 +86,52 @@ function Catalog() {
           <button className="button" disabled={busy || loading || !profiles.length}>
             {busy ? "Creating…" : "Create session"}
           </button>
+          <Link className="button button-secondary" to="/sessions">Open sessions</Link>
           <button className="button button-secondary" type="button" disabled={loading || busy} onClick={() => void reload()}>
             Refresh catalog
           </button>
         </div>
       </form>
       {error ? <ErrorNotice>{error}</ErrorNotice> : !loading && !profiles.length ? <p className="notice">The service has no catalog profiles.</p> : null}
+    </section>
+  </main>;
+}
+
+function Sessions() {
+  const api = useMemo(client, []);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(undefined);
+    try {
+      setSessions(await api.listSessions());
+    } catch (reason) {
+      setError(errorMessage(reason, "Unable to list sessions."));
+    } finally {
+      setLoading(false);
+    }
+  }, [api]);
+  useEffect(() => { void reload(); }, [reload]);
+
+  return <main className="machineemu-page">
+    <Link className="back-link" to="/">← Catalog</Link>
+    <Header />
+    <section className="panel" aria-labelledby="sessions-title">
+      <h2 id="sessions-title">Sessions</h2>
+      <p className="session-meta">Only complete, MachineEmu-owned session records are shown.</p>
+      <div className="actions"><button className="button button-secondary" disabled={loading} onClick={() => void reload()}>Refresh</button></div>
+      {error ? <ErrorNotice>{error}</ErrorNotice> : null}
+      {!loading && !error && !sessions.length ? <p className="notice">No sessions found.</p> : null}
+      <div className="session-list">
+        {sessions.map((session) => <Link className="session-row" key={session.session_id}
+          to={`/sessions/${encodeURIComponent(session.session_id)}?instance=${encodeURIComponent(session.instance_id)}`}>
+          <strong>{session.session_id}</strong>
+          <span>{session.machine} · {session.state}</span>
+          <span>{session.instance_id} · {Object.entries(session.capabilities ?? {}).filter(([, capability]) => capability.available).map(([name]) => name).join(", ") || "no declared views"}</span>
+        </Link>)}
+      </div>
     </section>
   </main>;
 }
@@ -178,6 +218,7 @@ function NotFound() {
 export function App() {
   return <Routes>
     <Route path="/" element={<Catalog />} />
+    <Route path="/sessions" element={<Sessions />} />
     <Route path="/sessions/:id" element={<Session />} />
     <Route path="*" element={<NotFound />} />
   </Routes>;
