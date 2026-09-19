@@ -93,7 +93,7 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [profile-config, external-assets]
-    evidence: [machineemu/machineemu@6f8d5a2, machineemu/machineemu@e2b318c, machineemu/machineemu@0345af3, machineemu/machineemu@1cdbc53, tests/test_unifi_firmware.py]
+    evidence: [machineemu/machineemu@6f8d5a2, machineemu/machineemu@e2b318c, machineemu/machineemu@0345af3, machineemu/machineemu@1cdbc53, machineemu/machineemu@e501fbc, machineemu/machineemu@467a52e, machineemu/machineemu@3785704, machineemu/machineemu@e7efc99, machineemu/machineemu@04bc0da, tests/test_unifi_firmware.py]
     state_policy: generated firmware is an artifact with input/output digests
     milestone: M3
     status: partial
