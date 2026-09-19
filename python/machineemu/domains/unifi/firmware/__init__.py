@@ -4,6 +4,8 @@ from .formats import Section, container, decompress, fdt, fit, uimage
 from .models import Bundle, FirmwareError, PrepareOptions, load_bundle
 from .patches import Entry, read_cpio, replace_file, set_passwords, write_cpio
 from .squashfs import SquashFS, library_path as squashfs_library_path
+from .service import inspect as inspect_firmware
+from .service import prepare as prepare_firmware
 from .udm_pro_gpt import write_template as write_udm_pro_template
 from .udm_pro import inspect as inspect_udm_pro
 from .udm_pro import prepare as prepare_udm_pro
@@ -26,9 +28,11 @@ __all__ = [
     "fdt",
     "fit",
     "inspect_udm_pro",
+    "inspect_firmware",
     "load_bundle",
     "read_cpio",
     "prepare_udm_pro",
+    "prepare_firmware",
     "replace_file",
     "set_passwords",
     "squashfs_library_path",

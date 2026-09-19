@@ -21,6 +21,8 @@ from machineemu.domains.unifi.firmware import (
     set_passwords,
     write_cpio,
 )
+from machineemu.domains.unifi.firmware.models import FirmwareInfo, PreparedFirmware, StorageSpec
+from machineemu.domains.unifi.firmware import service
 from machineemu.domains.unifi.firmware.udm_pro_gpt import (
     ENTRIES,
     ENTRY_SIZE,
@@ -177,6 +179,44 @@ def test_udm_factory_auth_bypass_is_diagnostic_hash_pinned(monkeypatch: pytest.M
     assert change["type"] == "bypass-factory-auth"
     with pytest.raises(FirmwareError, match="hash"):
         udm_pro_factory_auth.bypass_factory_auth(b"wrong")
+
+
+def test_firmware_service_publishes_only_verified_idempotent_bundles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"firmware input")
+
+    class Recipe:
+        REVISION = "test-1"
+
+        @staticmethod
+        def inspect(path: Path) -> FirmwareInfo:
+            return FirmwareInfo("udm-pro", "test", path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+
+        @staticmethod
+        def prepare(path: Path, output: Path, options: PrepareOptions) -> PreparedFirmware:
+            for name in ("Image", "board.dtb", "boot.img", "spi.img"):
+                (output / name).write_bytes(name.encode())
+            return PreparedFirmware(
+                Recipe.inspect(path), "udm-pro",
+                {"kernel": "Image", "dtb": "board.dtb", "initrd": None},
+                {"machine": {"type": "udm-pro"}, "cpu": None, "cpus": 1, "memory": "2G"},
+                [StorageSpec("boot", "udm-boot", "copy", True, "boot.img"),
+                 StorageSpec("spi", "udm-config", "copy", True, "spi.img")],
+            )
+
+    monkeypatch.setitem(service.RECIPES, "udm-pro", Recipe)
+    monkeypatch.setattr(service, "_tool_versions", lambda device, options: {"test": "1"})
+    output = tmp_path / "prepared"
+    bundle = service.prepare(source, "udm-pro", output)
+    assert bundle.path == output
+    assert (output / "manifest.json").is_file()
+    assert service.prepare(source, "udm-pro", output).identity == bundle.identity
+    source.write_bytes(b"changed")
+    with pytest.raises(FirmwareError, match="differs"):
+        service.prepare(source, "udm-pro", output)
+    assert not list(tmp_path.glob(".prepared-*"))
 
 
 def archive_entry(name: str, data: bytes = b"", mode: int = stat.S_IFREG | 0o640, links: int = 1) -> Entry:
