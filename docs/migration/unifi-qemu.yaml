@@ -126,7 +126,7 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [runtime-lifecycle, profile-config]
-    evidence: [machineemu/machineemu@13b75d6, machineemu/machineemu@e9c7e78, machineemu/machineemu@cab798c, machineemu/machineemu@51de5a5, machineemu/machineemu@50ee431, web/tests]
+    evidence: [machineemu/machineemu@13b75d6, machineemu/machineemu@e9c7e78, machineemu/machineemu@cab798c, machineemu/machineemu@51de5a5, machineemu/machineemu@50ee431, machineemu/machineemu@7fe71ee, machineemu/machineemu@5a1e5b1, machineemu/machineemu@bcda41a, machineemu/machineemu@74753de, web/tests]
     state_policy: no credentials or host paths in API responses or browser storage
     milestone: M1
     status: partial
