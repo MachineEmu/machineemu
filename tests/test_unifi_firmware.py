@@ -2,13 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 import struct
 import zlib
 from pathlib import Path
 
 import pytest
 
-from machineemu.domains.unifi.firmware import FirmwareError, PrepareOptions, container, fit, load_bundle
+from machineemu.domains.unifi.firmware import (
+    Entry,
+    FirmwareError,
+    PrepareOptions,
+    container,
+    fit,
+    load_bundle,
+    read_cpio,
+    replace_file,
+    set_passwords,
+    write_cpio,
+)
 
 
 def pack_fdt(node: tuple[str, dict[str, bytes], list[object]]) -> bytes:
@@ -106,3 +118,39 @@ def test_public_prepare_options_do_not_expose_passwords() -> None:
     options = PrepareOptions(passwords=(("ubnt", "private:password"),))
     assert options.public()["password_accounts"] == ["ubnt"]
     assert "private:password" not in repr(options)
+
+
+def archive_entry(name: str, data: bytes = b"", mode: int = stat.S_IFREG | 0o640, links: int = 1) -> Entry:
+    return Entry(name, (1, mode, 0, 0, links, 0, len(data), 0, 0, 0, 0, 0, 0), data)
+
+
+def test_cpio_edits_preserve_metadata_and_reject_escape() -> None:
+    entries = [
+        archive_entry("etc", mode=stat.S_IFDIR | 0o755),
+        archive_entry("etc/config", b"old"),
+        archive_entry("bin/find", b"../../bin/busybox", stat.S_IFLNK | 0o777),
+    ]
+    parsed, _ = read_cpio(write_cpio(entries), allow_root_clamped_links=True)
+    changed = replace_file(parsed, "etc/config", b"new")
+    round_trip, _ = read_cpio(write_cpio(changed), allow_root_clamped_links=True)
+    assert round_trip[1].data == b"new"
+    assert round_trip[1].fields[1:6] == parsed[1].fields[1:6]
+    with pytest.raises(FirmwareError, match="unsafe archive path"):
+        read_cpio(write_cpio([archive_entry("../escape")]))
+    with pytest.raises(FirmwareError, match="hardlinks"):
+        replace_file([archive_entry("etc/config", b"old", links=2)], "etc/config", b"new")
+
+
+def test_password_patch_never_returns_secret_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [
+        archive_entry("etc/passwd", b"root:x:0:0:root:/:/bin/sh\n"),
+        archive_entry("etc/shadow", b"root:$6$old:1:2:3:4:5:6\n"),
+    ]
+    monkeypatch.setattr(
+        "machineemu.domains.unifi.firmware.patches.password_hash",
+        lambda password, scheme: "$6$replacement",
+    )
+    changed, metadata = set_passwords(entries, (("root", "private:password"),), "etc/passwd", "etc/shadow")
+    assert changed[1].data.startswith(b"root:$6$replacement:")
+    assert metadata == [{"type": "set-password", "account": "root", "path": "etc/shadow", "revision": "1"}]
+    assert "private:password" not in json.dumps(metadata)

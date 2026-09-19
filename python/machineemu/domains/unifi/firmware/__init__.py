@@ -2,10 +2,12 @@
 
 from .formats import Section, container, decompress, fdt, fit, uimage
 from .models import Bundle, FirmwareError, PrepareOptions, load_bundle
+from .patches import Entry, read_cpio, replace_file, set_passwords, write_cpio
 
 __all__ = [
     "Bundle",
     "FirmwareError",
+    "Entry",
     "PrepareOptions",
     "Section",
     "container",
@@ -13,5 +15,9 @@ __all__ = [
     "fdt",
     "fit",
     "load_bundle",
+    "read_cpio",
+    "replace_file",
+    "set_passwords",
     "uimage",
+    "write_cpio",
 ]
