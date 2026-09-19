@@ -16,10 +16,10 @@ entries:
     disposition: port
     support_status: baseline
     dependencies: [qemu-source, meson, ninja]
-    evidence: [qemu/tests, qemu/build manifests]
+    evidence: [machineemu/qemu@cab9e34, machineemu/qemu build manifests]
     state_policy: engine source only; no build trees or runtime state
     milestone: M1
-    status: queued
+    status: ported
   - id: qemu-analysis
     source_paths: [qemu/analysis-patches, crates/analysis-profile]
     capability: analysis engine track and profile helper
@@ -38,10 +38,10 @@ entries:
     disposition: port
     support_status: baseline
     dependencies: [qemu-patches, rust-toolchain]
-    evidence: [crates/*/tests, Cargo.lock]
+    evidence: [machineemu/qemu@914edcd, machineemu/qemu Cargo.lock, QEMU CI]
     state_policy: source and fixtures only; exclude target/
     milestone: M1
-    status: queued
+    status: ported
   - id: helper-crates
     source_paths: [crates/display-stream, crates/spice-audio, crates/remote-device-bridge, crates/remote-device-protocol]
     capability: display, audio, and remote-device helpers
@@ -49,10 +49,10 @@ entries:
     disposition: port
     support_status: baseline
     dependencies: [qemu-rust-crates]
-    evidence: [crates/*/tests, protocol fixtures]
+    evidence: [machineemu/qemu@0575291, machineemu/qemu@9144c1e, machineemu/qemu@c87d125, QEMU CI]
     state_policy: protocol fixtures public; captures external
     milestone: M1
-    status: queued
+    status: ported
   - id: runtime-lifecycle
     source_paths: [console/lifecycle.py, console/broker.py, console/qmp.py, console/launch_plan.py]
     capability: process ownership, QMP, launch planning, cleanup, recovery
