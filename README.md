@@ -29,3 +29,7 @@ Initial ownership is split by responsibility:
 
 The first implementation keeps the existing Python package and FastAPI schema
 generation direction. It does not require Rust schema bindings or a plugin ABI.
+
+Start the local API with `uv sync --extra api` followed by
+`uv run machineemu-api`; see [`machineemu-api`](docs/operations/api.md) for
+operator configuration and loopback defaults.

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import shutil
 import tempfile
 from typing import Any
 
@@ -125,6 +126,21 @@ class SessionStore:
                 # A stale or partial session must not make the directory unusable.
                 continue
         return records
+
+    def remove(self, record: SessionRecord) -> None:
+        """Remove only this session's runtime and artifact directories when stopped."""
+        try:
+            value = json.loads(record.manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeStateError(f"cannot read session manifest: {exc}") from exc
+        if value.get("state") in {"running", "stopping"}:
+            raise RuntimeStateError("session must be stopped before removal")
+        for path, root in ((record.runtime_dir, self.runtime_root / "sessions"),
+                           (record.artifact_dir, self.artifact_root / "sessions")):
+            if path.is_symlink() or not path.is_dir() or path.parent != root:
+                raise RuntimeStateError("session directory is not owned by the configured root")
+        shutil.rmtree(record.runtime_dir)
+        shutil.rmtree(record.artifact_dir)
 
     def update(self, record: SessionRecord, state: str, *, pid: int | None = None,
                exit_code: int | None = None, metadata: dict[str, Any] | None = None) -> None:

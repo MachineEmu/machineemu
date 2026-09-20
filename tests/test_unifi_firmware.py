@@ -113,6 +113,27 @@ def test_container_and_fit_are_content_checked(tmp_path: Path) -> None:
         container(source)
 
 
+def test_u6plus_recipe_prepares_a_verified_stock_bundle(tmp_path: Path) -> None:
+    source = tmp_path / "u6plus.bin"
+    source.write_bytes(container_fixture(fit_fixture()))
+    output = tmp_path / "prepared"
+
+    bundle = service.prepare(source, "u6plus", output)
+
+    assert bundle.manifest["info"]["device"] == "u6plus"
+    assert bundle.manifest["adapter"] == "mt7981"
+    assert bundle.manifest["boot"]["kernel"] == "Image"
+    assert bundle.manifest["boot"]["dtb"] == "u6plus.dtb"
+    assert bundle.manifest["storage"] == [
+        {"role": "emmc", "backend": "mt7981-emmc", "initialization": "copy",
+         "persistent": True, "template": "emmc.img", "format": "raw"},
+        {"role": "spi", "backend": "model-memory", "initialization": "board-seeded",
+         "persistent": False, "template": None, "format": "raw"},
+    ]
+    assert bundle.artifact("emmc.img").stat().st_size == 1024**3
+    assert service.prepare(source, "u6plus", output).identity == bundle.identity
+
+
 def test_prepared_bundle_rejects_changed_artifacts(tmp_path: Path) -> None:
     image = tmp_path / "Image"
     dtb = tmp_path / "board.dtb"

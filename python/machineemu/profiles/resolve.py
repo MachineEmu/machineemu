@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from machineemu.assets import AssetError, AssetStore
+from machineemu.domains.analysis import validate as validate_analysis
 from machineemu.engines import EngineManifest, EngineRegistry, EngineRegistryError
 
 
@@ -24,6 +25,7 @@ class ResolvedProfile:
     engine: EngineManifest
     executable: Path
     assets: dict[str, Path]
+    analysis: dict[str, Any] | None = None
 
 
 def _required_string(value: Any, name: str) -> str:
@@ -75,4 +77,13 @@ def resolve_profile_value(value: Any, registry: EngineRegistry, *, target: str,
         manifest, executable = registry.resolve(track, target)
     except EngineRegistryError as exc:
         raise ProfileError(str(exc)) from exc
-    return ResolvedProfile(profile_id, machine, target, value, manifest, executable, resolved_assets)
+    try:
+        analysis = validate_analysis(value.get("analysis"))
+    except ValueError as exc:
+        raise ProfileError(str(exc)) from exc
+    if analysis is not None:
+        if machine not in {"q35", "pc"}:
+            raise ProfileError("malware-analysis requires the q35 or pc machine")
+        if not target.startswith("x86_64-"):
+            raise ProfileError("malware-analysis requires an x86_64 engine target")
+    return ResolvedProfile(profile_id, machine, target, value, manifest, executable, resolved_assets, analysis)

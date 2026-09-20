@@ -27,10 +27,10 @@ entries:
     disposition: port
     support_status: experimental
     dependencies: [qemu-patches, rust-toolchain]
-    evidence: [smoke, probes, artifacts]
+    evidence: [qemu/crates/analysis-profile, qemu/crates/analysis-profile/src/main.rs, qemu/tracks/unifi-10.2/analysis-patches, qemu/scripts/build-analysis-unifi-10.2.sh, smoke, probes, artifacts]
     state_policy: preserve reports as external artifacts; never commit samples
     milestone: M4
-    status: queued
+    status: partial
   - id: qemu-rust-crates
     source_paths: [crates/board-core, crates/board-ffi, crates/board-tools, crates/mt7981-machine, crates/udmpro-machine, crates/bcm5616x-machine, crates/net-offload]
     capability: board models, FFI, tools, and network offload
@@ -60,7 +60,7 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [qemu-engine-bundle]
-    evidence: [console/tests, tests/test_supervisor.py, tests/test_qmp.py]
+    evidence: [console/tests, tests/test_supervisor.py, tests/test_qmp.py, python/machineemu/runtime/application.py, python/machineemu/api.py, tests/test_api.py]
     state_policy: instance state and session journals remain operator-owned
     milestone: M1
     status: partial
@@ -71,7 +71,7 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [runtime-lifecycle]
-    evidence: [tests/test_instance_store.py, tests/test_migration_inventory.py]
+    evidence: [tests/test_instance_store.py, tests/test_migration_inventory.py, python/machineemu/api.py, python/machineemu/runtime/application.py, tests/test_api.py]
     state_policy: inventory first; import only verified regular files; snapshots cold-restore
     milestone: M2
     status: partial
@@ -93,10 +93,10 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [profile-config, external-assets]
-    evidence: [machineemu/machineemu@6f8d5a2, machineemu/machineemu@e2b318c, machineemu/machineemu@0345af3, machineemu/machineemu@1cdbc53, machineemu/machineemu@e501fbc, machineemu/machineemu@467a52e, machineemu/machineemu@3785704, machineemu/machineemu@e7efc99, machineemu/machineemu@04bc0da, tests/test_unifi_firmware.py]
+    evidence: [machineemu/machineemu@6f8d5a2, machineemu/machineemu@e2b318c, machineemu/machineemu@0345af3, machineemu/machineemu@1cdbc53, machineemu/machineemu@e501fbc, machineemu/machineemu@467a52e, machineemu/machineemu@3785704, machineemu/machineemu@e7efc99, machineemu/machineemu@04bc0da, python/machineemu/domains/unifi/firmware/u6plus.py, python/machineemu/domains/unifi/firmware/u6plus_lab.py, tests/test_u6plus_eeprom.py, tests/test_unifi_firmware.py]
     state_policy: generated firmware is an artifact with input/output digests
     milestone: M3
-    status: partial
+    status: ported
   - id: analysis-domain
     source_paths: [assets/analysis, probes, smoke]
     capability: analysis identity, probes, and verification
@@ -104,10 +104,10 @@ entries:
     disposition: adapt
     support_status: experimental
     dependencies: [qemu-analysis, runtime-state]
-    evidence: [probes, smoke, artifacts/malware-analysis-runs]
+    evidence: [python/machineemu/domains/analysis, python/machineemu/domains/analysis/clone.py, python/machineemu/profiles/resolve.py, python/machineemu/profiles/plan.py, scripts/record-analysis-observation.py, tests/test_analysis.py, tests/test_analysis_clone.py, tests/test_profile_resolve.py, probes, smoke, artifacts/malware-analysis-runs]
     state_policy: reports and samples stay external; record provenance only
     milestone: M4
-    status: queued
+    status: partial
   - id: compatibility-shims
     source_paths: [compat/bt, compat/wifi]
     capability: Bluetooth and Wi-Fi compatibility adapters
@@ -115,10 +115,10 @@ entries:
     disposition: adapt
     support_status: experimental
     dependencies: [runtime-lifecycle]
-    evidence: [compat tests, docs]
+    evidence: [python/machineemu/domains/unifi/compat, scripts/compat, tests/test_compat.py, tests/test_compat_daemons.py, compat tests, docs]
     state_policy: host setup and cleanup are explicit operator operations
     milestone: M3
-    status: queued
+    status: partial
   - id: web-api
     source_paths: [console/web, web, console/web/app.py, console/web/schemas.py]
     capability: browser UI, auth, leases, and remote-device routes
@@ -126,7 +126,7 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [runtime-lifecycle, profile-config]
-    evidence: [machineemu/machineemu@13b75d6, machineemu/machineemu@e9c7e78, machineemu/machineemu@cab798c, machineemu/machineemu@51de5a5, machineemu/machineemu@50ee431, machineemu/machineemu@7fe71ee, machineemu/machineemu@5a1e5b1, machineemu/machineemu@bcda41a, machineemu/machineemu@74753de, web/tests]
+    evidence: [machineemu/machineemu@13b75d6, machineemu/machineemu@e9c7e78, machineemu/machineemu@cab798c, machineemu/machineemu@51de5a5, machineemu/machineemu@50ee431, machineemu/machineemu@7fe71ee, machineemu/machineemu@5a1e5b1, machineemu/machineemu@bcda41a, machineemu/machineemu@74753de, contracts/openapi.json, python/machineemu/api.py, python/machineemu/runtime/application.py, python/machineemu/runtime/operations.py, python/machineemu/runtime/gdb.py, python/machineemu/runtime/audio.py, python/machineemu/runtime/external_vnc.py, python/machineemu/runtime/remote_devices.py, python/machineemu/runtime/spice_audio.py, python/machineemu/runtime/vnc.py, python/machineemu/domains/unifi/compat/bluetooth.py, python/machineemu/domains/unifi/compat/hwsim.py, tests/test_api.py, tests/test_audio.py, tests/test_external_vnc.py, tests/test_gdb.py, tests/test_operations.py, tests/test_spice_audio.py, tests/test_vnc.py, web/src/api-types.d.ts, web/src/client.ts, web/src/gdb.tsx, web/src/spice-audio, web/src/vnc.tsx, web/src/vnc-audio.tsx, web/src/video.tsx, web/package.json, web/tests]
     state_policy: no credentials or host paths in API responses or browser storage
     milestone: M1
     status: partial
@@ -137,10 +137,10 @@ entries:
     disposition: port
     support_status: mixed
     dependencies: [qemu-patches]
-    evidence: [scripts, nix checks, kernel tests]
+    evidence: [qemu/scripts/check_track.py, qemu/scripts/fetch-unifi-10.2.sh, qemu/scripts/build-unifi-10.2.sh, qemu/scripts/build-analysis-kvm-module.sh, qemu/scripts/write_engine_manifest.py, qemu/scripts/validate_engine_bundle.py, qemu/kernel/analysis-kvm, scripts/compat, scripts, nix checks, kernel tests]
     state_policy: privileged setup documented and separately gated
     milestone: M3
-    status: queued
+    status: partial
   - id: external-assets
     source_paths: [ISOs, assets, public/virtual-display-drivers]
     capability: firmware, guest media, prepared disks, drivers

@@ -3,6 +3,9 @@ import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "re
 import { createCatalogSession } from "./catalog-flow";
 import { MachineEmuClient, type CatalogProfile, type SessionSummary } from "./client";
 import { profileDetail, type ProfileDetail } from "./profile-detail";
+import { Vnc } from "./vnc";
+import { Video } from "./video";
+import { Gdb } from "./gdb";
 
 function client(): MachineEmuClient {
   const token = document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "";
@@ -192,6 +195,7 @@ function Session() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [qmp, setQmp] = useState<string>();
+  const [screenshotUrl, setScreenshotUrl] = useState<string>();
   const validRoute = Boolean(instance && id);
 
   const refresh = useCallback(async () => {
@@ -213,8 +217,24 @@ function Session() {
   }, [api, id, instance, validRoute]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => () => {
+    if (screenshotUrl) URL.revokeObjectURL(screenshotUrl);
+  }, [screenshotUrl]);
 
-  async function action(kind: "reconcile" | "start" | "stop") {
+  async function captureScreenshot() {
+    setError(undefined);
+    try {
+      const blob = await api.screenshot(instance, id);
+      setScreenshotUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return URL.createObjectURL(blob);
+      });
+    } catch (reason) {
+      setError(errorMessage(reason, "Unable to capture the display."));
+    }
+  }
+
+  async function action(kind: "reconcile" | "start" | "stop" | "pause" | "resume" | "reset") {
     setBusy(true);
     setError(undefined);
     try {
@@ -222,7 +242,9 @@ function Session() {
         ? await api.reconcileSession({ instance_id: instance, session_id: id })
         : kind === "start"
           ? await api.startSession(instance, id)
-          : await api.stopSession(instance, id);
+          : kind === "stop"
+            ? await api.stopSession(instance, id)
+            : await api.sessionAction(instance, id, kind);
       setState(String(result.state));
       await refresh();
     } catch (reason) {
@@ -243,6 +265,9 @@ function Session() {
         {qmp && <p className="session-meta">QMP: {qmp}</p>}
         <div className="actions">
           <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/terminal?instance=${encodeURIComponent(instance)}`}>Terminal</Link>
+          <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/vnc?instance=${encodeURIComponent(instance)}`}>VNC display</Link>
+          <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/video?instance=${encodeURIComponent(instance)}`}>H.264 display</Link>
+          <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/gdb?instance=${encodeURIComponent(instance)}`}>GDB console</Link>
           <button className="button button-secondary" disabled={busy || loading} onClick={() => void action("reconcile")}>
             {busy ? "Working…" : "Recover status"}
           </button>
@@ -252,9 +277,20 @@ function Session() {
           <button className="button button-secondary" disabled={busy || loading || state !== "running"} onClick={() => void action("stop")}>
             Stop
           </button>
+          <button className="button button-secondary" disabled={busy || loading || state !== "running"} onClick={() => void action("pause")}>
+            Pause
+          </button>
+          <button className="button button-secondary" disabled={busy || loading || state !== "paused"} onClick={() => void action("resume")}>
+            Resume
+          </button>
+          <button className="button button-secondary" disabled={busy || loading || !["running", "paused"].includes(state ?? "")} onClick={() => void action("reset")}>
+            Reset
+          </button>
           <button className="button button-secondary" disabled={busy || loading} onClick={() => void refresh()}>Refresh status</button>
+          <button className="button button-secondary" disabled={busy || loading} onClick={() => void captureScreenshot()}>Capture display</button>
         </div>
         {error && <ErrorNotice>{error}</ErrorNotice>}
+        {screenshotUrl && <img className="session-screenshot" src={screenshotUrl} alt="Latest QEMU display capture" />}
       </>}
     </section>
   </main>;
@@ -348,6 +384,9 @@ export function App() {
     <Route path="/profiles/:id" element={<ProfileRoute />} />
     <Route path="/sessions" element={<Sessions />} />
     <Route path="/sessions/:id/terminal" element={<Terminal />} />
+    <Route path="/sessions/:id/vnc" element={<Vnc />} />
+    <Route path="/sessions/:id/video" element={<Video />} />
+    <Route path="/sessions/:id/gdb" element={<Gdb />} />
     <Route path="/sessions/:id" element={<Session />} />
     <Route path="*" element={<NotFound />} />
   </Routes>;

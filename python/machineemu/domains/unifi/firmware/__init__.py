@@ -17,6 +17,7 @@ from .udm_pro_disk import copy_region, partitions as udm_pro_partitions
 from .udm_pro_spi import eeprom as udm_pro_eeprom
 from .udm_pro_spi import write_template as write_udm_pro_spi_template
 from .u6plus_eeprom import write_template as write_u6plus_eeprom_template
+from . import u6plus
 
 __all__ = [
     "Bundle",
@@ -50,4 +51,5 @@ __all__ = [
     "write_udm_pro_template",
     "write_udm_pro_spi_template",
     "write_u6plus_eeprom_template",
+    "u6plus",
 ]

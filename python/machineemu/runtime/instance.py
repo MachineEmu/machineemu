@@ -262,6 +262,15 @@ class InstanceStore:
             raise RuntimeStateError(f"cannot stage snapshot restore {snapshot_id}: {exc}") from exc
         return destination
 
+    def delete_snapshot(self, record: InstanceRecord, snapshot_id: str) -> None:
+        """Delete one immutable snapshot after the caller has checked quiescence."""
+        if not _ID.fullmatch(snapshot_id):
+            raise RuntimeStateError("snapshot_id must be an opaque runtime identifier")
+        snapshot = record.state_dir / "snapshots" / snapshot_id
+        if snapshot.is_symlink() or not snapshot.is_dir() or snapshot.parent != record.state_dir / "snapshots":
+            raise RuntimeStateError("snapshot is unavailable")
+        shutil.rmtree(snapshot)
+
     def apply_staged_restore(self, record: InstanceRecord, snapshot_id: str,
                              *, instance_state: str) -> None:
         """Apply a staged restore only after the caller proves the instance is stopped."""

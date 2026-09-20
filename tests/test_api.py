@@ -37,6 +37,33 @@ def test_api_health_and_session_inspection(tmp_path):
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+def test_api_exposes_bounded_public_diagnostics_without_runtime_paths(tmp_path):
+    config = OperatorConfig(
+        tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
+        tmp_path / "runtime", tmp_path / "artifacts",
+    )
+    runtime = config.runtime_root / "sessions/session-1"
+    for path in (runtime / "control", runtime / "sockets", runtime / "logs",
+                 config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "state": "stopped", "configuration": {"adapter": "pc", "devices": {"vnc": True}},
+        "analysis": {"schema_version": 1, "profile": "malware-analysis"},
+    }), encoding="utf-8")
+    (runtime / "logs/stdout.log").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"),
+                        base_url="http://127.0.0.1")
+    headers = {"X-MachineEmu-Token": "test-token"}
+    hardware = client.get("/api/v1/sessions/instance-1/session-1/hardware-config", headers=headers)
+    environment = client.get("/api/v1/sessions/instance-1/session-1/environment", headers=headers)
+    logs = client.get("/api/v1/sessions/instance-1/session-1/logs?tail=2", headers=headers)
+    assert hardware.json()["configuration"]["adapter"] == "pc"
+    assert environment.json()["analysis"]["profile"] == "malware-analysis"
+    assert logs.json()["lines"] == ["two", "three"]
+    assert str(runtime) not in json.dumps(hardware.json())
+
+
 def test_api_lists_only_public_complete_session_summaries(tmp_path):
     config = OperatorConfig(
         tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
@@ -65,6 +92,60 @@ def test_api_lists_only_public_complete_session_summaries(tmp_path):
         "machine": "udm-pro", "state": "stopped",
         "capabilities": {"lcd_view": {"available": True}, "bluetooth": {"available": True}},
     }]}
+
+
+def test_api_delete_records_operation_and_removes_only_session_runtime(tmp_path):
+    config = OperatorConfig(
+        tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
+        tmp_path / "runtime", tmp_path / "artifacts",
+    )
+    runtime = config.runtime_root / "sessions/session-1"
+    state = config.state_root / "instances/instance-1"
+    artifact = config.artifact_root / "sessions/session-1"
+    for path in (runtime / "control", runtime / "sockets", runtime / "logs", state, artifact):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1", "state": "stopped",
+    }), encoding="utf-8")
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"),
+                        base_url="http://127.0.0.1")
+    headers = {"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"}
+    response = client.delete("/api/v1/sessions/instance-1/session-1", headers=headers)
+    assert response.status_code == 202
+    operation = response.json()
+    assert operation["state"] == "succeeded"
+    assert client.get(f"/api/v1/operations/{operation['operation_id']}", headers=headers).json() == operation
+    assert not runtime.exists()
+    assert not artifact.exists()
+    assert state.exists()
+
+
+def test_api_preserves_source_capability_vocabulary_and_reasons(tmp_path):
+    config = OperatorConfig(
+        tmp_path / "engines", tmp_path / "assets", tmp_path / "state",
+        tmp_path / "runtime", tmp_path / "artifacts",
+    )
+    runtime = config.runtime_root / "sessions/session-1"
+    for path in (runtime, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "profile_id": "analysis", "machine": "q35", "state": "created",
+        "configuration": {"devices": {
+            "front_panel": True,
+            "remote_devices": {"available": False, "reason": "helper not configured"},
+            "unknown_future_device": True,
+        }},
+    }), encoding="utf-8")
+
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"),
+                        base_url="http://127.0.0.1")
+    response = client.get("/api/v1/sessions", headers={"X-MachineEmu-Token": "test-token"})
+    assert response.status_code == 200
+    assert response.json()["sessions"][0]["capabilities"] == {
+        "front_panel": {"available": True},
+        "remote_devices": {"available": False, "reason": "helper not configured"},
+    }
 
 
 def test_api_requires_same_origin_for_mutations(tmp_path):
@@ -243,6 +324,384 @@ def test_api_exposes_only_qmp_status(monkeypatch, tmp_path):
     client = TestClient(create_app(application, token="test-token"), base_url="http://127.0.0.1")
     response = client.get("/api/v1/sessions/instance-1/session-1/qmp/status", headers={"X-MachineEmu-Token": "test-token"})
     assert response.json() == {"status": "running", "running": True, "singlestep": False}
+
+
+def test_api_exposes_allowlisted_qmp_inspection(monkeypatch, tmp_path):
+    config = OperatorConfig(tmp_path / "engines", tmp_path / "assets", tmp_path / "state", tmp_path / "runtime", tmp_path / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    for path in (runtime, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({"schema_version": 1, "session_id": "session-1", "instance_id": "instance-1"}), encoding="utf-8")
+    application = OperatorApplication(config)
+
+    async def fake_inspect(record, command, path, property):
+        assert (record.session_id, command, path, property) == ("session-1", "qom-get", "/machine", "type")
+        return {"command": command, "result": "pc-q35-10.2"}
+
+    monkeypatch.setattr(application, "qmp_inspect", fake_inspect)
+    client = TestClient(create_app(application, token="test-token"), base_url="http://127.0.0.1")
+    response = client.post(
+        "/api/v1/sessions/instance-1/session-1/qmp/inspect",
+        headers={"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"},
+        json={"command": "qom-get", "path": "/machine", "property": "type"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"command": "qom-get", "result": "pc-q35-10.2"}
+
+
+def test_api_delegates_allowlisted_session_actions(monkeypatch, tmp_path):
+    config = OperatorConfig(tmp_path / "engines", tmp_path / "assets", tmp_path / "state", tmp_path / "runtime", tmp_path / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    for path in (runtime, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({"schema_version": 1, "session_id": "session-1", "instance_id": "instance-1", "state": "running"}), encoding="utf-8")
+    application = OperatorApplication(config)
+
+    async def fake_action(record, action):
+        assert (record.session_id, action) == ("session-1", "pause")
+        return "paused"
+
+    monkeypatch.setattr(application, "qmp_action", fake_action)
+    client = TestClient(create_app(application, token="test-token"), base_url="http://127.0.0.1")
+    response = client.post(
+        "/api/v1/sessions/instance-1/session-1/actions",
+        headers={"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"},
+        json={"action": "pause"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"session_id": "session-1", "action": "pause", "state": "paused"}
+
+
+def test_api_serves_session_owned_screenshot(monkeypatch, tmp_path):
+    config = OperatorConfig(tmp_path / "engines", tmp_path / "assets", tmp_path / "state", tmp_path / "runtime", tmp_path / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    artifact = config.artifact_root / "sessions/session-1"
+    for path in (runtime, config.state_root / "instances/instance-1", artifact):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({"schema_version": 1, "session_id": "session-1", "instance_id": "instance-1"}), encoding="utf-8")
+    application = OperatorApplication(config)
+    image = artifact / "screenshot.png"
+    image.write_bytes(b"png-data")
+
+    async def fake_screenshot(record):
+        assert record.artifact_dir == artifact
+        return image, "image/png"
+
+    monkeypatch.setattr(application, "screenshot", fake_screenshot)
+    client = TestClient(create_app(application, token="test-token"), base_url="http://127.0.0.1")
+    response = client.get(
+        "/api/v1/sessions/instance-1/session-1/screenshot",
+        headers={"X-MachineEmu-Token": "test-token"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content == b"png-data"
+
+
+def test_api_reports_audio_transport_without_exposing_host_paths(tmp_path):
+    config = OperatorConfig(tmp_path / "engines", tmp_path / "assets", tmp_path / "state", tmp_path / "runtime", tmp_path / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    for path in (runtime, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "launch_plan": {"audio_socket": str(runtime / "sockets" / "audio.sock")},
+    }), encoding="utf-8")
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"), base_url="http://127.0.0.1")
+    response = client.get(
+        "/api/v1/sessions/instance-1/session-1/audio",
+        headers={"X-MachineEmu-Token": "test-token"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": 1, "available": False,
+        "reason": "Audio is not configured for this session",
+        "capture_held": False, "capture_ttl": 30,
+    }
+
+
+def test_api_reports_remote_device_capabilities_without_host_paths(tmp_path):
+    config = OperatorConfig(tmp_path / "engines", tmp_path / "assets", tmp_path / "state", tmp_path / "runtime", tmp_path / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    for path in (runtime, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "configuration": {"adapter": "pc", "remote_devices": {
+            "enabled": True, "profiles": {"sensor": {"vendor_id": 1234, "product_id": 5678, "serial": "lab"}},
+        }},
+    }), encoding="utf-8")
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"), base_url="http://127.0.0.1")
+    response = client.get(
+        "/api/v1/sessions/instance-1/session-1/remote-devices/capabilities",
+        headers={"X-MachineEmu-Token": "test-token"},
+    )
+    assert response.status_code == 200
+    value = response.json()
+    assert value["modes"]["generic_usb"]["available"] is True
+    assert value["profiles"] == {"sensor": {"vendor_id": 1234, "product_id": 5678, "serial": "lab"}}
+    assert "/" not in json.dumps(value)
+
+
+def test_api_remote_device_attachment_lifecycle_is_session_scoped(tmp_path):
+    config = OperatorConfig(tmp_path / "engines", tmp_path / "assets", tmp_path / "state", tmp_path / "runtime", tmp_path / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    for path in (runtime, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "configuration": {"adapter": "pc", "remote_devices": {
+            "enabled": True, "profiles": {"sensor": {"vendor_id": 1234, "product_id": 5678}},
+        }},
+    }), encoding="utf-8")
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"), base_url="http://127.0.0.1")
+    headers = {"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"}
+    created = client.post(
+        "/api/v1/sessions/instance-1/session-1/remote-devices/attachments",
+        headers=headers, json={"mode": "generic_usb", "profile": "sensor"},
+    )
+    assert created.status_code == 201
+    attachment = created.json()
+    assert attachment["state"] == "reserved"
+    listed = client.get("/api/v1/sessions/instance-1/session-1/remote-devices/attachments", headers=headers)
+    assert listed.json() == [attachment]
+    ticket = client.post(
+        f"/api/v1/sessions/instance-1/session-1/remote-devices/attachments/{attachment['attachment_id']}/connect-ticket",
+        headers=headers, json={"role": "local"},
+    )
+    assert ticket.status_code == 200
+    assert ticket.json()["ticket"]
+    revoked = client.delete(
+        f"/api/v1/sessions/instance-1/session-1/remote-devices/attachments/{attachment['attachment_id']}",
+        headers=headers,)
+    assert revoked.status_code == 200
+    assert revoked.json()["state"] == "revoked"
+
+
+def test_remote_device_websocket_proxies_owned_socket_and_requires_cleanup(tmp_path):
+    short_root = Path(tempfile.mkdtemp(prefix="me-", dir="/tmp"))
+    config = OperatorConfig(short_root / "engines", short_root / "assets", short_root / "state", short_root / "runtime", short_root / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    sockets = runtime / "sockets"
+    for path in (sockets, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    endpoint = sockets / "remote-usb.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    received: list[bytes] = []
+    listener.bind(str(endpoint))
+    listener.listen(1)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "configuration": {"adapter": "pc", "remote_devices": {
+            "enabled": True, "profiles": {"sensor": {"vendor_id": 1234, "product_id": 5678}},
+        }},
+    }), encoding="utf-8")
+
+    def peer() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            received.append(connection.recv(1024))
+            connection.sendall(b"qemu-data")
+
+    worker = threading.Thread(target=peer)
+    worker.start()
+    try:
+        application = OperatorApplication(config)
+        client = TestClient(create_app(application, token="test-token"), base_url="http://127.0.0.1")
+        headers = {"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"}
+        created = client.post(
+            "/api/v1/sessions/instance-1/session-1/remote-devices/attachments",
+            headers=headers, json={"mode": "generic_usb", "profile": "sensor"},
+        ).json()
+        ticket = client.post(
+            f"/api/v1/sessions/instance-1/session-1/remote-devices/attachments/{created['attachment_id']}/connect-ticket",
+            headers=headers, json={"role": "local"},
+        ).json()["ticket"]
+        with client.websocket_connect(
+            f"/ws/v1/sessions/instance-1/session-1/remote-devices/{created['attachment_id']}",
+            headers={"host": "127.0.0.1", "origin": "http://127.0.0.1"},
+        ) as stream:
+            stream.send_json({"ticket": ticket})
+            stream.send_json({"vendor_id": 1234, "product_id": 5678})
+            assert stream.receive_json()["type"] == "remote_device.ready"
+            stream.send_bytes(b"browser-data")
+            assert stream.receive_bytes() == b"qemu-data"
+            stream.send_json({"type": "cleanup", "confirmed": True})
+        worker.join(timeout=1)
+        assert received == [b"browser-data"]
+    finally:
+        listener.close()
+        shutil.rmtree(short_root)
+
+
+def test_api_audio_control_requires_a_session_owned_audio_socket(tmp_path):
+    short_root = Path(tempfile.mkdtemp(prefix="me-", dir="/tmp"))
+    config = OperatorConfig(short_root / "engines", short_root / "assets", short_root / "state", short_root / "runtime", short_root / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    sockets = runtime / "sockets"
+    for path in (sockets, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    audio = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    audio.bind(str(sockets / "audio.sock"))
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "launch_plan": {"audio_socket": str(sockets / "audio.sock")},
+    }), encoding="utf-8")
+    try:
+        client = TestClient(create_app(OperatorApplication(config), token="test-token"), base_url="http://127.0.0.1")
+        headers = {"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"}
+        attached = client.post("/api/v1/sessions/instance-1/session-1/audio/control", headers=headers, json={"action": "attach"})
+        assert attached.status_code == 200
+        token = attached.json()["client_token"]
+        claimed = client.post("/api/v1/sessions/instance-1/session-1/audio/control", headers=headers,
+                              json={"action": "claim", "client_token": token})
+        assert claimed.json()["capture"] is True
+        released = client.post("/api/v1/sessions/instance-1/session-1/audio/control", headers=headers,
+                               json={"action": "release", "client_token": token})
+        assert released.json() == {"ok": True, "capture": False}
+        detached = client.post("/api/v1/sessions/instance-1/session-1/audio/control", headers=headers,
+                               json={"action": "detach", "client_token": token})
+        assert detached.json() == {"ok": True, "attached": False}
+    finally:
+        audio.close()
+        shutil.rmtree(short_root)
+
+
+def test_api_exposes_verified_instance_snapshot_lifecycle(tmp_path):
+    config = OperatorConfig(tmp_path / "engines", tmp_path / "assets", tmp_path / "state", tmp_path / "runtime", tmp_path / "artifacts")
+    state = config.state_root / "instances/instance-1"
+    state.mkdir(parents=True)
+    disk = state / "disk.img"
+    disk.write_bytes(b"before")
+    import hashlib
+    (state / "instance.json").write_text(json.dumps({
+        "schema_version": 1, "instance_id": "instance-1", "state": "created",
+        "state_files": {"disk.img": {"sha256": "sha256:" + hashlib.sha256(b"before").hexdigest(), "size": 6}},
+    }), encoding="utf-8")
+    client = TestClient(create_app(OperatorApplication(config), token="test-token"), base_url="http://127.0.0.1")
+    headers = {"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"}
+    created = client.post("/api/v1/instances/instance-1/snapshots", headers=headers,
+                          json={"snapshot_id": "cold-boot"})
+    assert created.status_code == 201
+    assert created.json() == {"snapshot_id": "cold-boot", "state": "created", "files": ["disk.img"]}
+    disk.write_bytes(b"after")
+    restored = client.post("/api/v1/instances/instance-1/snapshots/cold-boot/restore", headers=headers)
+    assert restored.status_code == 200
+    assert restored.json() == {"snapshot_id": "cold-boot", "state": "restored"}
+    assert disk.read_bytes() == b"before"
+    assert client.get("/api/v1/instances/instance-1/snapshots", headers=headers).json() == {
+        "schema_version": 1, "snapshots": [{"snapshot_id": "cold-boot", "files": ["disk.img"]}],
+    }
+
+
+def test_frontpanel_websocket_validates_and_forwards_bounded_frames(tmp_path):
+    short_root = Path(tempfile.mkdtemp(prefix="me-", dir="/tmp"))
+    config = OperatorConfig(short_root / "engines", short_root / "assets", short_root / "state", short_root / "runtime", short_root / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    sockets = runtime / "sockets"
+    for path in (sockets, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    endpoint = sockets / "frontpanel.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(endpoint))
+    listener.listen(1)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "configuration": {"devices": {"front_panel": True}},
+    }), encoding="utf-8")
+
+    def peer() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            connection.sendall(b'{"schema":"unifi.frontpanel.v1","kind":"status","ports":[]}\n')
+
+    worker = threading.Thread(target=peer)
+    worker.start()
+    try:
+        client = TestClient(create_app(OperatorApplication(config), token="test-token"), base_url="http://127.0.0.1")
+        with client.websocket_connect(
+            "/ws/v1/sessions/instance-1/session-1/frontpanel",
+            headers={"host": "127.0.0.1", "origin": "http://127.0.0.1"},
+        ) as stream:
+            assert stream.receive_json() == {"schema": "unifi.frontpanel.v1", "kind": "status", "ports": []}
+        worker.join(timeout=1)
+    finally:
+        listener.close()
+        shutil.rmtree(short_root)
+
+
+def test_lcd_websocket_forwards_validated_read_only_frames(tmp_path):
+    short_root = Path(tempfile.mkdtemp(prefix="me-", dir="/tmp"))
+    config = OperatorConfig(short_root / "engines", short_root / "assets", short_root / "state", short_root / "runtime", short_root / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    sockets = runtime / "sockets"
+    for path in (sockets, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    endpoint = sockets / "lcd.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(endpoint))
+    listener.listen(1)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+        "configuration": {"devices": {"lcd": True}},
+    }), encoding="utf-8")
+
+    def peer() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            connection.sendall(b'{"schema":"unifi.lcm.v1","kind":"status","ui":{}}\n')
+
+    worker = threading.Thread(target=peer)
+    worker.start()
+    try:
+        client = TestClient(create_app(OperatorApplication(config), token="test-token"), base_url="http://127.0.0.1")
+        with client.websocket_connect(
+            "/ws/v1/sessions/instance-1/session-1/lcd",
+            headers={"host": "127.0.0.1", "origin": "http://127.0.0.1"},
+        ) as stream:
+            assert stream.receive_json() == {"schema": "unifi.lcm.v1", "kind": "status", "ui": {}}
+        worker.join(timeout=1)
+    finally:
+        listener.close()
+        shutil.rmtree(short_root)
+
+
+def test_lcd_touch_accepts_semantic_actions_and_returns_owned_reply(tmp_path):
+    short_root = Path(tempfile.mkdtemp(prefix="me-", dir="/tmp"))
+    config = OperatorConfig(short_root / "engines", short_root / "assets", short_root / "state", short_root / "runtime", short_root / "artifacts")
+    runtime = config.runtime_root / "sessions/session-1"
+    sockets = runtime / "sockets"
+    for path in (sockets, config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
+        path.mkdir(parents=True)
+    endpoint = sockets / "display-input.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(endpoint))
+    listener.listen(1)
+    (runtime / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
+    }), encoding="utf-8")
+
+    def peer() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            assert json.loads(connection.recv(2048)) == {"screen": "menu.main"}
+            connection.sendall(b'{"ok":true,"screen":"menu.main"}\n')
+
+    worker = threading.Thread(target=peer)
+    worker.start()
+    try:
+        client = TestClient(create_app(OperatorApplication(config), token="test-token"), base_url="http://127.0.0.1")
+        response = client.post(
+            "/api/v1/sessions/instance-1/session-1/lcd/touch",
+            headers={"X-MachineEmu-Token": "test-token", "Origin": "http://127.0.0.1"},
+            json={"screen": "menu.main"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "screen": "menu.main"}
+        worker.join(timeout=1)
+    finally:
+        listener.close()
+        shutil.rmtree(short_root)
 
 
 def test_api_catalog_is_read_only_and_id_indexed(tmp_path, monkeypatch):

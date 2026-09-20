@@ -56,8 +56,8 @@ class ProcessSupervisor:
             state = json.loads(record.manifest.read_text(encoding="utf-8")).get("state")
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeStateError(f"cannot read session manifest: {exc}") from exc
-        if state != "created":
-            raise RuntimeStateError("session is not in the created state")
+        if state not in {"created", "stopped", "failed"}:
+            raise RuntimeStateError(f"session is not restartable from state: {state}")
         env = {"PATH": os.environ.get("PATH", "")}
         if environment is not None:
             env.update(environment)

@@ -4,10 +4,10 @@ import pytest
 
 from machineemu.assets import AssetStore
 from machineemu.engines import EngineRegistry
-from machineemu.profiles import ProfileError, resolve_profile
+from machineemu.profiles import ProfileError, build_launch_plan, resolve_profile, resolve_profile_value
 
 
-def _registry(tmp_path):
+def _registry(tmp_path, target="aarch64-softmmu"):
     bundle = tmp_path / "bundles" / "track"
     (bundle / "bin").mkdir(parents=True)
     (bundle / "bin/qemu").write_bytes(b"qemu")
@@ -17,8 +17,8 @@ def _registry(tmp_path):
         "track_id": "track",
         "build_digest": digest,
         "source_revision": "commit",
-        "targets": ["aarch64-softmmu"],
-        "executables": {"aarch64-softmmu": "bin/qemu"},
+        "targets": [target],
+        "executables": {target: "bin/qemu"},
         "dirty_source": False,
     }), encoding="utf-8")
     release = tmp_path / "release.json"
@@ -72,3 +72,26 @@ def test_profile_resolves_content_addressed_assets(tmp_path):
 
     resolved = resolve_profile(profile, _registry(tmp_path), target="aarch64-softmmu", asset_store=store)
     assert resolved.assets == {"disk": stored}
+
+
+def test_analysis_profile_is_validated_and_launch_metadata_is_non_secret(tmp_path):
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "schema_version": 1, "id": "analysis", "engine": {"track": "track"}, "machine": "q35",
+        "resources": {"memory": "8GiB", "vcpus": 4},
+        "analysis": {"enabled": True, "profile": "malware-analysis", "identity_seed": "private-seed",
+                      "smbios": {"system_product": "Analysis PC"}},
+    }), encoding="utf-8")
+    resolved = resolve_profile(profile, _registry(tmp_path, "x86_64-softmmu"), target="x86_64-softmmu")
+    assert resolved.analysis["profile"] == "malware-analysis"
+    assert "private-seed" not in json.dumps(resolved.analysis)
+    plan = build_launch_plan(resolved, tmp_path / "runtime")
+    assert "-uuid" in plan.command and "-cpu" in plan.command
+    assert "kvm=off" in plan.command[plan.command.index("-cpu") + 1]
+    assert plan.manifest["analysis_argv"]
+    assert any("type=1" in argument and "uuid=" in argument for argument in plan.command)
+    assert any("type=1" in argument and "product=Analysis PC" in argument for argument in plan.command)
+    with pytest.raises(ProfileError, match="malware-analysis"):
+        resolve_profile_value({"schema_version": 1, "id": "bad", "engine": {"track": "track"},
+                               "machine": "q35", "analysis": {"enabled": True, "profile": "bad",
+                               "identity_seed": "seed"}}, _registry(tmp_path / "bad", "x86_64-softmmu"), target="x86_64-softmmu")

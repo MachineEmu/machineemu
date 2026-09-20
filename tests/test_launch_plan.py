@@ -21,7 +21,10 @@ def test_launch_plan_is_deterministic_and_does_not_start_process(tmp_path):
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(json.dumps({
         "schema_version": 1, "id": "demo", "engine": {"track": "track"},
-        "machine": "virt", "resources": {"memory": "1GiB", "vcpus": 2}, "console": {"uart": True},
+        "machine": "virt", "resources": {"memory": "1GiB", "vcpus": 2},
+        "console": {"uart": True}, "debug": {"enabled": True, "transport": "unix"}, "devices": {
+            "vnc": True, "video": True, "wifi_hwsim": True, "bluetooth_control": True,
+        },
     }), encoding="utf-8")
     profile = resolve_profile(profile_path, EngineRegistry.load(release, tmp_path / "bundles"), target="aarch64-softmmu")
 
@@ -31,4 +34,11 @@ def test_launch_plan_is_deterministic_and_does_not_start_process(tmp_path):
     assert plan.manifest["engine"]["build_digest"] == digest
     assert plan.manifest["qmp_socket"].endswith("runtime/sockets/qmp.sock")
     assert plan.manifest["uart_socket"].endswith("runtime/sockets/uart.sock")
+    assert plan.manifest["vnc_socket"].endswith("runtime/sockets/vnc.sock")
+    assert plan.manifest["video_socket"].endswith("runtime/sockets/video.sock")
+    assert plan.manifest["hwsim_control_socket"].endswith("runtime/sockets/wifi_hwsim.sock")
+    assert plan.manifest["bluetooth_control_socket"].endswith("runtime/sockets/bluetooth_control.sock")
+    assert plan.manifest["gdb"]["transport"] == "unix"
+    assert plan.manifest["gdb"]["path"].endswith("runtime/sockets/gdb.sock")
+    assert "-gdb" in plan.command
     assert "-serial" in plan.command and "chardev:machineemu-uart" in plan.command
