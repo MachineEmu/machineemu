@@ -8,6 +8,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from machineemu.documents import DocumentError, load_document
+
 from .manifest import EngineManifest, EngineManifestError, load_manifest
 
 
@@ -24,8 +26,8 @@ class EngineRegistry:
     @classmethod
     def load(cls, release_set: Path, bundle_root: Path) -> "EngineRegistry":
         try:
-            value = json.loads(release_set.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            value = load_document(release_set)
+        except DocumentError as exc:
             raise EngineRegistryError(f"cannot read release set {release_set}: {exc}") from exc
         if not isinstance(value, dict) or value.get("schema_version") != 1:
             raise EngineRegistryError("release set schema_version must be 1")

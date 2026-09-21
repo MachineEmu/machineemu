@@ -26,7 +26,7 @@ export function VncAudio({ instanceId, sessionId }: Props) {
 
   useEffect(() => {
     let active = true;
-    void new MachineEmuClient({ token: document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "" }).audioStatus(instanceId, sessionId)
+    void new MachineEmuClient({ token: "" }).audioStatus(instanceId, sessionId)
       .then((result) => {
         if (active) setAvailability({ available: result.available, reason: result.reason ?? null, capture_held: result.capture_held });
       })

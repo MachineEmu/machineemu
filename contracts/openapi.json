@@ -11,6 +11,12 @@
             "title": "Clone Id",
             "type": "string"
           },
+          "instance_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Instance Id",
+            "type": "string"
+          },
           "target": {
             "anyOf": [
               {
@@ -25,7 +31,8 @@
           }
         },
         "required": [
-          "clone_id"
+          "clone_id",
+          "instance_id"
         ],
         "title": "AnalysisCloneRequest",
         "type": "object"

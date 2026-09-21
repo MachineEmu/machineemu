@@ -292,7 +292,7 @@ if ((${#radio_macs[@]} != radio_count)); then
     exit 1
 fi
 
-"${namespace_prefix[@]}" python3 "$repo_dir/compat/wifi/hwsim_adapter.py" --probe >/dev/null
+"${namespace_prefix[@]}" python3 "$repo_dir/scripts/compat/hwsim_adapter.py" --probe >/dev/null
 
 instance_sockets=()
 if ((${#instances[@]})); then
@@ -310,13 +310,13 @@ if ((${#instances[@]})); then
         done
         echo -n "]"
     } >"$instances_table"
-    "${namespace_prefix[@]}" python3 "$repo_dir/compat/wifi/hwsim_adapter.py" \
+    "${namespace_prefix[@]}" python3 "$repo_dir/scripts/compat/hwsim_adapter.py" \
         --instances "$instances_table" \
         --control "$control_path" \
         --own-medium >"$backend_log" 2>&1 &
 else
     instance_sockets+=("$socket_path")
-    "${namespace_prefix[@]}" python3 "$repo_dir/compat/wifi/hwsim_adapter.py" \
+    "${namespace_prefix[@]}" python3 "$repo_dir/scripts/compat/hwsim_adapter.py" \
         --socket "$socket_path" \
         --control "$control_path" \
         --radio "band0=${radio_macs[0]}" \
@@ -363,7 +363,7 @@ else
 fi
 echo "backend log: $backend_log"
 echo "medium control: $control_path"
-echo "inspect it: python3 compat/wifi/hwsim_control.py $control_path"
+echo "medium control socket: $control_path"
 
 if $run_qemu; then
     invoking_user=${SUDO_USER:-root}

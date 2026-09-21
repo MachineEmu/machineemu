@@ -12,6 +12,9 @@ from machineemu.assets import AssetError, AssetStore
 from machineemu.engines import EngineRegistry
 from machineemu.profiles import ProfileError, resolve_profile
 from machineemu.runtime import OperatorApplication, OperatorConfig, inventory_json, validate_inventory
+from machineemu.domains.analysis import missing_observation_fields, record_observation, validate_clone
+from machineemu.domains.analysis.kvm_guard import DEFAULT_MODULE, DEFAULT_STATS, load_command, session_from_record, snapshot, status
+from machineemu.domains.analysis.acpi import dump_acpi_tables
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -74,6 +77,35 @@ def _parser() -> argparse.ArgumentParser:
     imported_state.add_argument("--inventory", type=Path, required=True)
     imported_state.add_argument("--source-path", required=True)
     imported_state.add_argument("--name", required=True)
+
+    guard_load = commands.add_parser("analysis-kvm-guard-load-command", help="print the privileged KVM guard load command")
+    guard_load.add_argument("--operator-config", type=Path, required=True)
+    guard_load.add_argument("--instance-id", required=True)
+    guard_load.add_argument("--session-id", required=True)
+    guard_load.add_argument("--module", type=Path, default=DEFAULT_MODULE)
+    guard_load.add_argument("--no-hook-exits", action="store_true")
+    guard_load.add_argument("--no-hook-tsc", action="store_true")
+    guard_load.add_argument("--hyperv-fast-mode", action=argparse.BooleanOptionalAction, default=None)
+
+    for name, help_text in (("analysis-kvm-guard-status", "inspect KVM guard state"),
+                            ("analysis-kvm-guard-snapshot", "save KVM guard counters")):
+        guard = commands.add_parser(name, help=help_text)
+        guard.add_argument("--operator-config", type=Path, required=True)
+        guard.add_argument("--instance-id", required=True)
+        guard.add_argument("--session-id", required=True)
+        guard.add_argument("--stats-path", type=Path, default=DEFAULT_STATS)
+    acpi = commands.add_parser("analysis-acpi-dump", help="capture host ACPI tables")
+    acpi.add_argument("--metadata-only", action="store_true")
+    acpi.add_argument("--output-dir", type=Path)
+    acpi.add_argument("--helper")
+    clone_check = commands.add_parser("analysis-clone-validate", help="validate an analysis clone directory")
+    clone_check.add_argument("--directory", type=Path, required=True)
+    clone_check.add_argument("--qemu-img", type=Path)
+    observe = commands.add_parser("analysis-observe", help="record guest observations in an environment report")
+    observe.add_argument("--report", type=Path, required=True)
+    observe.add_argument("--observation", type=Path, required=True)
+    observe.add_argument("--allow-incomplete", action="store_true")
+    observe.add_argument("--helper")
     return parser
 
 
@@ -104,6 +136,45 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps({"instance_id": args.instance_id, "name": args.name,
                               "sha256": digest, "path": str(destination)}, sort_keys=True))
+            return 0
+
+        if args.command == "analysis-acpi-dump":
+            value = dump_acpi_tables(include_data=not args.metadata_only,
+                                     output_dir=args.output_dir, helper=args.helper)
+            print(json.dumps(value, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "analysis-clone-validate":
+            value = validate_clone(args.directory, qemu_img=args.qemu_img)
+            print(json.dumps(value, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "analysis-observe":
+            report = json.loads(args.report.read_text(encoding="utf-8"))
+            observed = json.loads(args.observation.read_text(encoding="utf-8"))
+            missing = missing_observation_fields(report, observed)
+            if missing and not args.allow_incomplete:
+                raise ValueError("observation is missing required field(s): " + ", ".join(missing))
+            updated = record_observation(report, observed, helper=args.helper)
+            args.report.write_text(json.dumps(updated, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(json.dumps(updated["guest_observed"], indent=2, sort_keys=True))
+            return 0
+
+        if args.command.startswith("analysis-kvm-guard-"):
+            config = OperatorConfig.load(args.operator_config)
+            app = OperatorApplication(config)
+            record = app.open_session(args.instance_id, args.session_id)
+            guard = session_from_record(record.session_id, record.runtime_dir,
+                                        record.artifact_dir, record.manifest)
+            if args.command == "analysis-kvm-guard-load-command":
+                value = load_command(guard, args.module, hook_exits=not args.no_hook_exits,
+                                     hook_tsc=not args.no_hook_tsc,
+                                     hyperv_fast_mode=args.hyperv_fast_mode)
+            elif args.command == "analysis-kvm-guard-status":
+                value = status(guard, args.stats_path)
+            else:
+                value = snapshot(guard, args.stats_path)
+            print(json.dumps(value, indent=2, sort_keys=True))
             return 0
 
         if args.command == "session-create":

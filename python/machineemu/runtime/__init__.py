@@ -14,8 +14,9 @@ from .audio import AudioClientRegistry
 from .vnc import RfbInputGate, RfbProtocolError
 from .external_vnc import ExternalVncListener
 from .operations import OperationJournal
+from .host_usb import list_host_usb
 
 __all__ = [
     "InstanceRecord", "InstanceStore", "InventoryEntry", "ManagedProcess", "OperatorApplication", "OperatorConfig", "OperatorConfigError", "ProcessSupervisor", "QMPClient", "QMPError", "inventory_json", "inventory_tree", "validate_inventory",
-    "RuntimeStateError", "RunningSession", "SessionRecord", "SessionStore", "SessionSupervisor", "TerminalTicketStore", "RemoteDeviceRegistry", "AudioClientRegistry", "RfbInputGate", "RfbProtocolError", "ExternalVncListener", "OperationJournal",
+    "RuntimeStateError", "RunningSession", "SessionRecord", "SessionStore", "SessionSupervisor", "TerminalTicketStore", "RemoteDeviceRegistry", "AudioClientRegistry", "RfbInputGate", "RfbProtocolError", "ExternalVncListener", "OperationJournal", "list_host_usb",
 ]

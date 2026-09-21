@@ -82,3 +82,19 @@ def test_recovered_stop_uses_bounded_term(monkeypatch, tmp_path):
     assert SessionSupervisor(store).stop_recovered(record, timeout=1) == 0
     assert signals == [(1234, signal.SIGTERM), (1234, 0)]
     assert json.loads(record.manifest.read_text())["state"] == "stopped"
+
+
+def test_recovered_stop_also_reaps_the_recorded_swtpm(monkeypatch, tmp_path):
+    store = SessionStore(tmp_path / "run", tmp_path / "state", tmp_path / "artifacts")
+    record = store.create("instance-1", "session-1", _profile(tmp_path))
+    store.update(record, "running", pid=1234, metadata={"tpm_pid": 5678})
+    signals = []
+
+    def fake_kill(pid, sig):
+        signals.append((pid, sig))
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr("machineemu.runtime.supervisor.os.kill", fake_kill)
+    assert SessionSupervisor(store).stop_recovered(record, timeout=1) == 0
+    assert signals == [(1234, signal.SIGTERM), (1234, 0), (5678, signal.SIGTERM)]

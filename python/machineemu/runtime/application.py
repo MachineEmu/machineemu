@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from machineemu.assets import AssetStore
-from machineemu.domains.analysis import create_clone
+from machineemu.domains.analysis import create_clone, write_environment_report
 from machineemu.catalog import ProfileCatalog
 from machineemu.engines import EngineRegistry
 from machineemu.profiles import build_launch_plan, resolve_profile, resolve_profile_value
@@ -39,10 +39,13 @@ class OperatorApplication:
             raise ValueError("release set and bundle root are required to create a session")
         registry = EngineRegistry.load(self.release_set, self.bundle_root)
         profile = resolve_profile(profile_path, registry, target=target, asset_store=self.assets)
-        plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / session_id)
+        plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / session_id,
+                                 self.config.state_root / "instances" / instance_id)
         self.instances.ensure(instance_id, profile)
         record = self.store.create(instance_id, session_id, profile)
         self.store.update(record, "created", metadata={"launch_plan": plan.manifest})
+        if profile.analysis is not None:
+            write_environment_report(record, profile, plan)
         return record
 
     def create_catalog_session(self, profile_id: str, *, target: str | None,
@@ -63,10 +66,13 @@ class OperatorApplication:
             raise ValueError("catalog profile has no target; target is required")
         registry = EngineRegistry.load(self.release_set, self.bundle_root)
         profile = resolve_profile_value(value, registry, target=selected_target, asset_store=self.assets)
-        plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / session_id)
+        plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / session_id,
+                                 self.config.state_root / "instances" / instance_id)
         self.instances.ensure(instance_id, profile)
         record = self.store.create(instance_id, session_id, profile)
         self.store.update(record, "created", metadata={"launch_plan": plan.manifest})
+        if profile.analysis is not None:
+            write_environment_report(record, profile, plan)
         return record
 
     def preview_catalog_profile(self, profile_id: str, *, target: str | None = None):
@@ -82,13 +88,34 @@ class OperatorApplication:
         plan = build_launch_plan(profile, self.config.runtime_root / "sessions" / "device-validation")
         return value, profile, plan
 
-    def create_analysis_clone(self, profile_id: str, clone_id: str, *, target: str | None = None) -> dict[str, object]:
+    def create_analysis_clone(self, profile_id: str, clone_id: str, *, instance_id: str,
+                              target: str | None = None) -> dict[str, object]:
+        """Clone an instance's accumulated state, not the pristine baseline.
+
+        The disk comes from the instance's overlay, and the UEFI variables and
+        TPM from its per-instance copies, so a clone carries whatever the
+        machine has enrolled and installed since it was created.
+        """
         value, profile, _ = self.preview_catalog_profile(profile_id, target=target)
         analysis = profile.analysis
         if not isinstance(analysis, dict) or analysis.get("profile") != "malware-analysis":
             raise ValueError("analysis cloning is only available for malware-analysis profiles")
-        assets = {name: path for name, path in profile.assets.items()
-                  if name in {"disk", "firmware_vars", "nvram", "tpm"}}
+        record = self.instances.open(instance_id)
+        try:
+            instance = json.loads(record.manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot read instance manifest: {exc}") from exc
+        if instance.get("profile_id") != profile_id:
+            raise ValueError(f"instance {instance_id} was not created from profile {profile_id}")
+        state_dir = record.state_dir
+        assets = {"disk": state_dir / "overlay.qcow2", "firmware_vars": state_dir / "OVMF_VARS.fd"}
+        missing = sorted(name for name, path in assets.items() if not path.is_file())
+        if missing:
+            raise ValueError(f"instance {instance_id} has no machine state to clone: "
+                             f"{', '.join(missing)}; start the session at least once")
+        tpm_state = state_dir / "tpm"
+        if tpm_state.is_dir():
+            assets["tpm"] = tpm_state
         destination = self.config.artifact_root / "analysis-clones"
         return create_clone(destination_root=destination, clone_id=clone_id,
                             identity_seed=str(value.get("analysis", {}).get("identity_seed", "")),

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from typing import Any
+
+from machineemu.documents import DocumentError, load_document
 
 
 class OperatorConfigError(ValueError):
@@ -23,8 +24,8 @@ class OperatorConfig:
     @classmethod
     def load(cls, path: Path) -> "OperatorConfig":
         try:
-            value: Any = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            value: Any = load_document(path)
+        except DocumentError as exc:
             raise OperatorConfigError(f"cannot read operator config {path}: {exc}") from exc
         if not isinstance(value, dict) or value.get("schema_version") != 1:
             raise OperatorConfigError("operator config schema_version must be 1")

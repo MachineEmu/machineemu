@@ -34,6 +34,7 @@ def test_api_health_and_session_inspection(tmp_path):
     response = client.get("/api/v1/sessions/instance-1/session-1", headers=headers)
     assert response.status_code == 200
     assert response.json()["state"] == "created"
+    assert "manifest" not in response.json()
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
@@ -43,13 +44,19 @@ def test_api_exposes_bounded_public_diagnostics_without_runtime_paths(tmp_path):
         tmp_path / "runtime", tmp_path / "artifacts",
     )
     runtime = config.runtime_root / "sessions/session-1"
+    artifact = config.artifact_root / "sessions/session-1"
     for path in (runtime / "control", runtime / "sockets", runtime / "logs",
                  config.state_root / "instances/instance-1", config.artifact_root / "sessions/session-1"):
         path.mkdir(parents=True)
     (runtime / "manifest.json").write_text(json.dumps({
         "schema_version": 1, "session_id": "session-1", "instance_id": "instance-1",
-        "state": "stopped", "configuration": {"adapter": "pc", "devices": {"vnc": True}},
+        "state": "stopped", "configuration": {"adapter": "pc", "devices": {"vnc": True},
+        "debug": {"path": str(runtime / "sockets/gdb.sock")}},
         "analysis": {"schema_version": 1, "profile": "malware-analysis"},
+    }), encoding="utf-8")
+    (artifact / "environment.json").write_text(json.dumps({
+        "schema_version": 1, "profile": "malware-analysis", "profile_id": "analysis",
+        "identity_seed_sha256": "hash", "endpoints": {"qmp": {"configured": True}},
     }), encoding="utf-8")
     (runtime / "logs/stdout.log").write_text("one\ntwo\nthree\n", encoding="utf-8")
     client = TestClient(create_app(OperatorApplication(config), token="test-token"),
@@ -59,7 +66,8 @@ def test_api_exposes_bounded_public_diagnostics_without_runtime_paths(tmp_path):
     environment = client.get("/api/v1/sessions/instance-1/session-1/environment", headers=headers)
     logs = client.get("/api/v1/sessions/instance-1/session-1/logs?tail=2", headers=headers)
     assert hardware.json()["configuration"]["adapter"] == "pc"
-    assert environment.json()["analysis"]["profile"] == "malware-analysis"
+    assert environment.json()["profile"] == "malware-analysis"
+    assert environment.json()["identity_seed_sha256"] == "hash"
     assert logs.json()["lines"] == ["two", "three"]
     assert str(runtime) not in json.dumps(hardware.json())
 
@@ -714,6 +722,7 @@ def test_api_catalog_is_read_only_and_id_indexed(tmp_path, monkeypatch):
     (catalog / "demo.json").write_text(json.dumps({
         "schema_version": 1, "id": "demo", "domain": "lab", "machine": "virt",
         "engine": {"track": "track"},
+        "analysis": {"identity_seed": "catalog-seed"},
     }), encoding="utf-8")
     application = OperatorApplication(config)
     client = TestClient(
@@ -722,7 +731,25 @@ def test_api_catalog_is_read_only_and_id_indexed(tmp_path, monkeypatch):
     )
     headers = {"X-MachineEmu-Token": "test-token"}
     assert client.get("/api/v1/catalog/profiles", headers=headers).json()[0]["id"] == "demo"
-    assert client.get("/api/v1/catalog/profiles/demo", headers=headers).json()["machine"] == "virt"
+    public_profile = client.get("/api/v1/catalog/profiles/demo", headers=headers).json()
+    assert public_profile["machine"] == "virt"
+    assert "identity_seed" not in public_profile["analysis"]
+    assert "identity_seed" not in json.dumps(client.get("/api/v1/devices", headers=headers).json())
+    assert "identity_seed" not in client.get("/api/v1/devices/demo", headers=headers).json()["profile"]["analysis"]
+    monkeypatch.setattr(application, "create_analysis_clone", lambda *args, **kwargs: {
+        "clone_id": "clone-1", "directory": str(tmp_path / "artifacts/analysis-clones/clone-1"),
+        "baseline": str(tmp_path / "disk.qcow2"), "state": "created",
+    })
+    clone_response = client.post(
+        "/api/v1/devices/demo/clones", headers={**headers, "Origin": "http://127.0.0.1"},
+        json={"clone_id": "clone-1", "instance_id": "instance-1"},
+    )
+    assert clone_response.status_code == 201
+    assert clone_response.json() == {"clone_id": "clone-1", "state": "created"}
+    assert client.post(
+        "/api/v1/devices/demo/clones", headers={**headers, "Origin": "http://127.0.0.1"},
+        json={"clone_id": "clone-1"},
+    ).status_code == 422
 
     class Record:
         session_id = "session-1"

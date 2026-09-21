@@ -8,8 +8,7 @@ import { Video } from "./video";
 import { Gdb } from "./gdb";
 
 function client(): MachineEmuClient {
-  const token = document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "";
-  return new MachineEmuClient({ token });
+  return new MachineEmuClient({ token: "" });
 }
 
 function errorMessage(reason: unknown, fallback: string): string {

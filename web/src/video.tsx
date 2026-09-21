@@ -11,8 +11,7 @@ function socketUrl(instance: string, session: string, clientId: string): string 
 }
 
 function client(): MachineEmuClient {
-  const token = document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "";
-  return new MachineEmuClient({ token });
+  return new MachineEmuClient({ token: "" });
 }
 
 function records(buffer: Uint8Array<ArrayBuffer>): [Uint8Array<ArrayBuffer>[], Uint8Array<ArrayBuffer>] {

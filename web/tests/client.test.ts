@@ -150,4 +150,19 @@ describe("MachineEmuClient", () => {
       profileId: "demo", instanceId: "   ", sessionId: "session",
     })).rejects.toThrow("Profile, instance ID, and session ID are required.");
   });
+
+  it("covers session-scoped snapshot and hotplug mutations", async () => {
+    const calls: Request[] = [];
+    const client = new MachineEmuClient({
+      baseUrl: "http://127.0.0.1", token: "token",
+      fetchImpl: async (input, init) => {
+        calls.push(new Request(input, init));
+        return new Response(JSON.stringify({ snapshot_id: "snap", state: "created" }), { status: 200 });
+      },
+    });
+    await client.createSessionSnapshot("instance", "session/one", "snap");
+    await client.networkAttach("instance", "session/one", { type: "user", model: { driver: "virtio-net-pci" } });
+    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/sessions/instance/session%2Fone/snapshots");
+    expect(await calls[1].json()).toEqual({ type: "user", model: { driver: "virtio-net-pci" } });
+  });
 });

@@ -74,7 +74,7 @@ export class SpiceAudioClient {
   private async control<T>(body: Record<string, unknown>): Promise<T> {
     const response = await fetch(`/api/v1/sessions/${encodeURIComponent(this.instanceId)}/${encodeURIComponent(this.sessionId)}/audio/control`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-MachineEmu-Token": document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "", "Idempotency-Key": crypto.randomUUID() },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify(body),
     });
     if (!response.ok) {
@@ -294,7 +294,7 @@ export class SpiceAudioClient {
     if (token) {
       await fetch(`/api/v1/sessions/${encodeURIComponent(this.instanceId)}/${encodeURIComponent(this.sessionId)}/audio/control`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-MachineEmu-Token": document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "", "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({ action: "detach", client_token: token }),
       }).catch(() => {
         /* A closing tab cannot wait for this; the binding expires anyway. */

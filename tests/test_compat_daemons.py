@@ -39,3 +39,10 @@ def test_hwsim_medium_reconfiguration_is_bounded_and_deterministic():
         assert "loss or latency" in str(exc)
     else:
         raise AssertionError("out-of-range latency was accepted")
+
+
+def test_isolated_hwsim_wrapper_uses_migrated_helper_path():
+    wrapper = (ROOT / "scripts" / "compat" / "run-isolated-hwsim.sh").read_text(encoding="utf-8")
+    assert '"$repo_dir/scripts/compat/hwsim_adapter.py"' in wrapper
+    assert '"$repo_dir/compat/wifi/hwsim_adapter.py"' not in wrapper
+    assert "compat/wifi/hwsim_control.py" not in wrapper

@@ -29,7 +29,8 @@ def _smbios(value: Any) -> dict[str, Any]:
               "system_version": 64, "board_manufacturer": 64, "board_product": 64, "board_version": 64,
               "chassis_manufacturer": 64, "chassis_version": 64, "chassis_asset": 64, "chassis_sku": 64,
               "processor_manufacturer": 64, "processor_version": 64, "processor_asset": 64, "processor_part": 64,
-              "memory_manufacturer": 64, "memory_bank": 64, "memory_asset": 64, "memory_part": 64}
+              "memory_manufacturer": 64, "memory_bank": 64, "memory_asset": 64, "memory_part": 64,
+              "processor_socket_prefix": 64, "memory_locator_prefix": 64}
     for key, limit in limits.items():
         if key in result:
             result[key] = _ascii(result[key], f"smbios.{key}", limit)
@@ -176,6 +177,7 @@ def validate(value: Any) -> dict[str, Any] | None:
         "profile": "malware-analysis",
         "identity_seed_sha256": identity["identity_seed_sha256"],
         "identity": identity,
+        "clone": clone,
         "collection": value.get("collection", False),
         "overlay": value.get("overlay", True),
         "telemetry": value.get("telemetry", True),

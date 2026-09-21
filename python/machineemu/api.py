@@ -18,9 +18,27 @@ from .domains.unifi.compat.bluetooth import BluetoothError, advertise as bluetoo
 from .domains.unifi.compat.hwsim import HwsimError, configure as hwsim_configure, stats as hwsim_stats
 from .runtime import (AudioClientRegistry, ExternalVncListener, OperatorApplication, QMPError,
                       OperationJournal, RemoteDeviceRegistry, RfbInputGate, RfbProtocolError,
-                      TerminalTicketStore)
+                      TerminalTicketStore, list_host_usb)
 from .runtime.gdb import GdbConsole, GdbUnavailable, gdb_target
 from .runtime.spice_audio import SpiceClientGate, SpiceProtocolError, SpiceServerGate
+
+
+def _public_configuration(value: object) -> object:
+    """Remove path-bearing configuration fields before returning API data."""
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, child in value.items():
+            lowered = key.lower() if isinstance(key, str) else ""
+            if lowered in {"file", "path", "directory", "runtime_dir", "state_dir", "artifact_directory", "manifest", "identity_seed"}:
+                continue
+            public = _public_configuration(child)
+            if isinstance(public, str) and (public.startswith("/") or "\\" in public):
+                continue
+            result[key] = public
+        return result
+    if isinstance(value, list):
+        return [_public_configuration(item) for item in value]
+    return value
 
 
 class SessionRequest(BaseModel):
@@ -51,6 +69,7 @@ class DeviceSessionRequest(SessionRequest):
 class AnalysisCloneRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     clone_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    instance_id: str = Field(min_length=1, max_length=64)
     target: str | None = Field(default=None, max_length=128)
 
 
@@ -399,18 +418,7 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
 
     @app.get("/api/v1/host/usb")
     async def host_usb() -> dict[str, list[dict[str, object]]]:
-        devices: list[dict[str, object]] = []
-        root = Path("/dev/bus/usb")
-        if root.is_dir():
-            for bus in sorted(root.iterdir()):
-                if not bus.name.isdigit() or not bus.is_dir():
-                    continue
-                for device in sorted(bus.iterdir()):
-                    if not device.name.isdigit() or not device.is_char_device():
-                        continue
-                    devices.append({"id": f"usb-{int(bus.name)}-{int(device.name)}", "kind": "host",
-                                    "hostbus": int(bus.name), "hostaddr": int(device.name)})
-        return {"devices": devices}
+        return {"devices": list_host_usb()}
 
     @app.get("/api/v1/sessions/{instance_id}/{session_id}/usb")
     async def usb_status(instance_id: str, session_id: str) -> dict[str, object]:
@@ -1387,7 +1395,8 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
         if app.state.catalog is None:
             raise HTTPException(status_code=404, detail="catalog is not configured")
         try:
-            return app.state.catalog.list_profiles()
+            profiles = _public_configuration(app.state.catalog.list_profiles())
+            return profiles if isinstance(profiles, list) else []
         except CatalogError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1396,7 +1405,8 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
         if app.state.catalog is None:
             raise HTTPException(status_code=404, detail="catalog is not configured")
         try:
-            return app.state.catalog.get(profile_id)
+            profile = _public_configuration(app.state.catalog.get(profile_id))
+            return profile if isinstance(profile, dict) else {}
         except CatalogError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1405,7 +1415,9 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
         if app.state.catalog is None:
             raise HTTPException(status_code=404, detail="catalog is not configured")
         try:
-            profiles = app.state.catalog.list_profiles()
+            profiles = _public_configuration(app.state.catalog.list_profiles())
+            if not isinstance(profiles, list):
+                profiles = []
         except CatalogError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         sessions = application.list_session_summaries()
@@ -1430,6 +1442,9 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
             profile = app.state.catalog.get(device_id)
         except CatalogError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        profile = _public_configuration(profile)
+        if not isinstance(profile, dict):
+            raise HTTPException(status_code=404, detail="catalog profile is not an object")
         return {"id": device_id, "name": profile.get("name", device_id),
                 "profile": profile, "sessions": [item for item in application.list_session_summaries()
                                                     if item.get("profile_id") == device_id]}
@@ -1455,12 +1470,16 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
             )
         except (CatalogError, ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"session_id": record.session_id, "manifest": str(record.manifest), "state": "created"}
+        return {"session_id": record.session_id, "instance_id": request.instance_id, "state": "created"}
 
     @app.post("/api/v1/devices/{device_id}/clones", status_code=201)
     async def device_clone(device_id: str, body: AnalysisCloneRequest) -> dict[str, object]:
         try:
-            return application.create_analysis_clone(device_id, body.clone_id, target=body.target)
+            result = _public_configuration(
+                application.create_analysis_clone(device_id, body.clone_id,
+                                     instance_id=body.instance_id, target=body.target)
+            )
+            return result if isinstance(result, dict) else {}
         except (CatalogError, ValueError, OSError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -1473,7 +1492,7 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
             )
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"session_id": record.session_id, "manifest": str(record.manifest), "state": "created"}
+        return {"session_id": record.session_id, "instance_id": request.instance_id, "state": "created"}
 
     @app.post("/api/v1/sessions/reconcile")
     async def reconcile(request: SessionRequest) -> dict[str, str]:
@@ -1500,13 +1519,24 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
             )
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"session_id": record.session_id, "manifest": str(record.manifest), "state": "created"}
+        return {"session_id": record.session_id, "instance_id": request.instance_id, "state": "created"}
 
     @app.get("/api/v1/sessions/{instance_id}/{session_id}")
     async def inspect(instance_id: str, session_id: str) -> dict:
         try:
             record = application.open_session(instance_id, session_id)
-            return json.loads(record.manifest.read_text(encoding="utf-8"))
+            value = json.loads(record.manifest.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise ValueError("session manifest must be an object")
+            public = {
+                key: value[key] for key in (
+                    "schema_version", "session_id", "instance_id", "profile_id", "machine", "target",
+                    "engine", "state", "pid", "exit_code", "failure", "analysis",
+                ) if key in value
+            }
+            if "configuration" in value:
+                public["configuration"] = _public_configuration(value["configuration"])
+            return public
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1516,7 +1546,8 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
             record = application.open_session(instance_id, session_id)
             value = json.loads(record.manifest.read_text(encoding="utf-8"))
             configuration = value.get("configuration", {})
-            return {"schema_version": 1, "configuration": configuration if isinstance(configuration, dict) else {}}
+            public = _public_configuration(configuration)
+            return {"schema_version": 1, "configuration": public if isinstance(public, dict) else {}}
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1524,6 +1555,11 @@ def create_app(application: OperatorApplication, *, token: str | None = None,
     async def environment(instance_id: str, session_id: str) -> dict[str, object]:
         try:
             record = application.open_session(instance_id, session_id)
+            report = record.artifact_dir / "environment.json"
+            if report.is_file() and not report.is_symlink():
+                value = json.loads(report.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    return value
             value = json.loads(record.manifest.read_text(encoding="utf-8"))
             analysis = value.get("analysis")
             return {"schema_version": 1, "analysis": analysis if isinstance(analysis, dict) else None}

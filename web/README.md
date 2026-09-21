@@ -20,6 +20,11 @@ bun test
 bun run build
 ```
 
+For local development, copy `.env.example` to `.env` and set
+`MACHINEEMU_API_TOKEN`. Vite proxies `/api` and `/ws` to
+`MACHINEEMU_API_URL` (default: `http://127.0.0.1:8000`) and adds the token to
+proxied requests. The token is not exposed to the browser bundle.
+
 The initial client intentionally covers health, inspection, reconciliation,
 start, and stop. Display, input, audio, and remote-device transports remain
 separate migration slices.

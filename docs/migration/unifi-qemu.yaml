@@ -31,6 +31,12 @@ entries:
     state_policy: preserve reports as external artifacts; never commit samples
     milestone: M4
     status: partial
+    note: >-
+      Clean x86_64-softmmu analysis build, engine-bundle validation, and
+      runtime machine-property smoke pass. The guard module compiles to a
+      .ko against lab1's running 6.12.107 headers; insertion is not verified
+      because lab1 Secure Boot rejects unsigned modules. Hardware-backed
+      validation remains pending.
   - id: qemu-rust-crates
     source_paths: [crates/board-core, crates/board-ffi, crates/board-tools, crates/mt7981-machine, crates/udmpro-machine, crates/bcm5616x-machine, crates/net-offload]
     capability: board models, FFI, tools, and network offload
@@ -82,7 +88,7 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [runtime-lifecycle, external-assets]
-    evidence: [config/operator.example.json, tests/test_profile_resolve.py]
+    evidence: [config/operator.example.json, catalog/profiles/malware-analysis-x64.json, tests/test_profile_resolve.py, tests/test_launch_plan.py]
     state_policy: profiles contain digests and logical names, never host paths or secrets
     milestone: M1
     status: partial
@@ -104,7 +110,7 @@ entries:
     disposition: adapt
     support_status: experimental
     dependencies: [qemu-analysis, runtime-state]
-    evidence: [python/machineemu/domains/analysis, python/machineemu/domains/analysis/clone.py, python/machineemu/profiles/resolve.py, python/machineemu/profiles/plan.py, scripts/record-analysis-observation.py, tests/test_analysis.py, tests/test_analysis_clone.py, tests/test_profile_resolve.py, probes, smoke, artifacts/malware-analysis-runs]
+    evidence: [python/machineemu/domains/analysis, python/machineemu/domains/analysis/acpi.py, python/machineemu/domains/analysis/environment.py, python/machineemu/domains/analysis/clone.py, python/machineemu/domains/analysis/kvm_guard.py, python/machineemu/profiles/resolve.py, python/machineemu/profiles/plan.py, python/machineemu/runtime/application.py, python/machineemu/cli.py, scripts/record-analysis-observation.py, tests/test_acpi.py, tests/test_analysis.py, tests/test_analysis_clone.py, tests/test_kvm_guard.py, tests/test_application.py, tests/test_profile_resolve.py, probes, smoke, artifacts/malware-analysis-runs]
     state_policy: reports and samples stay external; record provenance only
     milestone: M4
     status: partial
@@ -126,7 +132,7 @@ entries:
     disposition: adapt
     support_status: baseline
     dependencies: [runtime-lifecycle, profile-config]
-    evidence: [machineemu/machineemu@13b75d6, machineemu/machineemu@e9c7e78, machineemu/machineemu@cab798c, machineemu/machineemu@51de5a5, machineemu/machineemu@50ee431, machineemu/machineemu@7fe71ee, machineemu/machineemu@5a1e5b1, machineemu/machineemu@bcda41a, machineemu/machineemu@74753de, contracts/openapi.json, python/machineemu/api.py, python/machineemu/runtime/application.py, python/machineemu/runtime/operations.py, python/machineemu/runtime/gdb.py, python/machineemu/runtime/audio.py, python/machineemu/runtime/external_vnc.py, python/machineemu/runtime/remote_devices.py, python/machineemu/runtime/spice_audio.py, python/machineemu/runtime/vnc.py, python/machineemu/domains/unifi/compat/bluetooth.py, python/machineemu/domains/unifi/compat/hwsim.py, tests/test_api.py, tests/test_audio.py, tests/test_external_vnc.py, tests/test_gdb.py, tests/test_operations.py, tests/test_spice_audio.py, tests/test_vnc.py, web/src/api-types.d.ts, web/src/client.ts, web/src/gdb.tsx, web/src/spice-audio, web/src/vnc.tsx, web/src/vnc-audio.tsx, web/src/video.tsx, web/package.json, web/tests]
+    evidence: [machineemu/machineemu@13b75d6, machineemu/machineemu@e9c7e78, machineemu/machineemu@cab798c, machineemu/machineemu@51de5a5, machineemu/machineemu@50ee431, machineemu/machineemu@7fe71ee, machineemu/machineemu@5a1e5b1, machineemu/machineemu@bcda41a, machineemu/machineemu@74753de, contracts/openapi.json, python/machineemu/api.py, python/machineemu/runtime/application.py, python/machineemu/runtime/host_usb.py, python/machineemu/runtime/operations.py, python/machineemu/runtime/gdb.py, python/machineemu/runtime/audio.py, python/machineemu/runtime/external_vnc.py, python/machineemu/runtime/remote_devices.py, python/machineemu/runtime/spice_audio.py, python/machineemu/runtime/vnc.py, python/machineemu/domains/unifi/compat/bluetooth.py, python/machineemu/domains/unifi/compat/hwsim.py, tests/test_api.py, tests/test_audio.py, tests/test_external_vnc.py, tests/test_gdb.py, tests/test_host_usb.py, tests/test_operations.py, tests/test_spice_audio.py, tests/test_vnc.py, web/src/api-types.d.ts, web/src/client.ts, web/src/gdb.tsx, web/src/spice-audio, web/src/vnc.tsx, web/src/vnc-audio.tsx, web/src/video.tsx, web/package.json, web/tests]
     state_policy: no credentials or host paths in API responses or browser storage
     milestone: M1
     status: partial

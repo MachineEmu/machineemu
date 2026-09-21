@@ -994,6 +994,8 @@ export interface components {
         AnalysisCloneRequest: {
             /** Clone Id */
             clone_id: string;
+            /** Instance Id */
+            instance_id: string;
             /** Target */
             target?: string | null;
         };

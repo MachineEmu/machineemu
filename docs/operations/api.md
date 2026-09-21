@@ -47,14 +47,21 @@ Expected response:
 {"status":"ok"}
 ```
 
-For catalog-backed session creation, add `--catalog-root`. Session creation
-also needs both `--release-set` and `--bundle-root`, pointing to the validated
-engine release metadata and installed engine bundles:
+For catalog-backed session creation, add `--catalog-root`. It must point at the
+directory holding the profile files themselves, not at `catalog/`. Session
+creation also needs both `--release-set` and `--bundle-root`, pointing to the
+validated engine release metadata and installed engine bundles.
+
+Operator-authored files -- catalog profiles, standalone profiles, the operator
+config, and the release set -- are read as either JSON (`.json`) or YAML
+(`.yaml`, `.yml`); YAML needs the `yaml` extra (`python -m pip install -e
+'.[yaml]'`). Runtime manifests and session state this project writes itself are
+always JSON. A profile ID must not be defined in more than one format.
 
 ```sh
 uv run machineemu-api \
   --operator-config operator.json \
-  --catalog-root catalog \
+  --catalog-root catalog/profiles \
   --release-set release-set.json \
   --bundle-root engines \
   --token dev-token

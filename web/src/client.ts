@@ -17,6 +17,7 @@ export type CatalogSessionResponse = paths["/api/v1/catalog/sessions"]["post"]["
 export type DeviceInventory = paths["/api/v1/devices"]["get"]["responses"][200]["content"]["application/json"];
 export type StateInventory = paths["/api/v1/instances/{instance_id}/state/inventory"]["get"]["responses"][200]["content"]["application/json"];
 export type SnapshotInventory = { schema_version: number; snapshots: Array<{ snapshot_id: string; files: string[] }> };
+export type SnapshotResponse = { snapshot_id: string; state: string; files?: string[] };
 export type SessionInventory = paths["/api/v1/sessions"]["get"]["responses"][200]["content"]["application/json"];
 export type SessionSummary = SessionInventory["sessions"][number];
 export type TerminalTicket = paths["/api/v1/sessions/{instance_id}/{session_id}/terminal/ticket"]["post"]["responses"][200]["content"]["application/json"];
@@ -54,6 +55,14 @@ export type VncControl = { action: "claim" | "release"; client_id: string; takeo
 export type ExternalVnc = { ok: boolean; enabled: boolean; port?: number; password?: string; url?: string };
 export type HwsimMedium = Record<string, number | boolean | null>;
 export type BluetoothPeer = { address: string; data?: string; rssi?: number; event_type?: number; address_type?: number };
+export type NetworkAttach = {
+  id?: string;
+  type?: "user" | "bridge" | "tap";
+  model?: Record<string, unknown>;
+  source?: Record<string, unknown>;
+  target?: Record<string, unknown>;
+  mac?: string;
+};
 
 
 export interface MachineEmuClientOptions {
@@ -110,9 +119,10 @@ export class MachineEmuClient {
     });
   }
 
-  async createAnalysisClone(deviceId: string, cloneId: string, target?: string): Promise<Record<string, unknown>> {
+  async createAnalysisClone(deviceId: string, cloneId: string, instanceId: string,
+                            target?: string): Promise<Record<string, unknown>> {
     return this.request(`/api/v1/devices/${encodeURIComponent(deviceId)}/clones`, {
-      method: "POST", body: { clone_id: cloneId, ...(target ? { target } : {}) },
+      method: "POST", body: { clone_id: cloneId, instance_id: instanceId, ...(target ? { target } : {}) },
     });
   }
 
@@ -157,6 +167,28 @@ export class MachineEmuClient {
   async restoreSnapshot(instanceId: string, snapshotId: string): Promise<{ snapshot_id: string; state: string }> {
     return this.request(`/api/v1/instances/${encodeURIComponent(instanceId)}/snapshots/${encodeURIComponent(snapshotId)}/restore`, {
       method: "POST",
+    });
+  }
+
+  async listSessionSnapshots(instanceId: string, sessionId: string): Promise<SnapshotInventory> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/snapshots`);
+  }
+
+  async createSessionSnapshot(instanceId: string, sessionId: string, snapshotId: string, files?: string[]): Promise<SnapshotResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/snapshots`, {
+      method: "POST", body: { snapshot_id: snapshotId, ...(files ? { files } : {}) },
+    });
+  }
+
+  async restoreSessionSnapshot(instanceId: string, sessionId: string, snapshotId: string): Promise<SnapshotResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/snapshots/${encodeURIComponent(snapshotId)}/restore`, {
+      method: "POST",
+    });
+  }
+
+  async deleteSessionSnapshot(instanceId: string, sessionId: string, snapshotId: string): Promise<SnapshotResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/snapshots/${encodeURIComponent(snapshotId)}`, {
+      method: "DELETE",
     });
   }
 
@@ -323,8 +355,50 @@ export class MachineEmuClient {
     return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/cdrom`);
   }
 
+  async cdromEject(instanceId: string, sessionId: string, id: string): Promise<OperationResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/cdrom/eject`, {
+      method: "POST", body: { id },
+    });
+  }
+
+  async cdromInsert(instanceId: string, sessionId: string, id: string, image: string): Promise<OperationResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/cdrom/insert`, {
+      method: "POST", body: { id, image },
+    });
+  }
+
+  async cdromAttachImage(instanceId: string, sessionId: string, id: string, image: string, readOnly = true): Promise<OperationResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/cdrom/image`, {
+      method: "POST", body: { id, image, read_only: readOnly },
+    });
+  }
+
+  async cdromDetach(instanceId: string, sessionId: string, id: string): Promise<OperationResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/cdrom/detach`, {
+      method: "POST", body: { id },
+    });
+  }
+
   async networkStatus(instanceId: string, sessionId: string): Promise<{ devices: Array<Record<string, unknown>> }> {
     return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/network`);
+  }
+
+  async networkLink(instanceId: string, sessionId: string, name: string, up: boolean): Promise<OperationResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/network/link`, {
+      method: "POST", body: { name, up },
+    });
+  }
+
+  async networkAttach(instanceId: string, sessionId: string, request: NetworkAttach): Promise<OperationResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/network/attach`, {
+      method: "POST", body: request,
+    });
+  }
+
+  async networkDetach(instanceId: string, sessionId: string, id: string): Promise<OperationResponse> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(instanceId)}/${encodeURIComponent(sessionId)}/network/detach`, {
+      method: "POST", body: { id },
+    });
   }
 
   private async request<T>(path: string, init: { method?: string; headers?: HeadersInit; body?: unknown } = {}): Promise<T> {

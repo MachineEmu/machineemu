@@ -63,8 +63,7 @@ export async function mountCatalogScreen(root: HTMLElement, client: CatalogScree
 }
 
 export function bootstrap(root: HTMLElement = document.body): void {
-  const token = document.querySelector<HTMLMetaElement>('meta[name="machineemu-token"]')?.content ?? "";
-  void mountCatalogScreen(root, new MachineEmuClient({ token }));
+  void mountCatalogScreen(root, new MachineEmuClient({ token: "" }));
 }
 
 if (typeof document !== "undefined") bootstrap();

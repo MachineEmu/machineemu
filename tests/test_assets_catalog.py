@@ -30,3 +30,21 @@ def test_catalog_rejects_host_path(tmp_path):
         "machine": "pc", "engine": {"track": "track"}, "path": "/host/file"}), encoding="utf-8")
     with pytest.raises(CatalogError, match="host-specific"):
         load_profile(profile)
+
+
+def test_catalog_validates_device_descriptors_and_external_assets(tmp_path):
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "schema_version": 1, "id": "demo", "domain": "lab", "machine": "pc",
+        "engine": {"track": "track"},
+        "devices": {"lcd": {"type": "display", "available": True}, "bluetooth": False},
+        "external_assets": [{"id": "firmware-bundle", "kind": "prepared-bundle", "required": True}],
+    }), encoding="utf-8")
+    assert load_profile(profile)["devices"]["lcd"]["type"] == "display"
+
+    profile.write_text(json.dumps({
+        "schema_version": 1, "id": "demo", "domain": "lab", "machine": "pc",
+        "engine": {"track": "track"}, "devices": {"lcd": {"type": "display", "available": "yes"}},
+    }), encoding="utf-8")
+    with pytest.raises(CatalogError, match="available"):
+        load_profile(profile)
