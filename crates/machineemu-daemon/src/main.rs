@@ -170,7 +170,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let listener = tokio::net::UnixListener::bind(&socket)?;
         #[cfg(unix)]
         std::fs::set_permissions(&socket, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        serve_unix(app, listener).await?;
+        let served = serve_unix(app, listener).await;
+        // The socket belongs to this daemon. Left behind, the next start finds
+        // a path that exists but nothing listening on it, and a client sees
+        // "connection refused" against what looks like a live daemon.
+        if let Err(error) = fs::remove_file(&socket) {
+            eprintln!("could not remove {}: {error}", socket.display());
+        }
+        served?;
     } else {
         if bearer_token.is_empty() {
             return Err("bearer token is required for TCP server mode".into());
@@ -717,8 +724,29 @@ async fn get_image(
     }
 }
 
+/// Wait for the signals a supervisor or an operator actually sends. SIGINT
+/// alone left `pkill` and systemd stopping the process outright, with no
+/// chance to remove the socket it created.
 async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn authorized(
