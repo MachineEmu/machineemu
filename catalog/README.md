@@ -17,6 +17,14 @@ overrides both for one run. QEMU's own default address is the same
 52:54:00:12:34:56 for every guest, which two instances on one bridge cannot
 both keep.
 
+The guest's hostname is not the planner's to set: it comes from the cloud-init
+seed, whose meta-data carries `local-hostname` and `instance-id`. A seed reused
+across instances names them all the same, so build one per instance --
+`vm-seed -H lab01 -i iid-lab01 seeds/lab01.iso` from vmmanager-sh -- and pass
+it with `--seed`. The instance-id has to change too, or cloud-init treats the
+boot as the same instance and skips the per-instance modules that apply the
+hostname and keys.
+
 Prepared images use the portable bundle format described in
 [`docs/image-store.md`](../docs/image-store.md). Copy the complete bundle
 directory, including `manifest.json` and its `components/` directory; do not
