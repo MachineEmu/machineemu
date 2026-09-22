@@ -23,6 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+      # tests/test_machine_state.py builds real qcow2 overlays, so the runner
+      # needs qemu-img; without it three tests fail on a missing executable.
+      - name: Install QEMU image tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - name: Create test environment
         run: uv venv --python 3.12 .venv
       - name: Install test dependencies and package

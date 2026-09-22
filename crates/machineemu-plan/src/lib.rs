@@ -1635,7 +1635,11 @@ esac
             .clone()
     }
 
-    fn plan_with(root: &Path, mac: Option<&str>, instance: Option<&str>) -> Result<LaunchPlan, Error> {
+    fn plan_with(
+        root: &Path,
+        mac: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<LaunchPlan, Error> {
         let (mut profile, release, bundle) = tpm_fixture(root);
         profile["network"] = serde_json::json!({"type":"bridge","bridge":"br0"});
         build_plan(PlanInput {
