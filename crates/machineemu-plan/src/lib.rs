@@ -43,6 +43,12 @@ pub struct PlanInput {
     /// runs the copy beside its own executable, which an engine built from
     /// source has no privileges for.
     pub bridge_helper: Option<PathBuf>,
+    /// An exact NIC address. It outranks the profile's own `devices.mac` and
+    /// the address derived from `instance`.
+    pub mac: Option<String>,
+    /// The instance this plan is for. Without a declared address, its NIC
+    /// address is derived from this name.
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -738,11 +744,24 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         .get("devices")
         .and_then(|value| value.get("nic"))
         .and_then(Value::as_str);
+    // An explicit address wins, then one the profile declares -- a cloned
+    // identity carries its own -- and otherwise the instance name decides.
+    let address = input
+        .mac
+        .or_else(|| {
+            profile
+                .get("devices")
+                .and_then(|devices| devices.get("mac"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| input.instance.as_deref().map(derive_mac));
     append_network(
         &mut argv,
         profile.get("network"),
         nic,
         bridge_helper.as_deref(),
+        address.as_deref(),
     )?;
     if let Some(seed) = &input.seed {
         if !seed.is_file() {
@@ -898,12 +917,55 @@ fn machine_value(
     }
     Ok(m)
 }
+/// Derive a stable NIC address for one instance.
+///
+/// QEMU hands every guest the same 52:54:00:12:34:56 unless it is told
+/// otherwise, so two instances on one bridge answer for each other's traffic
+/// and the second lease replaces the first. The 52:54:00 prefix is kept -- it
+/// is locally administered and unicast, and it still reads as a QEMU guest on
+/// the wire -- and the remaining three bytes come from the instance name, so
+/// an instance keeps its address across a rebuild and two instances differ.
+pub fn derive_mac(instance: &str) -> String {
+    let digest = Sha256::digest(instance.as_bytes());
+    format!(
+        "52:54:00:{:02x}:{:02x}:{:02x}",
+        digest[0], digest[1], digest[2]
+    )
+}
+
+fn mac(value: &str) -> Result<String, Error> {
+    let octets: Vec<&str> = value.split(':').collect();
+    let valid = octets.len() == 6
+        && octets
+            .iter()
+            .all(|octet| octet.len() == 2 && octet.chars().all(|c| c.is_ascii_hexdigit()));
+    if !valid {
+        return Err(invalid(&format!(
+            "mac address must be six colon-separated hex octets: {value:?}"
+        )));
+    }
+    let first = u8::from_str_radix(octets[0], 16).map_err(|_| invalid("mac address is not hex"))?;
+    // A multicast address is accepted by QEMU and then ignored by every switch
+    // on the path, which looks like a guest that never got a lease.
+    if first & 1 == 1 {
+        return Err(invalid(&format!(
+            "mac address {value:?} is multicast; the low bit of the first octet must be clear"
+        )));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 fn append_network(
     argv: &mut Vec<String>,
     v: Option<&Value>,
     nic: Option<&str>,
     bridge_helper: Option<&Path>,
+    address: Option<&str>,
 ) -> Result<(), Error> {
+    let mac = match address {
+        Some(value) => format!(",mac={}", mac(value)?),
+        None => String::new(),
+    };
     let t = v
         .and_then(|x| x.get("type"))
         .and_then(Value::as_str)
@@ -916,7 +978,7 @@ fn append_network(
                 "-netdev".into(),
                 "user,id=net0".into(),
                 "-device".into(),
-                format!("{model},netdev=net0"),
+                format!("{model},netdev=net0{mac}"),
             ])
         }
         "bridge" => {
@@ -939,7 +1001,7 @@ fn append_network(
                 "-netdev".into(),
                 format!("bridge,id=net0,br={b}{helper}"),
                 "-device".into(),
-                format!("{model},netdev=net0"),
+                format!("{model},netdev=net0{mac}"),
             ])
         }
         _ => {
@@ -1531,6 +1593,8 @@ esac
             seed: None,
             swtpm: None,
             bridge_helper: None,
+            mac: None,
+            instance: None,
         })
         .unwrap();
         let helper = plan.helper_argv.expect("a TPM profile needs its helper");
@@ -1553,11 +1617,93 @@ esac
             seed: None,
             swtpm: Some(PathBuf::from("/nix/store/fixture/bin/swtpm")),
             bridge_helper: None,
+            mac: None,
+            instance: None,
         })
         .unwrap();
         let helper = plan.helper_argv.expect("a TPM profile needs its helper");
         assert_eq!(helper[0], "/nix/store/fixture/bin/swtpm");
         assert!(helper.contains(&"socket".to_string()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn nic_argument(plan: &LaunchPlan) -> String {
+        plan.argv
+            .iter()
+            .find(|argument| argument.starts_with("virtio-net-pci,"))
+            .expect("the fixture profile has a NIC")
+            .clone()
+    }
+
+    fn plan_with(root: &Path, mac: Option<&str>, instance: Option<&str>) -> Result<LaunchPlan, Error> {
+        let (mut profile, release, bundle) = tpm_fixture(root);
+        profile["network"] = serde_json::json!({"type":"bridge","bridge":"br0"});
+        build_plan(PlanInput {
+            profile,
+            release_set: release,
+            bundle_root: bundle,
+            asset_root: None,
+            target: "x86_64-softmmu".into(),
+            runtime_dir: root.join("runtime"),
+            state_dir: None,
+            seed: None,
+            swtpm: None,
+            bridge_helper: None,
+            mac: mac.map(str::to_owned),
+            instance: instance.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn a_derived_address_is_stable_per_instance_and_differs_between_them() {
+        let root = test_root("mac-derived");
+        let lab01 = nic_argument(&plan_with(&root, None, Some("lab01")).unwrap());
+        let again = nic_argument(&plan_with(&root, None, Some("lab01")).unwrap());
+        let lab02 = nic_argument(&plan_with(&root, None, Some("lab02")).unwrap());
+        assert_eq!(lab01, again, "an instance keeps its address");
+        assert_ne!(lab01, lab02, "two instances must not share one address");
+        assert!(
+            lab01.contains(",mac=52:54:00:"),
+            "unexpected NIC argument: {lab01}"
+        );
+        assert_eq!(derive_mac("lab01").len(), 17);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_explicit_address_outranks_the_derived_one() {
+        let root = test_root("mac-explicit");
+        let plan = plan_with(&root, Some("52:54:00:AB:CD:EF"), Some("lab01")).unwrap();
+        assert!(
+            nic_argument(&plan).ends_with(",mac=52:54:00:ab:cd:ef"),
+            "unexpected NIC argument: {}",
+            nic_argument(&plan)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_malformed_or_multicast_address_is_rejected() {
+        let root = test_root("mac-invalid");
+        for value in ["52:54:00:ab:cd", "52-54-00-ab-cd-ef", "zz:54:00:ab:cd:ef"] {
+            assert!(
+                plan_with(&root, Some(value), None).is_err(),
+                "{value:?} must not be accepted"
+            );
+        }
+        let multicast = plan_with(&root, Some("53:54:00:ab:cd:ef"), None).unwrap_err();
+        assert!(
+            multicast.to_string().contains("multicast"),
+            "unexpected error: {multicast}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn without_an_instance_or_address_qemu_keeps_its_own_default() {
+        let root = test_root("mac-absent");
+        let plan = plan_with(&root, None, None).unwrap();
+        assert_eq!(nic_argument(&plan), "virtio-net-pci,netdev=net0");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1577,6 +1723,8 @@ esac
             seed: None,
             swtpm: None,
             bridge_helper: Some(PathBuf::from("/run/wrappers/bin/qemu-bridge-helper")),
+            mac: None,
+            instance: None,
         })
         .unwrap();
         assert!(
@@ -1605,6 +1753,8 @@ esac
             seed: None,
             swtpm: None,
             bridge_helper: None,
+            mac: None,
+            instance: None,
         })
         .unwrap();
         assert!(
@@ -1639,6 +1789,8 @@ esac
             seed: None,
             swtpm: None,
             bridge_helper: None,
+            mac: None,
+            instance: None,
         })
         .unwrap();
         assert!(plan.argv[0].ends_with("bin/qemu"));

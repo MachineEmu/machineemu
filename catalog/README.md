@@ -9,6 +9,14 @@ A profile may be written as JSON (`.json`) or YAML (`.yaml`, `.yml`); the file
 name is the profile ID, and the same ID must not appear in two formats. Reading
 YAML needs the `yaml` extra.
 
+`devices.nic` names the NIC model and `devices.mac` may pin its address. A
+profile that pins one is asserting an identity every instance launched from it
+will share, so leave it out unless that is the intent: without it each instance
+gets a stable address derived from its own name, and `machineemu run --mac`
+overrides both for one run. QEMU's own default address is the same
+52:54:00:12:34:56 for every guest, which two instances on one bridge cannot
+both keep.
+
 Prepared images use the portable bundle format described in
 [`docs/image-store.md`](../docs/image-store.md). Copy the complete bundle
 directory, including `manifest.json` and its `components/` directory; do not

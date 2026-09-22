@@ -97,6 +97,10 @@ enum Command {
         /// helpers.qemu_bridge_helper from the configuration.
         #[arg(long, env = "MACHINEEMU_BRIDGE_HELPER")]
         bridge_helper: Option<PathBuf>,
+        /// NIC address for this run. Defaults to the profile's devices.mac,
+        /// then an address derived from the instance name.
+        #[arg(long)]
+        mac: Option<String>,
         /// Daemon HTTP endpoint.
         #[arg(long, default_value = "127.0.0.1:8787")]
         daemon: String,
@@ -134,6 +138,13 @@ enum Command {
         /// runs the copy beside its own executable.
         #[arg(long, env = "MACHINEEMU_BRIDGE_HELPER")]
         bridge_helper: Option<PathBuf>,
+        /// NIC address for the planned instance.
+        #[arg(long)]
+        mac: Option<String>,
+        /// Instance this plan is for. Without --mac or a profile address, its
+        /// NIC address is derived from this name.
+        #[arg(long)]
+        instance: Option<String>,
         /// Emit the machine-readable plan. This is the default and authoritative form.
         #[arg(long)]
         json: bool,
@@ -290,6 +301,7 @@ fn run() -> Result<(), machineemu_plan::Error> {
             qemu,
             swtpm,
             bridge_helper,
+            mac,
             daemon,
             token,
         } => {
@@ -304,6 +316,7 @@ fn run() -> Result<(), machineemu_plan::Error> {
                 &qemu,
                 swtpm.as_deref(),
                 bridge_helper.as_deref(),
+                mac.as_deref(),
                 &daemon,
                 &token,
             )?;
@@ -319,6 +332,8 @@ fn run() -> Result<(), machineemu_plan::Error> {
             seed,
             swtpm,
             bridge_helper,
+            mac,
+            instance,
             json: _,
             validate_qemu,
         } => {
@@ -333,6 +348,8 @@ fn run() -> Result<(), machineemu_plan::Error> {
                 seed,
                 swtpm,
                 bridge_helper,
+                mac,
+                instance,
             };
             if validate_qemu {
                 let executable = build_plan(input.clone())?.executable;
@@ -432,6 +449,7 @@ fn run_rust_owned(
     qemu: &Path,
     swtpm: Option<&Path>,
     bridge_helper: Option<&Path>,
+    mac: Option<&str>,
     daemon: &str,
     token: &str,
 ) -> Result<(), machineemu_plan::Error> {
@@ -611,6 +629,8 @@ fn run_rust_owned(
         seed: seed.map(Path::to_owned),
         swtpm: swtpm_path,
         bridge_helper: bridge_helper_path,
+        mac: mac.map(str::to_owned),
+        instance: Some(instance.to_owned()),
     })?;
     let options = inspect_qemu(&plan.executable, None, None)?;
     validate_profile_against_qemu(&profile, &options)?;
