@@ -3,7 +3,8 @@
   "id": "udm-pro-lab",
   "domain": "device-research",
   "engine": {
-    "track": "unifi-10.2"
+    "track": "unifi-10.2",
+    "version": "10.2.4"
   },
   "machine": "udm-pro",
   "target": "aarch64-softmmu",

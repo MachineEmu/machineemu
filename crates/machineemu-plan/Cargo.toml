@@ -1,0 +1,25 @@
+[package]
+name = "machineemu-plan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "machineemu"
+path = "src/main.rs"
+
+[[bin]]
+name = "machineemu-plan"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+machineemu-runtime = { path = "../machineemu-runtime" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2.0"
+
+[lints]
+workspace = true

@@ -1,3 +1,12 @@
 __pycache__
 *.egg-info/
 config/operator.json
+/target/
+machineemu.yaml
+machineemu.yml
+
+# Generated state: the daemon's workspace, instance locks, and the image
+# blobs a manifest points at. Manifests themselves are tracked.
+/machineemu-workspace/
+/vm-state/
+/images/*/components/

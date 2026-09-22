@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "image_id": "win11-dev",
+  "engine_track": "unifi-10.2",
+  "target": "x86_64-softmmu",
+  "components": {
+    "disk": {
+      "path": "components/disk.qcow2",
+      "sha256": "sha256:151aae1a84611958fccf799e13c34ee71861bb4d2eb2a1efd9680da94381e11a"
+    },
+    "firmware": {
+      "path": "components/firmware.fd",
+      "sha256": "sha256:c9b201a33602b58bc1fb8c3a64ebd7fb911e9c83c9a6c6381b387592487b0b8d"
+    },
+    "tpm_state": {
+      "path": "components/tpm-state",
+      "sha256": "sha256:749384143194927093fe0ff1597b81739a536bd59f597625992858bf8557875e"
+    }
+  }
+}

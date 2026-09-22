@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "id": "win11-dev",
+  "name": "Windows 11 Driver Development",
+  "domain": "windows-driver-development",
+  "engine": {
+    "track": "unifi-10.2",
+    "version": "10.2.4"
+  },
+  "machine": "q35",
+  "target": "x86_64-softmmu",
+  "smm": true,
+  "cpu": "host",
+  "resources": {
+    "memory": "6GiB",
+    "vcpus": 4,
+    "accelerator": "kvm"
+  },
+  "external_assets": [
+    {
+      "id": "win11-dev-disk",
+      "kind": "qcow2-disk",
+      "required": true,
+      "note": "Immutable Windows 11 development base; create an instance overlay before launch."
+    },
+    {
+      "id": "ovmf-code",
+      "kind": "ovmf-code",
+      "required": true,
+      "note": "UEFI firmware code image."
+    },
+    {
+      "id": "ovmf-vars",
+      "kind": "ovmf-vars",
+      "required": true,
+      "note": "Per-instance UEFI variables copied from the Windows base state."
+    },
+    {
+      "id": "windows-seed",
+      "kind": "iso",
+      "required": false,
+      "note": "Optional instance provisioning media; absent in the observed win1 launch."
+    }
+  ],
+  "assets": {},
+  "firmware": {
+    "loader": {
+      "asset": "ovmf-code",
+      "readonly": true,
+      "secure": false
+    },
+    "nvram": {
+      "asset": "ovmf-vars"
+    }
+  },
+  "tpm": {
+    "model": "tpm-crb",
+    "backend": {
+      "type": "emulator",
+      "version": "2.0"
+    }
+  },
+  "storage": {
+    "disk": {
+      "asset": "win11-dev-disk",
+      "format": "qcow2",
+      "bus": "virtio",
+      "discard": "unmap"
+    }
+  },
+  "boot": {
+    "menu": false,
+    "from": "disk"
+  },
+  "network": {
+    "type": "bridge",
+    "bridge": "br0",
+    "operator_approval_required": true
+  },
+  "devices": {
+    "nic": "virtio-net-pci",
+    "vnc": true,
+    "usb_tablet": true,
+    "guest_agent": true,
+    "serial": "file"
+  },
+  "console": {
+    "uart": true
+  },
+  "policy": {
+    "network": "bridge-requires-operator-approval",
+    "host_usb": "deny",
+    "clipboard": "deny",
+    "artifact_retention": "required",
+    "secure_boot": "disabled-for-driver-development"
+  }
+}

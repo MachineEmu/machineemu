@@ -1,8 +1,61 @@
 # Migration status
 
-Last updated: 2026-09-21.
+Last updated: 2026-09-22.
 
 ## Completed checkpoints
+
+- The Rust step-0 planner now validates new-format profile machine, CPU,
+  accelerator, NIC, video, audio, TPM, and analysis-property choices against
+  the selected QEMU executable. The planner has nine unit tests and runs in CI;
+  runtime state and QEMU process ownership remain outside this checkpoint.
+- The Rust runtime foundation now owns one explicit workspace root at a time,
+  persists image manifests and instance revisions in SQLite, validates stable
+  IDs, and records idempotent operation keys with conflict detection and
+  guarded lifecycle transitions. Staged blob import verifies SHA-256 before
+  atomic publication. The runtime also has argv-only process supervision and a
+  line-framed QMP client with capability negotiation and event-safe replies;
+  durable run records now include PID and Linux process-start identity, and
+  recovery marks missing or reused identities as uncertain instead of retrying
+  blindly. A tested start path now persists the operation, spawns argv, waits
+  for QMP negotiation, and advances the instance to running with cleanup on
+  failure. Pause, resume, reset, and graceful stop now use QMP and update
+  durable run/lifecycle state in tested orchestration. Daemon restart recovery,
+  active-run startup scans, authenticated API routes, and real-QEMU evidence
+  are still pending. A Rust daemon binary now exposes bearer-authenticated
+  health, instance create/inspect, and active-run reconciliation routes over
+  loopback-configurable `/api/v2` endpoints. Stopped-only snapshot capture and
+  restore now stage and hash each declared component before publication, with
+  tamper detection covered by runtime tests. Snapshot cloning now restores
+  independent copied components under a new instance identity. The daemon also
+  registers and inspects image manifests, and its route-level bearer-auth
+  behavior is tested. The API now exposes durable operation inspection, and a
+  router integration test covers image registration followed by instance
+  creation and inspection. The daemon can load a local planner-produced launch
+  registry and exposes guarded start/stop/pause/resume/reset routes; starts are
+  rejected when no approved profile plan is registered. Snapshot capture,
+  inspection, and independent clone routes operate only on workspace-owned
+  instance directories. Workspace locks now record PID/start identity and
+  reclaim only demonstrably stale Linux locks, with live-lock and stale-lock
+  recovery tests. The installed QEMU 10.2.4 system binary validates the
+  Debian 13 and Windows 11 profiles; the non-analysis system binary correctly
+  rejects the analysis profile's custom machine properties. A disposable real
+  QEMU 10.2.4 process accepted QMP capabilities and returned `query-status`
+  before teardown. Images also have a portable bundle representation with a
+  readable manifest and named disk, firmware, and TPM component files; import
+  verifies component digests before adding them to the internal store, and
+  export recreates the same directory shape. The planner CLI can import an
+  immutable `vmmanager-sh` base directory while excluding instance overlays and
+  runtime TPM lock/PID files. The Debian and Windows profiles now declare the
+  explicit `br0` bridge, and planner inputs can attach a validated per-instance
+  NoCloud seed ISO as a read-only CD-ROM. The Debian workspace now registers
+  the disk, OVMF code, pristine OVMF variables, and seed as verified assets.
+  The Rust-owned `machineemu run PROFILE INSTANCE` path now generates the
+  complete profile argv, prepares the overlay and writable per-instance OVMF
+  variables/TPM directory, starts `swtpm`, and submits the launch plan inline
+  to the authenticated daemon. The daemon records QMP-backed start/stop
+  operations and supervises the helper; `machineemu ps`, `stop`, and
+  stopped-state `rm --force` use the daemon API. The real Debian QEMU gate has
+  passed through start, pause, resume, reset, stop, restart, and forced removal.
 
 - The `MachineEmu` organisation owns separate `machineemu` and `qemu` repositories; source and infrastructure policy is AGPL-3.0-only for now.
 - QEMU patches, board crates, and display/audio/remote-device helper crates are ported to `machineemu/qemu`.

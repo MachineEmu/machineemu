@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "image_id": "debian13-cloud",
+  "engine_track": "unifi-10.2",
+  "target": "x86_64-softmmu",
+  "components": {
+    "disk": {
+      "path": "components/disk.qcow2",
+      "sha256": "sha256:025a73500db5d65fdfea1ac7f1a60526c865e3ed1bf32ba53b2cc28328d6e7dc"
+    }
+  }
+}

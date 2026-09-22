@@ -8,6 +8,16 @@ permissions:
   contents: read
 
 jobs:
+  rust-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Test planner
+        run: cargo test --workspace
+
   test:
     runs-on: ubuntu-latest
     steps:

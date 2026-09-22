@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "id": "debian13-cloud",
+  "name": "Debian 13 Cloud",
+  "domain": "general-purpose-linux",
+  "engine": {
+    "track": "unifi-10.2",
+    "version": "10.2.4"
+  },
+  "machine": "q35",
+  "target": "x86_64-softmmu",
+  "smm": true,
+  "resources": {
+    "memory": "6GiB",
+    "vcpus": 4,
+    "accelerator": "kvm"
+  },
+  "external_assets": [
+    {
+      "id": "debian13-cloud-disk",
+      "kind": "qcow2-disk",
+      "required": true,
+      "note": "Immutable Debian 13 generic cloud image; create an instance overlay before launch."
+    },
+    {
+      "id": "cloud-init-seed",
+      "kind": "iso",
+      "required": false,
+      "note": "Optional NoCloud seed ISO supplied per instance."
+    },
+    {
+      "id": "ovmf-code",
+      "kind": "ovmf-code",
+      "required": true,
+      "note": "Secure Boot capable OVMF code image."
+    },
+    {
+      "id": "ovmf-vars",
+      "kind": "ovmf-vars",
+      "required": true,
+      "note": "Pristine OVMF variables used to initialize each instance before Secure Boot enrollment."
+    }
+  ],
+  "assets": {
+    "debian13-cloud-disk": "sha256:025a73500db5d65fdfea1ac7f1a60526c865e3ed1bf32ba53b2cc28328d6e7dc",
+    "ovmf-code": "sha256:8f65267595ea75cc951deca1e86782e912962696fccfa6ec6e587f31783b72fa",
+    "ovmf-vars": "sha256:5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e",
+    "cloud-init-seed": "sha256:03cb143c026c11c97c89c9364a9347d3a57dc02b846f75f48f3d1112077cea22"
+  },
+  "firmware": {
+    "loader": {
+      "asset": "ovmf-code",
+      "readonly": true,
+      "secure": true
+    },
+    "nvram": {
+      "asset": "ovmf-vars"
+    }
+  },
+  "tpm": {
+    "model": "tpm-crb",
+    "backend": {
+      "type": "emulator",
+      "version": "2.0"
+    }
+  },
+  "storage": {
+    "disk": {
+      "asset": "debian13-cloud-disk",
+      "format": "qcow2",
+      "bus": "virtio",
+      "size": "64GiB",
+      "discard": "unmap"
+    }
+  },
+  "boot": {
+    "menu": false,
+    "from": "disk"
+  },
+  "network": {
+    "type": "bridge",
+    "bridge": "br0",
+    "operator_approval_required": true
+  },
+  "devices": {
+    "nic": "virtio-net-pci",
+    "vnc": true,
+    "vsock": true,
+    "guest_agent": true,
+    "serial": "file"
+  },
+  "console": {
+    "uart": true
+  },
+  "policy": {
+    "network": "bridge-requires-operator-approval",
+    "host_usb": "deny",
+    "clipboard": "deny",
+    "artifact_retention": "required"
+  }
+}
