@@ -13,6 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # machineemu-runtime's instance-preparation test creates a real qcow2
+      # backing file, the same reason the Python job needs these tools.
+      - name: Install QEMU image tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - name: Format
         run: cargo fmt --all -- --check
       - name: Test planner
