@@ -1,6 +1,7 @@
 # Rust migration plan
 
-Date: 2026-09-21. Status: implementation plan; migration has not started.
+Date: 2026-09-21. Status: migration in progress; planner and runtime foundations
+are implemented. The full-migration gates below remain acceptance criteria.
 
 For initial delivery, follow the [first usable milestone](rust-first-milestone.md).
 It takes precedence for first-milestone scope and implementation order. This
@@ -13,8 +14,8 @@ still has no backward-compatibility requirement.
 
 This plan replaces the Python implementation with Rust using the domain model
 in [domain-model.md](../domain-model.md): **device model, image, instance, run**.
-It incorporates the correctness findings in the
-[project review](../project-review-2026-09-21.md).
+Its gates cover lifecycle ownership, coherent snapshots, independent clones,
+nonblocking operations and verified content-addressed publication.
 
 The HTTP API, WebSocket control protocol, CLI, catalog layout, and local metadata
 formats may change. **There is no API backward-compatibility requirement.** Do
@@ -277,7 +278,9 @@ reference, and engine removal must respect instance/snapshot dependencies.
 
 ## 3. Rust workspace and dependency boundaries
 
-Start with two packages and ordinary modules:
+The workspace now uses two packages and ordinary modules. See
+[the current crate map](../../crates/README.md) for implemented boundaries and
+remaining work. The tree below describes the destination layout:
 
 ```text
 Cargo.toml
@@ -631,9 +634,9 @@ rewrite of the entire Python codebase.
 ### P0 — Freeze vocabulary and inventory
 
 Deliver the domain schemas, lifecycle transition table, component-role registry,
-feature ledger and failure cases from the project review. Record current test
-results as a reference: 183 Python tests and 11 browser tests passed during the
-review, but those counts are not acceptance criteria for Rust.
+feature ledger and failure cases for lifecycle ownership, snapshot consistency,
+clone independence and blob publication. Record current test results as a
+reference; test counts are not acceptance criteria for Rust.
 
 Split the two checked-in profiles on paper into models, presets, image
 requirements and operator settings. Identify drift such as `network.mode` versus

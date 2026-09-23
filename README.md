@@ -1,35 +1,113 @@
 # MachineEmu
 
-MachineEmu is the runtime, API, browser client, catalog, and domain integration
-repository. It consumes immutable engine bundles produced by `machineemu/qemu`.
+MachineEmu is a local research lab for virtual machines and device firmware.
+This repository owns the runtime, API, CLI, browser client and catalog. It
+consumes immutable engine bundles produced by `machineemu/qemu`.
 
-The repository is currently licensed under AGPL-3.0-or-later. Third-party and
-restricted inputs retain their own licensing and distribution requirements.
+The repository is licensed under AGPL-3.0-or-later. Third-party and restricted
+inputs retain their own licensing and distribution requirements.
 
-This checkout is the first migration bootstrap. Source code is intentionally not
-copied until the M0 ledger and baseline are reviewed.
+## Rust development
 
-## Independent checkout
+The Rust implementation uses two packages: `machineemu-core` for planning,
+storage and runtime services, and `machineemu` for the CLI and daemon.
 
-This repository must build and test without a sibling checkout. Local development
-may point an explicit engine installation at `MACHINEEMU_ENGINE_ROOT`; releases
-record the exact engine-build digest in `release-set.json`.
+```sh
+cargo build --workspace --locked
+cargo run -p machineemu -- --help
+cargo test --workspace --locked
+```
 
-Initial ownership is split by responsibility:
+List registered images and available named profiles:
 
-- `python/machineemu/runtime`: lifecycle, state, launch supervision
-- `python/machineemu/api`: HTTP/WebSocket and authentication boundaries
-- `python/machineemu/engines`: installed-engine resolution
-- `python/machineemu/assets`: content-addressed asset handling
-- `python/machineemu/profiles`: profile validation and launch inputs
-- `python/machineemu/domains`: device-research and analysis integrations
-- `web`: current browser client, moved after the first runtime slice
-- `catalog`: redistributable profile metadata
-- `contracts`: exported schemas and protocol fixtures
+```sh
+cargo run -p machineemu -- images
+cargo run -p machineemu -- profiles
+# Select another workspace or emit JSON:
+cargo run -p machineemu -- images --workspace ./my-workspace --json
+cargo run -p machineemu -- profiles --workspace ./my-workspace --json
+```
 
-The first implementation keeps the existing Python package and FastAPI schema
-generation direction. It does not require Rust schema bindings or a plugin ABI.
+Both commands default to `./machineemu-workspace` and leave it unchanged.
+Images come from editable `images/<image-id>/manifest.json` files in the
+workspace. Existing SQLite image metadata can be migrated with
+`cargo run -p machineemu -- migrate-images` (also automatic when the updated
+daemon opens the workspace). Profiles combine its `profiles/*.json`
+with `./catalog/profiles/*.json`; workspace profiles take precedence for the
+same filename, as they do for `machineemu run`.
 
-Start the local API with `uv sync --extra api` followed by
-`uv run machineemu-api`; see [`machineemu-api`](docs/operations/api.md) for
-operator configuration and loopback defaults.
+For a VNC-enabled profile, set `devices.vnc` to `{"port":"auto"}` or
+`{"port":5901}`. `machineemu run PROFILE INSTANCE --vnc auto` overrides the
+profile port; `--vnc 5901` selects a fixed port, and `--vnc none` disables VNC
+for that run. VNC listens on `127.0.0.1` and `run` prints the chosen port.
+To require a password, create a file containing 1–8 bytes with no newline,
+set its permissions to `0600`, and pass `--vnc-password-file /path/to/file`.
+You can also set `devices.vnc.password_file` in the profile; relative paths
+there are resolved from the profile file's directory. QEMU needs a crypto
+backend with DES support for VNC passwords. The analysis QEMU build must enable
+libgcrypt, GnuTLS, or Nettle before using this option.
+
+`console.uart: true` enables an interactive socket at the instance's
+`serial.sock`; connect with `machineemu serial INSTANCE`. A running instance
+must be restarted for profile or port changes to take effect.
+
+`machineemu inspect INSTANCE` shows what an instance is running: the QEMU and
+helper processes (swtpm), every socket they listen on or have connected, with
+its role (QMP, relay, VNC, serial, gdb, TPM), and the hardware the guest sees
+over QMP: machine, CPUs, memory, PCI, block devices, NICs, USB, TPM and
+chardevs. A stopped instance shows its daemon record and state directory.
+`--json` prints the same report for scripts. It is Linux-only, since sockets
+are read from `/proc`.
+
+`machineemu analysis-target INSTANCE...` points the patched `kvm_intel` at one
+or more analysis instances (pods) by writing their QEMU thread-group ids to the
+module. It targets several pods at once through the module's
+`analysis_target_tgids` array, replacing the set by default or extending it with
+`--add`, and `--clear` detaches every pod. Loading the patched module and the
+write itself need root; the write goes through root-agent when available, else
+sudo. A single-target module (only `analysis_target_tgid`) still works for one
+pod. See [`qemu/kernel/analysis-kvm/README.md`](../qemu/kernel/analysis-kvm/README.md).
+
+Every `machineemu run` creates a separate QMP relay socket for external
+applications while MachineEmu retains its internal QMP connection. The socket
+is under `<workspace>/s/<instance-hash>.relay.qmp`, and `run` prints its
+absolute path. To choose a different path:
+
+```sh
+machineemu run malware-analysis-x64 analysis01 --image win11-dev \
+  --qmp-socket /tmp/analysis01.qmp
+```
+
+An explicit socket path must be unused, have an existing parent directory,
+and fit the Unix socket path limit. Give the printed path to the external
+QMP client; it must perform the normal QMP capability negotiation. The socket
+is created on launch, so existing runs need a restart to get one.
+
+Each instance has an editable profile at `<workspace>/instances/<instance>/profile.json`.
+For example, change `machineemu-workspace/instances/analysis01/profile.json` to adjust
+`analysis01`'s memory, CPU, network, audio, or analysis hardware settings.
+`machineemu run malware-analysis-x64 analysis01` reads that file on subsequent starts;
+the selected image is bound automatically. Stop the instance before changing
+hardware settings. The shared catalog profile is copied only when an instance
+has no profile file, so later catalog edits do not change existing instances.
+`--fresh --image IMAGE` removes the instance and creates a new profile file from
+the selected shared profile.
+
+Tests require `qemu-img` for overlay preparation. See the
+[crate map](crates/README.md) for module boundaries and validation commands.
+
+The migration is in progress. Python and the existing browser remain in the
+repository while Rust replacement gates are completed; the Rust pilot is not
+yet a full runtime cutover.
+
+## Documentation
+
+- [Configuration](docs/configuration.md)
+- [Image store and portable bundles](docs/image-store.md)
+- [Analysis firmware](docs/analysis-firmware.md)
+- [Domain model](docs/domain-model.md)
+- [Rust migration plan](docs/migration/rust.md)
+- [First usable milestone](docs/migration/rust-first-milestone.md)
+
+Build and test this repository without a sibling checkout. Engine installations
+are explicit; releases record the engine build digest in `release-set.json`.

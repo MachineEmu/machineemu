@@ -3,8 +3,9 @@
 Date: 2026-09-21. Status: steps 0 and A foundation in progress; the standalone
 Rust planner, QEMU capability validation, exclusive workspace, SQLite metadata,
 image manifests, portable image bundles, instances, and idempotent operation
-records are implemented. Process/QMP lifecycle control and the pilot gates
-remain pending.
+records are implemented. Basic process/QMP lifecycle control exists; ownership,
+recovery and real-machine pilot gates remain pending. The
+[two-package crate layout](../../crates/README.md) is in place.
 
 First port the existing YAML/JSON-to-QEMU launch-planning code directly to Rust.
 Deliver a standalone CLI that reads the existing configuration format and emits

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "image_id": "udm-pro",
+  "engine_track": "unifi-10.2",
+  "target": "aarch64-softmmu",
+  "components": {
+    "kernel": {
+      "path": "components/Image",
+      "sha256": "sha256:d13c6e79b57f625caa6c0ed0a13281c74fae6a19f20b37f52f5d7ffe3cdb6ebd"
+    },
+    "initrd": {
+      "path": "components/initramfs.cpio",
+      "sha256": "sha256:29e7d0abfc10e451ab6f1a63b64c96e20151d7e33d7017a0bf9fb8e81e115dfe"
+    },
+    "boot": {
+      "path": "components/boot.img",
+      "sha256": "sha256:1f473520efe1ae2eafdb4da3f9aee23ae2bddea4a974c2305bdbbf9119ad6072"
+    },
+    "spi": {
+      "path": "components/spi.img",
+      "sha256": "sha256:049c7d6a9d17634094fd15d0b1db7450f33821d5627dbd91a1b548f9d0671f9b"
+    }
+  },
+  "firmware": {
+    "version": "UDMPRO.al324.v5.1.19.3fbc1da.260613.0944",
+    "source_sha256": "163cde709c66d596f2b1940445193aede82883bc443bca0972c94e4ea84e3cfa"
+  }
+}

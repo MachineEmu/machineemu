@@ -149,6 +149,9 @@ def test_catalog_analysis_profile_preserves_non_secret_descriptor_set(tmp_path):
     catalog_path = Path(__file__).parents[1] / "catalog" / "profiles" / "malware-analysis-x64.json"
     value = load_profile(catalog_path)
     value["engine"] = {"track": "track"}
+    # The pinned analysis firmware needs an asset store; this test is about the
+    # analysis descriptors only.
+    value["assets"] = {}
     resolved = resolve_profile_value(value, _registry(tmp_path, "x86_64-softmmu"), target="x86_64-softmmu")
 
     assert resolved.analysis["smbios"]["system_product"] == "NUC11TNKi5"

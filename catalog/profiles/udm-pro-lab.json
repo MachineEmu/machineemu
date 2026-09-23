@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "id": "udm-pro-lab",
+  "name": "UDM Pro lab (WAN br0, LAN br10)",
   "domain": "device-research",
   "engine": {
     "track": "unifi-10.2",
@@ -15,31 +16,70 @@
   },
   "external_assets": [
     {
-      "id": "udm-pro-prepared-bundle",
-      "kind": "prepared-firmware-bundle",
-      "required": true,
-      "note": "Import and verify the operator-prepared kernel, initramfs, boot image, and SPI image before launch."
+      "id": "kernel",
+      "kind": "linux-kernel",
+      "required": true
+    },
+    {
+      "id": "initrd",
+      "kind": "initramfs",
+      "required": true
+    },
+    {
+      "id": "boot",
+      "kind": "raw-disk",
+      "required": true
+    },
+    {
+      "id": "spi",
+      "kind": "raw-disk",
+      "required": true
     }
   ],
+  "boot": {
+    "kernel": {
+      "asset": "kernel"
+    },
+    "initrd": {
+      "asset": "initrd"
+    },
+    "append": "earlycon=uart8250,mmio32,0xfd883000,115200 console=ttyS0,115200 root=rootfs rootfstype=ext4 rdinit=/init loglevel=5 ip=bootp no_reboot systemd.mask=bluetooth-controller@hci0.service systemd.mask=reboot.target"
+  },
+  "storage": {
+    "boot": {
+      "asset": "boot",
+      "format": "raw"
+    },
+    "spi": {
+      "asset": "spi",
+      "format": "raw"
+    }
+  },
+  "network": {
+    "ports": [
+      {
+        "type": "disabled"
+      },
+      {
+        "type": "bridge",
+        "bridge": "br0"
+      },
+      {
+        "type": "bridge",
+        "bridge": "br10"
+      },
+      {
+        "type": "disabled"
+      }
+    ]
+  },
   "devices": {
+    "serial": "socket",
     "lcd": true,
     "bluetooth": true
   },
-  "console": {
-    "uart": true
-  },
-  "network": {
-    "mode": "bridge",
-    "operator_approval_required": true
-  },
   "state": {
-    "disk": "ephemeral-copy",
-    "identity": "per-instance",
+    "disk": "ephemeral-snapshot",
     "runtime": "per-session"
-  },
-  "policy": {
-    "host_usb": "deny",
-    "clipboard": "deny",
-    "artifact_retention": "required"
   }
 }

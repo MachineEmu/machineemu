@@ -30,6 +30,10 @@ Prepared images use the portable bundle format described in
 directory, including `manifest.json` and its `components/` directory; do not
 copy digest-named files from the internal workspace store by hand.
 
-`udm-pro-lab.json` is the first migrated device-research profile. It preserves
-the current UDM Pro lab's required LCD, Bluetooth, bridge-network, and prepared
-firmware inputs while leaving their operator-specific locations outside Git.
+`udm-pro-lab.json` extends the UDM Pro boot wiring with WAN on `br0`,
+SFP+ LAN on `br10`, an emulated LCD, and the H4 Bluetooth UART. Import it with
+`--profile udm-pro-lab` to include the guest Bluetooth attachment hook.
+The host simulator is started separately; see the boot instructions below.
+
+`udm-pro.json` is the minimal Rust boot profile. See [UDM Pro boot](../docs/udm-pro.md)
+for importing its prepared firmware and starting an offline instance.
