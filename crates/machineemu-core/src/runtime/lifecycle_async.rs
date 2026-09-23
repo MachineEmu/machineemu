@@ -17,6 +17,13 @@ pub struct AsyncRunningInstance {
 }
 
 impl AsyncRunningInstance {
+    /// Successful launches survive daemon shutdown; explicit stop still terminates them.
+    pub fn preserve_on_drop(&mut self) {
+        if let Some(process) = &mut self.process {
+            process.preserve_on_drop();
+        }
+    }
+
     pub fn abort_owned_child(&mut self) -> Result<()> {
         let process = self.process.as_mut().ok_or_else(|| {
             Error::Process("cannot abort an adopted process without verified signaling".into())
@@ -93,7 +100,14 @@ impl Workspace {
             }
             return Ok(None);
         }
-        AsyncRunningInstance::recover(&run).await.map(Some)
+        let mut running = AsyncRunningInstance::recover(&run).await?;
+        let status = running.qmp.execute("query-status", Value::Null).await?;
+        let status = status
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Qmp("query-status response has no status".into()))?;
+        self.observe_run_status(&run, status)?;
+        Ok(Some(running))
     }
 
     pub async fn start_instance_async(
@@ -131,13 +145,16 @@ impl Workspace {
         }
         let existing_operation = self.operation(&operation_id).is_ok();
         let operation = self.begin_operation(
-            operation_id,
+            operation_id.clone(),
             instance_id.clone(),
             "start",
             idempotency_key,
             input_json,
         )?;
-        if !existing_operation && let Some(notify) = on_operation {
+        if !existing_operation
+            && operation.operation_id == operation_id
+            && let Some(notify) = on_operation
+        {
             notify(&operation);
         }
         if operation.status != "accepted" {
@@ -158,22 +175,10 @@ impl Workspace {
             if let Some(notify) = on_state {
                 notify(&starting);
             }
-            let mut process = match ManagedProcess::spawn(run_id.clone(), argv, stdout, stderr) {
-                Ok(process) => process,
-                Err(error) => {
-                    let _ = workspace.transition_instance(&instance_id, "error");
-                    return Err(error);
-                }
-            };
-            let process_start = match process.process_start() {
-                Ok(value) => value,
-                Err(error) => {
-                    let _ = process.terminate();
-                    let _ = process.wait();
-                    let _ = workspace.transition_instance(&instance_id, "error");
-                    return Err(error);
-                }
-            };
+            // Until publication ManagedProcess owns rollback: every early return
+            // terminates and reaps the child, including failed database writes.
+            let mut process = ManagedProcess::spawn(run_id.clone(), argv, stdout, stderr)?;
+            let process_start = process.process_start()?;
             workspace.record_run(
                 run_id.clone(),
                 instance_id.clone(),
@@ -192,11 +197,7 @@ impl Workspace {
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                    Err(error) => {
-                        let _ = process.terminate();
-                        let _ = process.wait();
-                        return Err(error);
-                    }
+                    Err(error) => return Err(error),
                 }
             };
             let observed = qmp
@@ -209,34 +210,11 @@ impl Workspace {
                         .map(str::to_owned)
                         .ok_or_else(|| Error::Qmp("query-status response has no status".into()))
                 });
-            let target = match observed {
-                Ok(value) if value == "running" => "running",
-                Ok(value) if matches!(value.as_str(), "paused" | "prelaunch") => "paused",
-                Ok(value) => {
-                    let _ = process.terminate();
-                    let _ = process.wait();
-                    return Err(Error::Qmp(format!(
-                        "unsupported initial QEMU status {value}"
-                    )));
-                }
-                Err(error) => {
-                    let _ = process.terminate();
-                    let _ = process.wait();
-                    return Err(error);
-                }
-            };
+            let target = crate::domain::InstanceState::from_qmp(&observed?)?.as_str();
             if process.try_wait()?.is_some() {
                 return Err(Error::Process("QEMU exited during QMP negotiation".into()));
             }
-            let final_state = match workspace.transition_instance(&instance_id, target) {
-                Ok(instance) => instance,
-                Err(error) => {
-                    let _ = qmp.execute("quit", Value::Null).await;
-                    let _ = process.terminate();
-                    let _ = process.wait();
-                    return Err(error);
-                }
-            };
+            let final_state = workspace.transition_instance(&instance_id, target)?;
             if let Some(notify) = on_state {
                 notify(&final_state);
             }
@@ -267,7 +245,7 @@ impl Workspace {
                 let _ = self.finish_run(&cleanup_run_id, "failed");
             }
             if let Ok(instance) = self.instance(&cleanup_instance_id) {
-                if matches!(instance.state.as_str(), "starting" | "running") {
+                if matches!(instance.state.as_str(), "starting" | "running" | "paused") {
                     if let Ok(failed_state) =
                         self.transition_instance(&cleanup_instance_id, "error")
                         && let Some(notify) = on_state
@@ -292,7 +270,7 @@ impl Workspace {
         let current = self.instance(instance_id)?;
         if current.state != "running" {
             return Err(Error::InvalidTransition {
-                from: current.state,
+                from: current.state.to_string(),
                 to: "paused".into(),
             });
         }
@@ -308,7 +286,7 @@ impl Workspace {
         let current = self.instance(instance_id)?;
         if current.state != "paused" {
             return Err(Error::InvalidTransition {
-                from: current.state,
+                from: current.state.to_string(),
                 to: "running".into(),
             });
         }
@@ -324,7 +302,7 @@ impl Workspace {
         let current = self.instance(instance_id)?;
         if current.state != "running" && current.state != "paused" {
             return Err(Error::InvalidTransition {
-                from: current.state,
+                from: current.state.to_string(),
                 to: "running".into(),
             });
         }
@@ -339,7 +317,7 @@ impl Workspace {
         let current = self.instance(instance_id)?;
         if !matches!(current.state.as_str(), "running" | "paused" | "stopping") {
             return Err(Error::InvalidTransition {
-                from: current.state,
+                from: current.state.to_string(),
                 to: "stopped".into(),
             });
         }

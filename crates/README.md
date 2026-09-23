@@ -9,6 +9,7 @@ implementation order.
 | --- | --- |
 | `machineemu-core::domain` | Existing IDs, persisted records and transition rules; no filesystem ownership |
 | `machineemu-core::config` | Operator configuration and config-relative path resolution |
+| `machineemu-core::launch` | Typed launch specification and planner conversion shared by CLI and API |
 | `machineemu-core::engine` | Document loading, QEMU capability inspection, configuration validation and launch planning |
 | `machineemu-core::storage` | Workspace lock/schema, blobs, image bundles, instances, operations, run records and snapshots |
 | `machineemu-core::runtime` | Owned child processes and lifecycle orchestration through `StartRequest` |
@@ -16,7 +17,9 @@ implementation order.
 | `machineemu::api` | Server setup, authentication, request/response types and resource handlers |
 | `machineemu::cli` | Argument dispatch, daemon client and launch workflow |
 
-Core has no dependency on the application, Axum, Clap or Tokio. Application
+Core has no dependency on the application, Axum or Clap. It uses Tokio for
+asynchronous lifecycle and protocol I/O; its optional `api-schema` feature
+adds Utoipa schemas to the shared launch contract. Application
 binaries are thin entry points. Storage keeps its SQLite connection private;
 runtime uses workspace methods instead of accessing the database directly.
 Future catalog, analysis and protocol modules should be added when implemented,
@@ -43,14 +46,23 @@ interfaces, and API tests cover authentication and routing.
 Rust API v2 stream and live-device routes are documented in
 [`docs/operations/api-v2-streams-devices.md`](../docs/operations/api-v2-streams-devices.md).
 
-This refactor preserves current configuration, database and wire formats. It does
-not complete the domain or runtime migration. IDs and status strings still need
-the destination domain contract. Planning still resolves existing on-disk inputs.
-Lifecycle handlers run in a bounded blocking pool. Per-instance locks serialize
-mutations, and attached database connections let long QMP waits proceed without
-holding the workspace owner's mutex. A daemon restart reconciles persisted runs;
-live runs can reconnect to QMP on their next lifecycle action. QMP event
-reconciliation, durable helper recovery, and a single core-owned runtime service
-remain future work. Existing snapshot behavior is not
-evidence that the full state-generation gates pass. No real-machine pilot gate
-is established by this structural change.
+IDs validate during construction and deserialization. Instance lifecycle states
+are enums with a shared transition table; persisted JSON/SQLite values retain
+the existing lowercase strings. Lifecycle orchestration uses one async
+implementation. Per-instance gates serialize mutations, while a per-run
+supervisor owns the QMP connection, helpers, display process and watcher state.
+Control requests and event polling share that QMP connection.
+
+SQLite owns the instance profile, launch plan and revision. Existing profile
+files are imported during workspace migration; `profile.json` becomes a derived
+helper cache. Configuration replacement commits all three values together.
+Instance deletion commits its metadata changes and a cleanup record together;
+retry or workspace reopen completes filesystem cleanup before an ID is reused.
+
+A daemon restart verifies process identities and observes QMP status before
+reconciling operations. Successfully published VMs and helpers survive daemon
+shutdown and are adopted after restart. Temporary QMP failure leaves the live
+process intact and observation retries. Run the real-QEMU restart regression
+with `python3 scripts/test_daemon_recovery.py` after building the daemon. It uses
+TCG and an isolated temporary workspace, and covers graceful shutdown, forced
+exit, recovery of a persisted error, shared QMP control and helper cleanup.

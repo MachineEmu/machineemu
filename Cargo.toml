@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/machineemu-core", "crates/machineemu"]
+members = ["crates/machineemu-core", "crates/machineemu", "crates/machineemu-viewer"]
 resolver = "2"
 
 [workspace.package]
@@ -21,6 +21,8 @@ sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1.43", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 utoipa = { version = "5.5", features = ["macros"] }
 machineemu-core = { path = "crates/machineemu-core" }
 nix = { version = "0.29", features = ["socket", "uio", "signal"] }

@@ -1,6 +1,5 @@
 use super::*;
 use axum::{Json, body::Body, http::header};
-use machineemu_core::protocols::async_qmp::AsyncQmp;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,11 +16,18 @@ pub(super) struct SendKey {
 async fn qmp_session(
     state: &AppState,
     id: String,
-) -> Result<(tokio::sync::OwnedMutexGuard<()>, AsyncQmp, PathBuf), RuntimeError> {
+) -> Result<
+    (
+        tokio::sync::OwnedMutexGuard<()>,
+        supervisor::QmpSession,
+        PathBuf,
+    ),
+    RuntimeError,
+> {
     let instance_id = Id::new("instance", id.clone())?;
     let guard = instance_lock(state, &id)?.lock_owned().await;
     let owner = state.workspace.clone();
-    let (socket, directory) = blocking(move || {
+    let (run, directory) = blocking(move || {
         let workspace = owner
             .lock()
             .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
@@ -29,7 +35,7 @@ async fn qmp_session(
             .live_run(&instance_id)?
             .ok_or_else(|| RuntimeError::Process("instance has no live run".into()))?;
         Ok((
-            run.qmp_socket,
+            run,
             workspace
                 .root()
                 .join("instances")
@@ -37,7 +43,7 @@ async fn qmp_session(
         ))
     })
     .await?;
-    Ok((guard, AsyncQmp::connect(&socket).await?, directory))
+    Ok((guard, supervisor::qmp(state, &run).await?, directory))
 }
 
 fn failure(error: RuntimeError) -> axum::response::Response {

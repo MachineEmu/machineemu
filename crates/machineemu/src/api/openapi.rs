@@ -1,6 +1,6 @@
 //! Generated API v2 contract. Keep these operations in sync with `router`.
 #![allow(dead_code)] // Utoipa reads these schema-only functions and fields at compile time.
-use super::{devices, display_control, dto, events, guest_agent, guest_exec, streams};
+use super::{devices, display_control, documents, dto, events, guest_agent, guest_exec, streams};
 use utoipa::{Modify, OpenApi, ToSchema, openapi::OpenApi as Document};
 
 #[derive(ToSchema)]
@@ -91,6 +91,32 @@ endpoint!(
     200,
     ("id" = String, Path)
 );
+body_endpoint!(
+    put_image,
+    put,
+    "/api/v2/images/{id}",
+    "Replace an image manifest (JSON or YAML)",
+    200,
+    dto::RegisterImage,
+    ("id" = String, Path)
+);
+endpoint!(
+    get_profile,
+    get,
+    "/api/v2/profiles/{id}",
+    "Get a shared profile (Accept: application/yaml supported)",
+    200,
+    ("id" = String, Path)
+);
+body_endpoint!(
+    put_profile,
+    put,
+    "/api/v2/profiles/{id}",
+    "Replace a workspace profile override (JSON or YAML)",
+    200,
+    serde_json::Value,
+    ("id" = String, Path)
+);
 endpoint!(
     get_instance_tombstone,
     get,
@@ -120,6 +146,23 @@ endpoint!(
     "/api/v2/instances/{id}",
     "Get an instance",
     200,
+    ("id" = String, Path)
+);
+endpoint!(
+    get_instance_config,
+    get,
+    "/api/v2/instances/{id}/config",
+    "Get saved instance profile and launch plan (Accept: application/yaml supported)",
+    200,
+    ("id" = String, Path)
+);
+body_endpoint!(
+    put_instance_config,
+    put,
+    "/api/v2/instances/{id}/config",
+    "Replace stopped instance profile and launch plan (JSON or YAML)",
+    200,
+    documents::InstanceConfig,
     ("id" = String, Path)
 );
 #[utoipa::path(
@@ -389,8 +432,8 @@ fn connect_stream() {}
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        health, openapi_document, register_image, get_image, list_instances, create_instance,
-        get_instance, stream_events, guest_agent_information, start_guest_execution, stream_guest_execution,
+        health, openapi_document, register_image, get_image, put_image, get_profile, put_profile, list_instances, create_instance,
+        get_instance, get_instance_config, put_instance_config, stream_events, guest_agent_information, start_guest_execution, stream_guest_execution,
         remove_instance, get_instance_tombstone, start_instance, stop_instance, restart_instance, send_key, screenshot, pause_instance,
         resume_instance, reset_instance, create_snapshot, get_snapshot, clone_snapshot,
         get_operation, reconcile, issue_stream_ticket, issue_spice_tickets,
@@ -398,7 +441,7 @@ fn connect_stream() {}
         change_iso, eject_iso, connect_stream
     ),
     components(schemas(
-        dto::RegisterImage, dto::CreateInstance, dto::CreateSnapshot,
+        dto::RegisterImage, dto::CreateInstance, documents::InstanceConfig, dto::CreateSnapshot,
         dto::CloneSnapshot, dto::ErrorBody, dto::StartInstance,
         dto::LaunchSpec, dto::HelperSpec, dto::PreparationSpec, StreamTicket,
         streams::TicketRequest, streams::SpiceTicketRequest,

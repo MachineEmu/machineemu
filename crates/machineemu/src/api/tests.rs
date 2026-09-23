@@ -5,6 +5,39 @@ use futures_util::StreamExt;
 use tower::ServiceExt;
 
 #[test]
+fn create_plan_validation_does_not_make_runtime_directories() {
+    let root =
+        std::env::temp_dir().join(format!("machineemu-plan-validation-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let plan = LaunchSpec {
+        argv: vec![
+            "qemu-system-x86_64".into(),
+            "-pidfile".into(),
+            root.join("instances/test01/control/qemu.pid")
+                .to_string_lossy()
+                .into_owned(),
+            format!(
+                "unix:{}/instances/test01/sockets/serial.sock",
+                root.display()
+            ),
+        ],
+        vnc_auto: false,
+        qmp_socket: PathBuf::from("instances/test01/sockets/qmp.sock"),
+        stdout: Some(PathBuf::from("instances/test01/serial.log")),
+        stderr: None,
+        preparation: None,
+        helper_argv: None,
+        helpers: Vec::new(),
+    };
+    launch::validate_plan_paths(&root, &plan).unwrap();
+    assert!(!root.join("instances/test01").exists());
+    launch::plan_paths(&root, &plan).unwrap();
+    assert!(root.join("instances/test01/sockets").is_dir());
+    assert!(root.join("instances/test01/control").is_dir());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn bearer_auth_requires_exact_token() {
     let root = std::env::temp_dir().join(format!("machineemu-daemon-auth-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -12,16 +45,15 @@ fn bearer_auth_requires_exact_token() {
         workspace: Arc::new(Mutex::new(Workspace::open(&root).unwrap())),
         bearer_token: Arc::from("secret"),
         launch_plans: Arc::new(BTreeMap::new()),
-        running: Arc::new(Mutex::new(BTreeMap::new())),
+        supervisors: Arc::new(Mutex::new(BTreeMap::new())),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
-        helpers: Arc::new(Mutex::new(BTreeMap::new())),
-        display_streams: Arc::new(Mutex::new(BTreeMap::new())),
+
         display_stream: Arc::new(PathBuf::from("display-stream")),
         stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
-        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: false,
     };
@@ -42,16 +74,15 @@ async fn api_routes_require_bearer_authentication() {
         workspace: Arc::new(Mutex::new(Workspace::open(&root).unwrap())),
         bearer_token: Arc::from("secret"),
         launch_plans: Arc::new(BTreeMap::new()),
-        running: Arc::new(Mutex::new(BTreeMap::new())),
+        supervisors: Arc::new(Mutex::new(BTreeMap::new())),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
-        helpers: Arc::new(Mutex::new(BTreeMap::new())),
-        display_streams: Arc::new(Mutex::new(BTreeMap::new())),
+
         display_stream: Arc::new(PathBuf::from("display-stream")),
         stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
-        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: false,
     };
@@ -407,16 +438,15 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
         workspace: Arc::new(Mutex::new(workspace)),
         bearer_token: Arc::from("secret"),
         launch_plans: Arc::new(BTreeMap::new()),
-        running: Arc::new(Mutex::new(BTreeMap::new())),
+        supervisors: Arc::new(Mutex::new(BTreeMap::new())),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
-        helpers: Arc::new(Mutex::new(BTreeMap::new())),
-        display_streams: Arc::new(Mutex::new(BTreeMap::new())),
+
         display_stream: Arc::new(PathBuf::from("display-stream")),
         stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
-        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: false,
     };
@@ -627,6 +657,40 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
             .unwrap(),
         b"\x89PNG\r\n\x1a\n".as_slice()
     );
+    let config_response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/persist01/config")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(config_response.status(), StatusCode::OK);
+    let mut config: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(config_response.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    config["profile"]["resources"]["memory"] = serde_json::json!("2G");
+    config["launch_plan"]["argv"][2] = serde_json::json!("sleep 3");
+    let put_config = |body: String| {
+        Request::builder()
+            .method("PUT")
+            .uri("/api/v2/instances/persist01/config")
+            .header("authorization", "Bearer secret")
+            .header("content-type", "application/yaml")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let yaml = serde_yaml::to_string(&config).unwrap();
+    let rejected = router(state.clone())
+        .oneshot(put_config(yaml.clone()))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     let first_run = state
         .workspace
         .lock()
@@ -687,6 +751,120 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
             .unwrap()
             .state,
         "stopped"
+    );
+    let stale = router(state.clone())
+        .oneshot(put_config(yaml))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::BAD_REQUEST);
+    config["revision"] = serde_json::json!(
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .instance(&persistent_id)
+            .unwrap()
+            .revision
+    );
+    let updated = router(state.clone())
+        .oneshot(put_config(serde_yaml::to_string(&config).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let (saved, _) = state
+        .workspace
+        .lock()
+        .unwrap()
+        .instance_launch(&persistent_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&saved).unwrap()["argv"][2],
+        "sleep 3"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(root.join("instances/persist01/profile.json")).unwrap()
+        )
+        .unwrap()["resources"]["memory"],
+        "2G"
+    );
+    let shared_profile = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v2/profiles/shared01")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/yaml")
+                .body(Body::from("id: shared01\nname: Shared profile\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shared_profile.status(), StatusCode::OK);
+    let shared_profile = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/profiles/shared01")
+                .header("authorization", "Bearer secret")
+                .header("accept", "application/yaml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shared_profile.headers()["content-type"], "application/yaml");
+    let profile_text = axum::body::to_bytes(shared_profile.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&profile_text)
+            .unwrap()
+            .contains("Shared profile")
+    );
+    let updated_image = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v2/images/image01")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"image_id":"image01","engine_track":"track01","supported_engine_tracks":["track02"],"target":"x86_64-softmmu","disk_sha256":"a".repeat(64),"firmware_sha256":null,"tpm_state_sha256":null}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated_image.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .image(&Id::new("image", "image01").unwrap())
+            .unwrap()
+            .supported_engine_tracks[0]
+            .as_str(),
+        "track02"
+    );
+    let image_yaml = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/images/image01")
+                .header("authorization", "Bearer secret")
+                .header("accept", "application/yaml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(image_yaml.headers()["content-type"], "application/yaml");
+    let image_bytes = axum::body::to_bytes(image_yaml.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&image_bytes)
+            .unwrap()
+            .contains("track02")
     );
     server.abort();
     drop(state);
@@ -770,21 +948,22 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
         .transition_instance(&instance_id, "error")
         .unwrap();
     let mut running_map = BTreeMap::new();
-    running_map.insert("lab01".into(), Arc::new(tokio::sync::Mutex::new(running)));
+    let mut owner = supervisor::RunSupervisor::new(running.run_id.clone());
+    owner.running = Some(Arc::new(tokio::sync::Mutex::new(running)));
+    running_map.insert("lab01".into(), owner);
     let state = AppState {
         workspace: Arc::new(Mutex::new(workspace)),
         bearer_token: Arc::from("secret"),
         launch_plans: Arc::new(BTreeMap::new()),
-        running: Arc::new(Mutex::new(running_map)),
+        supervisors: Arc::new(Mutex::new(running_map)),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
-        helpers: Arc::new(Mutex::new(BTreeMap::new())),
-        display_streams: Arc::new(Mutex::new(BTreeMap::new())),
+
         display_stream: Arc::new(PathBuf::from("display-stream")),
         stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
-        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: false,
     };
@@ -792,7 +971,7 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
     headers.insert("authorization", "Bearer secret".parse().unwrap());
     let response = lifecycle_action(state.clone(), headers, "lab01".into(), "stop").await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert!(state.running.lock().unwrap().contains_key("lab01"));
+    assert!(supervisor::connection(&state, "lab01").unwrap().is_some());
     server.join().unwrap();
     drop(state);
     let _ = std::fs::remove_dir_all(root);

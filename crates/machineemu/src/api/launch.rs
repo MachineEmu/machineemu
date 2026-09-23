@@ -17,6 +17,21 @@ pub(super) fn plan_paths(
     root: &std::path::Path,
     plan: &LaunchSpec,
 ) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), RuntimeError> {
+    plan_paths_inner(root, plan, true)
+}
+
+pub(super) fn validate_plan_paths(
+    root: &std::path::Path,
+    plan: &LaunchSpec,
+) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), RuntimeError> {
+    plan_paths_inner(root, plan, false)
+}
+
+fn plan_paths_inner(
+    root: &std::path::Path,
+    plan: &LaunchSpec,
+    create_dirs: bool,
+) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), RuntimeError> {
     if plan.argv.is_empty() {
         return Err(RuntimeError::Process("launch plan argv is empty".into()));
     }
@@ -31,12 +46,14 @@ pub(super) fn plan_paths(
         .as_deref()
         .map(|path| workspace_path(root, path))
         .transpose()?;
-    fs::create_dir_all(qmp.parent().unwrap_or(root)).map_err(|source| RuntimeError::Io {
-        path: qmp.parent().unwrap_or(root).to_owned(),
-        source,
-    })?;
+    if create_dirs {
+        fs::create_dir_all(qmp.parent().unwrap_or(root)).map_err(|source| RuntimeError::Io {
+            path: qmp.parent().unwrap_or(root).to_owned(),
+            source,
+        })?;
+    }
     for path in [stdout.as_deref(), stderr.as_deref()].into_iter().flatten() {
-        if let Some(parent) = path.parent() {
+        if create_dirs && let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| RuntimeError::Io {
                 path: parent.to_owned(),
                 source,
@@ -51,7 +68,8 @@ pub(super) fn plan_paths(
             .map(|value| value.split(',').next().unwrap_or(value));
         if let Some(candidate) = candidate {
             let path = PathBuf::from(candidate);
-            if path.is_absolute()
+            if create_dirs
+                && path.is_absolute()
                 && let Some(parent) = path.parent()
             {
                 fs::create_dir_all(parent).map_err(|source| RuntimeError::Io {
@@ -64,7 +82,7 @@ pub(super) fn plan_paths(
     for pair in plan.argv.windows(2) {
         if pair[0] == "-pidfile" {
             let path = PathBuf::from(&pair[1]);
-            if let Some(parent) = path.parent() {
+            if create_dirs && let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|source| RuntimeError::Io {
                     path: parent.to_owned(),
                     source,

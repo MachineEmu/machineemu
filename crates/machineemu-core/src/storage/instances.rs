@@ -1,5 +1,5 @@
 use super::Workspace;
-use crate::domain::{Id, Instance, allowed_transition};
+use crate::domain::{Id, Instance, InstanceState};
 use crate::{Error, Result};
 use rusqlite::{OptionalExtension, params};
 use std::{
@@ -7,6 +7,39 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+
+fn empty_legacy_plan_directory(directory: &Path) -> Result<bool> {
+    let entries = fs::read_dir(directory).map_err(|source| Error::Io {
+        path: directory.to_owned(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Io {
+            path: directory.to_owned(),
+            source,
+        })?;
+        let name = entry.file_name();
+        if name != "sockets" && name != "control" {
+            return Ok(false);
+        }
+        let file_type = entry.file_type().map_err(|source| Error::Io {
+            path: entry.path(),
+            source,
+        })?;
+        if !file_type.is_dir()
+            || fs::read_dir(entry.path())
+                .map_err(|source| Error::Io {
+                    path: entry.path(),
+                    source,
+                })?
+                .next()
+                .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 impl Workspace {
     pub fn save_instance_launch(
@@ -67,6 +100,7 @@ impl Workspace {
         image_id: Id,
         profile_id: Id,
     ) -> Result<Instance> {
+        self.finish_instance_deletion(&instance_id)?;
         self.image(&image_id)?;
         // A hand-written manifest is sufficient to create an instance. SQLite
         // only indexes its ID for runtime foreign-key integrity.
@@ -232,13 +266,20 @@ impl Workspace {
         plan_json: &str,
         auto_remove: bool,
     ) -> Result<Instance> {
+        self.finish_instance_deletion(&instance_id)?;
         self.image(&image_id)?;
         let destination = self.root.join("instances").join(instance_id.as_str());
         if destination.exists() {
-            // A crash after the rename but before SQLite publication leaves a
-            // marked directory. Only that incomplete directory is recoverable.
-            if matches!(self.instance(&instance_id), Err(Error::NotFound { .. }))
-                && destination.join(".machineemu-create").is_file()
+            // A crash after the rename leaves a marked directory. Older create
+            // requests could also leave only empty runtime directories.
+            let directory = fs::symlink_metadata(&destination).map_err(|source| Error::Io {
+                path: destination.clone(),
+                source,
+            })?;
+            if directory.file_type().is_dir()
+                && matches!(self.instance(&instance_id), Err(Error::NotFound { .. }))
+                && (destination.join(".machineemu-create").is_file()
+                    || empty_legacy_plan_directory(&destination)?)
             {
                 fs::remove_dir_all(&destination).map_err(|source| Error::Io {
                     path: destination.clone(),
@@ -251,6 +292,7 @@ impl Workspace {
                 )));
             }
         }
+        let profile = self.read_legacy_profile(staged)?;
         fs::write(staged.join(".machineemu-create"), b"staged\n").map_err(|source| Error::Io {
             path: staged.join(".machineemu-create"),
             source,
@@ -273,6 +315,12 @@ impl Workspace {
                 "INSERT INTO instance_launch(instance_id, plan_json, auto_remove) VALUES (?1, ?2, ?3)",
                 params![instance_id.as_str(), plan_json, auto_remove],
             )?;
+            if let Some(profile) = &profile {
+                transaction.execute(
+                    "INSERT INTO instance_configuration(instance_id, profile_json) VALUES (?1, ?2)",
+                    params![instance_id.as_str(), serde_json::to_string(profile)?],
+                )?;
+            }
             transaction.execute(
                 "DELETE FROM instance_tombstones WHERE instance_id = ?1",
                 params![instance_id.as_str()],
@@ -320,21 +368,25 @@ impl Workspace {
 
     pub fn transition_instance(&self, instance_id: &Id, next: &str) -> Result<Instance> {
         let current = self.instance(instance_id)?;
-        if !allowed_transition(&current.state, next) {
+        let next: InstanceState = next.parse()?;
+        if !current.state.allows(next) {
             return Err(Error::InvalidTransition {
-                from: current.state,
-                to: next.to_owned(),
+                from: current.state.to_string(),
+                to: next.to_string(),
             });
         }
         self.db.execute(
             "UPDATE instances SET lifecycle = ?1, revision = revision + 1 WHERE instance_id = ?2",
-            params![next, instance_id.as_str()],
+            params![next.as_str(), instance_id.as_str()],
         )?;
         self.instance(instance_id)
     }
 
     /// Remove an instance and its owned state after it has stopped.
     pub fn remove_instance(&self, instance_id: &Id) -> Result<()> {
+        if self.finish_instance_deletion(instance_id)? {
+            return Ok(());
+        }
         let mut instance = self.instance(instance_id)?;
         if let Some(active) = self.active_run(instance_id)? {
             let reconciled = self.reconcile_run(&active.run_id)?;
@@ -366,28 +418,72 @@ impl Workspace {
                 instance_id.as_str()
             )));
         }
-        self.db.execute(
-            "DELETE FROM instance_launch WHERE instance_id = ?1",
+        let transaction = self.db.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO pending_instance_deletions(instance_id) VALUES (?1)",
             params![instance_id.as_str()],
         )?;
-        self.db.execute(
-            "DELETE FROM operations WHERE instance_id = ?1",
+        for table in [
+            "instance_configuration",
+            "instance_launch",
+            "operations",
+            "runs",
+            "instances",
+        ] {
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE instance_id = ?1"),
+                params![instance_id.as_str()],
+            )?;
+        }
+        transaction.commit()?;
+        self.finish_instance_deletion(instance_id)?;
+        Ok(())
+    }
+
+    /// A committed deletion retains its ID until filesystem cleanup completes.
+    /// New instances cannot reuse that directory, and retries/reopen resume cleanup.
+    pub(super) fn finish_instance_deletion(&self, instance_id: &Id) -> Result<bool> {
+        let pending: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_instance_deletions WHERE instance_id = ?1)",
             params![instance_id.as_str()],
+            |row| row.get(0),
         )?;
-        self.db.execute(
-            "DELETE FROM runs WHERE instance_id = ?1",
-            params![instance_id.as_str()],
-        )?;
-        self.db.execute(
-            "DELETE FROM instances WHERE instance_id = ?1",
-            params![instance_id.as_str()],
-        )?;
+        if !pending {
+            return Ok(false);
+        }
         let directory = self.root.join("instances").join(instance_id.as_str());
-        if directory.exists() {
-            fs::remove_dir_all(&directory).map_err(|source| Error::Io {
-                path: directory,
+        match fs::remove_dir_all(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: directory,
+                    source,
+                });
+            }
+        }
+        fs::File::open(self.root.join("instances"))
+            .and_then(|file| file.sync_all())
+            .map_err(|source| Error::Io {
+                path: self.root.join("instances"),
                 source,
             })?;
+        self.db.execute(
+            "DELETE FROM pending_instance_deletions WHERE instance_id = ?1",
+            params![instance_id.as_str()],
+        )?;
+        Ok(true)
+    }
+
+    pub(super) fn reconcile_instance_deletions(&self) -> Result<()> {
+        let mut statement = self
+            .db
+            .prepare("SELECT instance_id FROM pending_instance_deletions")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for id in ids {
+            self.finish_instance_deletion(&Id::new("instance", id)?)?;
         }
         Ok(())
     }

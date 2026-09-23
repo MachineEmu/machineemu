@@ -64,7 +64,7 @@ pub(super) async fn create_instance(
             ));
         }
         if let Some(plan) = &input.launch_plan {
-            super::launch::plan_paths(workspace.root(), plan)?;
+            super::launch::validate_plan_paths(workspace.root(), plan)?;
             if let Some(preparation) = &plan.preparation {
                 super::launch::prepare_paths(workspace.root(), preparation)?;
             }

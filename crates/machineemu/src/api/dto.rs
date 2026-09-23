@@ -1,43 +1,5 @@
 use super::*;
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
-pub(super) struct LaunchSpec {
-    pub(super) argv: Vec<String>,
-    #[serde(default)]
-    pub(super) vnc_auto: bool,
-    #[schema(value_type = String)]
-    pub(super) qmp_socket: PathBuf,
-    #[schema(value_type = Option<String>)]
-    pub(super) stdout: Option<PathBuf>,
-    #[schema(value_type = Option<String>)]
-    pub(super) stderr: Option<PathBuf>,
-    pub(super) preparation: Option<PreparationSpec>,
-    pub(super) helper_argv: Option<Vec<String>>,
-    #[serde(default)]
-    pub(super) helpers: Vec<HelperSpec>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
-pub(super) struct HelperSpec {
-    pub(super) name: String,
-    pub(super) argv: Vec<String>,
-    #[serde(default)]
-    pub(super) after_qemu: bool,
-    #[schema(value_type = Option<String>)]
-    pub(super) ready_socket: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
-pub(super) struct PreparationSpec {
-    #[schema(value_type = String)]
-    pub(super) disk_backing: PathBuf,
-    pub(super) backing_format: String,
-    pub(super) disk_size: Option<String>,
-    #[schema(value_type = Option<String>)]
-    pub(super) nvram_seed: Option<PathBuf>,
-    #[schema(value_type = Option<String>)]
-    pub(super) tpm_seed: Option<PathBuf>,
-}
-
+pub(super) use machineemu_core::launch::{HelperSpec, LaunchSpec, PreparationSpec};
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub(super) struct StartInstance {
     #[serde(default)]

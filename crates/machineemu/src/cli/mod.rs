@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use machineemu_core::engine::{
     PlanInput, build_plan, inspect_qemu, load_document, validate_legacy_config,
     validate_profile_against_qemu,
@@ -118,6 +118,30 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Show an instance config, shared profile, or image manifest as YAML.
+    Show {
+        #[arg(value_enum)]
+        kind: DocumentKind,
+        id: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
+    },
+    /// Replace an instance config, shared profile, or image manifest from YAML or JSON.
+    Update {
+        #[arg(value_enum)]
+        kind: DocumentKind,
+        id: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
+    },
     /// Migrate legacy SQLite image metadata to editable images/<id>/manifest.json files.
     MigrateImages {
         #[arg(long, default_value = "machineemu-workspace")]
@@ -352,6 +376,23 @@ enum Command {
     },
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DocumentKind {
+    Instance,
+    Profile,
+    Image,
+}
+
+impl DocumentKind {
+    fn path(self, id: &str) -> String {
+        match self {
+            Self::Instance => format!("/api/v2/instances/{id}/config"),
+            Self::Profile => format!("/api/v2/profiles/{id}"),
+            Self::Image => format!("/api/v2/images/{id}"),
+        }
+    }
+}
+
 pub async fn main() {
     if let Err(error) = run().await {
         eprintln!("machineemu: {error}");
@@ -362,6 +403,40 @@ pub async fn main() {
 async fn run() -> Result<(), machineemu_core::engine::Error> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Show {
+            kind,
+            id,
+            json,
+            daemon,
+            token,
+        } => {
+            Id::new("document", id.clone())
+                .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
+            let value = daemon_request(&daemon, &token, "GET", &kind.path(&id), None).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            } else {
+                print!(
+                    "{}",
+                    serde_yaml::to_string(&value).map_err(|error| {
+                        machineemu_core::engine::Error::Invalid(error.to_string())
+                    })?
+                );
+            }
+        }
+        Command::Update {
+            kind,
+            id,
+            file,
+            daemon,
+            token,
+        } => {
+            Id::new("document", id.clone())
+                .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
+            let document = load_document(&file)?;
+            daemon_request(&daemon, &token, "PUT", &kind.path(&id), Some(document)).await?;
+            println!("updated {kind:?} {id}");
+        }
         Command::MigrateImages { workspace } => {
             let workspace = Workspace::open(workspace)
                 .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;

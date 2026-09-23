@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 mod blobs;
+mod configuration;
 mod images;
 mod instances;
 mod lock;
@@ -114,6 +115,13 @@ impl Workspace {
                plan_json TEXT NOT NULL,
                auto_remove INTEGER NOT NULL DEFAULT 0
              );
+             CREATE TABLE IF NOT EXISTS instance_configuration (
+               instance_id TEXT PRIMARY KEY REFERENCES instances(instance_id),
+               profile_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS pending_instance_deletions (
+               instance_id TEXT PRIMARY KEY
+             );
              CREATE TABLE IF NOT EXISTS instance_tombstones (
                instance_id TEXT PRIMARY KEY,
                last_run_id TEXT,
@@ -140,6 +148,14 @@ impl Workspace {
                qmp_socket TEXT NOT NULL,
                status TEXT NOT NULL,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE IF NOT EXISTS run_helpers (
+               run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+               ordinal INTEGER NOT NULL,
+               helper_id TEXT NOT NULL,
+               pid INTEGER NOT NULL,
+               process_start INTEGER NOT NULL,
+               PRIMARY KEY(run_id, ordinal)
              );
              CREATE TABLE IF NOT EXISTS snapshots (
                snapshot_id TEXT PRIMARY KEY,
@@ -171,6 +187,8 @@ impl Workspace {
             source,
         })?;
         self.migrate_image_manifests()?;
+        self.reconcile_instance_deletions()?;
+        self.migrate_instance_profiles()?;
         Ok(())
     }
 }

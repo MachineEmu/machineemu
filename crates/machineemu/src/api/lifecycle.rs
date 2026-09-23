@@ -159,6 +159,7 @@ async fn start_instance_with_lock(
             owner.attach()?
         };
         let instance = workspace.instance(&instance_id)?;
+        workspace.materialize_instance_profile(&instance_id)?;
         let plan = if let Some(plan) = &input.launch_plan {
             plan.clone()
         } else if let Some((saved, _)) = workspace.instance_launch(&instance_id)? {
@@ -238,7 +239,7 @@ async fn start_instance_with_lock(
                 qmp_timeout: std::time::Duration::from_secs(10),
                 on_operation: Some(&on_operation),
                 on_state: Some(&on_state),
-                complete_operation: !post_helpers,
+                complete_operation: false,
             })
             .await;
         let mut running = match running {
@@ -319,39 +320,63 @@ async fn start_instance_with_lock(
                 }
             }
         }
-        if input.launch_plan.is_some() {
-            workspace.save_instance_launch(
-                &instance_id,
-                &serde_json::to_string(&plan)?,
-                workspace
-                    .instance_launch(&instance_id)?
-                    .is_some_and(|(_, auto_remove)| auto_remove),
-            )?;
-        }
-        let result = workspace.instance(&instance_id)?;
-        if post_helpers {
+        let publication = (|| -> Result<_, RuntimeError> {
+            if input.launch_plan.is_some() {
+                workspace.save_instance_launch(
+                    &instance_id,
+                    &serde_json::to_string(&plan)?,
+                    workspace
+                        .instance_launch(&instance_id)?
+                        .is_some_and(|(_, auto_remove)| auto_remove),
+                )?;
+            }
+            workspace.save_run_helpers(&run_id, &helpers)?;
+            let result = workspace.instance(&instance_id)?;
             let completed = workspace.complete_operation(
                 &operation_id,
                 &serde_json::json!({"state": result.state}).to_string(),
             )?;
             events::publish_operation(&state, &completed, Some(run_id.as_str()));
+            Ok(result)
+        })();
+        let result = match publication {
+            Ok(instance) => instance,
+            Err(error) => {
+                rollback_failed_start(
+                    &state,
+                    &mut workspace,
+                    &instance_id,
+                    &run_id,
+                    &operation_id,
+                    &mut running,
+                    &mut helpers,
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let connection = Arc::new(tokio::sync::Mutex::new(running));
+        supervisor::install(
+            &state,
+            instance_id.as_str(),
+            run_id.clone(),
+            Some(connection.clone()),
+            helpers,
+        )?;
+        // Only published, fully initialized runs outlive this daemon.
+        connection.lock().await.preserve_on_drop();
+        if let Some(owner) = state
+            .supervisors
+            .lock()
+            .map_err(|_| RuntimeError::Process("supervisor lock poisoned".into()))?
+            .get_mut(instance_id.as_str())
+        {
+            for helper in &mut owner.helpers {
+                helper.preserve_on_drop();
+            }
         }
         drop(workspace);
-        state
-            .running
-            .lock()
-            .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
-            .insert(
-                instance_id.as_str().into(),
-                Arc::new(tokio::sync::Mutex::new(running)),
-            );
-        if !helpers.is_empty() {
-            state
-                .helpers
-                .lock()
-                .map_err(|_| RuntimeError::Process("helper map lock poisoned".into()))?
-                .insert(instance_id.as_str().into(), helpers);
-        }
         Ok((result, run_id, operation_id, vnc_port))
     };
     let result = tokio::spawn(future)
@@ -565,21 +590,14 @@ async fn lifecycle_action_with_lock(
                 .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
             owner.attach()?
         };
-        let running = state
-            .running
-            .lock()
-            .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
-            .get(&id)
-            .cloned();
+        let running = supervisor::connection(&state, &id)?;
         let running = if running.is_some() {
             running
         } else if let Some(recovered) = workspace.recover_instance_run_async(&instance_id).await? {
+            let run_id = recovered.run_id.clone();
             let recovered = Arc::new(tokio::sync::Mutex::new(recovered));
-            state
-                .running
-                .lock()
-                .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
-                .insert(id.clone(), recovered.clone());
+            let helpers = workspace.recover_run_helpers(&run_id)?;
+            supervisor::install(&state, &id, run_id, Some(recovered.clone()), helpers)?;
             Some(recovered)
         } else {
             None
@@ -616,41 +634,9 @@ async fn lifecycle_action_with_lock(
             _ => Err(RuntimeError::Process("unknown lifecycle action".into())),
         };
         if action == "stop" && instance.is_ok() {
-            streams::revoke_display(&state, &id, running.run_id.as_str());
-            state
-                .running
-                .lock()
-                .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
-                .remove(&id);
+            supervisor::teardown(&state, &id, &running.run_id)?;
         } else if instance.is_err() && running.is_recovered() {
-            // Reconnect on the next request if this recovered QMP stream failed.
-            state
-                .running
-                .lock()
-                .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
-                .remove(&id);
-        }
-        if action == "stop"
-            && instance.is_ok()
-            && let Some(mut helpers) = state
-                .helpers
-                .lock()
-                .map_err(|_| RuntimeError::Process("helper map lock poisoned".into()))?
-                .remove(&id)
-        {
-            super::helpers::stop_all_checked(&mut helpers)?;
-        }
-        if action == "stop" && instance.is_ok() {
-            state
-                .display_streams
-                .lock()
-                .map_err(|_| RuntimeError::Process("display stream map lock poisoned".into()))?
-                .remove(&id);
-            state
-                .audio_sessions
-                .lock()
-                .map_err(|_| RuntimeError::Process("audio session map lock poisoned".into()))?
-                .retain(|_, session| session.instance_id != id);
+            supervisor::disconnect(&state, &id, &running.run_id)?;
         }
         if let Ok(ref instance) = instance {
             let run = workspace.run(&running.run_id).ok();

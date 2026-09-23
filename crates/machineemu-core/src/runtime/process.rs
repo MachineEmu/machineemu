@@ -14,7 +14,9 @@ pub struct ProcessExit {
 }
 
 pub struct ManagedProcess {
-    child: Child,
+    child: Option<Child>,
+    adopted_start: Option<u64>,
+    preserve_on_drop: bool,
     pub pid: u32,
     pub run_id: Id,
 }
@@ -97,12 +99,46 @@ impl ManagedProcess {
             }
         })?;
         let pid = child.id();
-        Ok(Self { child, pid, run_id })
+        Ok(Self {
+            child: Some(child),
+            adopted_start: None,
+            pid,
+            run_id,
+            preserve_on_drop: false,
+        })
+    }
+
+    pub fn adopt(run_id: Id, pid: u32, process_start: u64) -> Result<Self> {
+        if !process_identity_matches(pid, process_start) {
+            return Err(Error::Process(
+                "helper process identity no longer matches".into(),
+            ));
+        }
+        Ok(Self {
+            child: None,
+            adopted_start: Some(process_start),
+            pid,
+            run_id,
+            preserve_on_drop: true,
+        })
+    }
+
+    pub fn preserve_on_drop(&mut self) {
+        self.preserve_on_drop = true;
     }
 
     pub fn try_wait(&mut self) -> Result<Option<ProcessExit>> {
-        let Some(status) = self
-            .child
+        let Some(child) = self.child.as_mut() else {
+            return Ok(
+                (!process_identity_matches(self.pid, self.adopted_start.unwrap_or(0))).then_some(
+                    ProcessExit {
+                        code: None,
+                        success: true,
+                    },
+                ),
+            );
+        };
+        let Some(status) = child
             .try_wait()
             .map_err(|source| Error::Process(source.to_string()))?
         else {
@@ -115,8 +151,22 @@ impl ManagedProcess {
     }
 
     pub fn wait(&mut self) -> Result<ProcessExit> {
+        if self.child.is_none() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(exit) = self.try_wait()? {
+                    return Ok(exit);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::Process("adopted helper did not exit".into()));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
         let status = self
             .child
+            .as_mut()
+            .expect("owned child")
             .wait()
             .map_err(|source| Error::Process(source.to_string()))?;
         Ok(ProcessExit {
@@ -126,9 +176,24 @@ impl ManagedProcess {
     }
 
     pub fn terminate(&mut self) -> Result<()> {
-        self.child
-            .kill()
-            .map_err(|source| Error::Process(source.to_string()))
+        if let Some(child) = self.child.as_mut() {
+            return child
+                .kill()
+                .map_err(|source| Error::Process(source.to_string()));
+        }
+        if self.try_wait()?.is_some() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(self.pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            )
+            .map_err(|error| Error::Process(error.to_string()))
+        }
+        #[cfg(not(unix))]
+        Err(Error::Process("adopted helpers require Unix".into()))
     }
 
     #[cfg(unix)]
@@ -155,9 +220,11 @@ impl ManagedProcess {
     }
 
     pub fn process_start(&self) -> Result<u64> {
-        process_start_identity(self.pid).ok_or_else(|| {
-            Error::Process(format!("cannot read process identity for pid {}", self.pid))
-        })
+        self.adopted_start
+            .or_else(|| process_start_identity(self.pid))
+            .ok_or_else(|| {
+                Error::Process(format!("cannot read process identity for pid {}", self.pid))
+            })
     }
 }
 
@@ -165,9 +232,12 @@ impl Drop for ManagedProcess {
     fn drop(&mut self) {
         // A Child handle alone does not own the process on drop. Keep the
         // process tied to its supervisor even when a later start step fails.
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        if !self.preserve_on_drop
+            && let Some(child) = &mut self.child
+            && matches!(child.try_wait(), Ok(None))
+        {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -184,10 +254,11 @@ pub(crate) fn process_start_identity(pid: u32) -> Option<u64> {
         return None;
     };
     let after_name = contents.rsplit_once(") ").map(|(_, rest)| rest)?;
-    after_name
-        .split_whitespace()
-        .nth(19)
-        .and_then(|value| value.parse::<u64>().ok())
+    let mut fields = after_name.split_whitespace();
+    if matches!(fields.next()?, "Z" | "X") {
+        return None;
+    }
+    fields.nth(18).and_then(|value| value.parse::<u64>().ok())
 }
 
 #[cfg(not(target_os = "linux"))]

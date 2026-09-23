@@ -4,7 +4,6 @@ use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use futures_util::{SinkExt, StreamExt};
-use machineemu_core::protocols::async_qmp::AsyncQmp;
 use serde_json::Value;
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -84,11 +83,14 @@ fn socket_endpoint(root: &std::path::Path, id: &str, name: &str) -> Result<Endpo
 }
 
 async fn vnc_endpoint(
+    state: &AppState,
     root: &std::path::Path,
     id: &str,
-    qmp_socket: &std::path::Path,
+    run: &machineemu_core::domain::Run,
 ) -> Result<Endpoint, RuntimeError> {
-    let mut qmp = AsyncQmp::connect(qmp_socket).await?;
+    let gate = instance_lock(state, id)?;
+    let _guard = gate.lock_owned().await;
+    let mut qmp = supervisor::qmp(state, run).await?;
     let info = qmp.execute("query-vnc", Value::Null).await?;
     if info.get("enabled") != Some(&Value::Bool(true)) {
         return Err(RuntimeError::Process("VNC is disabled for this run".into()));
@@ -155,15 +157,23 @@ async fn video_endpoint(
     let lock = instance_lock(state, id)?;
     let _guard = lock.lock_owned().await;
     {
-        let mut processes = state
-            .display_streams
+        let mut owners = state
+            .supervisors
             .lock()
-            .map_err(|_| RuntimeError::Process("display stream map lock poisoned".into()))?;
-        if let Some(process) = processes.get_mut(id) {
-            if process.run_id == run.run_id && process.try_wait()?.is_none() {
+            .map_err(|_| RuntimeError::Process("supervisor lock poisoned".into()))?;
+        let owner = owners
+            .entry(id.into())
+            .or_insert_with(|| supervisor::RunSupervisor::new(run.run_id.clone()));
+        if owner.run_id != run.run_id {
+            return Err(RuntimeError::Process(
+                "display request belongs to a stale run".into(),
+            ));
+        }
+        if let Some(process) = &mut owner.display {
+            if process.try_wait()?.is_none() {
                 return socket_endpoint(root, id, "video.sock");
             }
-            processes.remove(id);
+            owner.display = None;
         }
     }
     let directory = root.join("instances").join(id);
@@ -201,7 +211,7 @@ async fn video_endpoint(
         Some(&directory.join("video.log")),
         client,
     )?;
-    let mut qmp = match AsyncQmp::connect(&run.qmp_socket).await {
+    let mut qmp = match supervisor::qmp(state, run).await {
         Ok(qmp) => qmp,
         Err(error) => {
             let _ = process.terminate();
@@ -233,11 +243,15 @@ async fn video_endpoint(
                     directory.join("video.log").display()
                 )));
             }
-            state
-                .display_streams
+            let mut owners = state
+                .supervisors
                 .lock()
-                .map_err(|_| RuntimeError::Process("display stream map lock poisoned".into()))?
-                .insert(id.to_owned(), process);
+                .map_err(|_| RuntimeError::Process("supervisor lock poisoned".into()))?;
+            let owner = owners
+                .get_mut(id)
+                .filter(|owner| owner.run_id == run.run_id)
+                .ok_or_else(|| RuntimeError::Process("display run was removed".into()))?;
+            owner.display = Some(process);
             return Ok(endpoint);
         }
         if Instant::now() >= deadline {
@@ -303,7 +317,7 @@ pub(super) async fn issue_stream_ticket(
                 .ok_or_else(|| RuntimeError::Process("instance has no live run".into()))?;
             let root = workspace.root().to_owned();
             let endpoint = match kind.as_str() {
-                "vnc" => vnc_endpoint(&root, &id, &run.qmp_socket).await?,
+                "vnc" => vnc_endpoint(&state, &root, &id, &run).await?,
                 "video" | "audio-dbus" => video_endpoint(&state, &root, &id, &run).await?,
                 "usbredir" => socket_endpoint(workspace.root(), &id, "usbredir.sock")?,
                 "lcm" => socket_endpoint(workspace.root(), &id, "display.sock")?,
@@ -353,11 +367,14 @@ pub(super) async fn issue_stream_ticket(
 }
 
 async fn spice_endpoint(
+    state: &AppState,
     root: &std::path::Path,
     id: &str,
-    qmp_socket: &std::path::Path,
+    run: &machineemu_core::domain::Run,
 ) -> Result<Endpoint, RuntimeError> {
-    let mut qmp = AsyncQmp::connect(qmp_socket).await?;
+    let gate = instance_lock(state, id)?;
+    let _guard = gate.lock_owned().await;
+    let mut qmp = supervisor::qmp(state, run).await?;
     let info = qmp.execute("query-spice", Value::Null).await?;
     if info.get("enabled") != Some(&Value::Bool(true))
         || info.get("auth").and_then(Value::as_str) != Some("none")
@@ -366,7 +383,7 @@ async fn spice_endpoint(
             "audio-only SPICE server is unavailable".into(),
         ));
     }
-    let path = qmp_socket.with_file_name("spice.sock");
+    let path = run.qmp_socket.with_file_name("spice.sock");
     if info.get("host").and_then(Value::as_str) != path.to_str() {
         return Err(RuntimeError::Process(
             "SPICE is not bound to the instance audio socket".into(),
@@ -421,7 +438,7 @@ pub(super) async fn issue_spice_tickets(
             .live_run(&instance_id)?
             .ok_or_else(|| RuntimeError::Process("instance has no live run".into()))?;
         let root = workspace.root().to_owned();
-        let endpoint = spice_endpoint(&root, &id, &run.qmp_socket).await?;
+        let endpoint = spice_endpoint(&state, &root, &id, &run).await?;
         let group = random_ticket()?;
         let channels = if request.microphone {
             vec!["main", "playback", "record"]

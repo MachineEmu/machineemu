@@ -8,6 +8,46 @@ use rusqlite::{OptionalExtension, params};
 use std::path::PathBuf;
 
 impl Workspace {
+    pub fn save_run_helpers(
+        &self,
+        run_id: &Id,
+        helpers: &[crate::runtime::ManagedProcess],
+    ) -> Result<()> {
+        let transaction = self.db.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM run_helpers WHERE run_id = ?1",
+            params![run_id.as_str()],
+        )?;
+        for (ordinal, helper) in helpers.iter().enumerate() {
+            transaction.execute("INSERT INTO run_helpers(run_id, ordinal, helper_id, pid, process_start) VALUES (?1, ?2, ?3, ?4, ?5)", params![run_id.as_str(), ordinal as i64, helper.run_id.as_str(), helper.pid, helper.process_start()?])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn recover_run_helpers(&self, run_id: &Id) -> Result<Vec<crate::runtime::ManagedProcess>> {
+        let mut statement = self.db.prepare("SELECT helper_id, pid, process_start FROM run_helpers WHERE run_id = ?1 ORDER BY ordinal")?;
+        let rows = statement.query_map(params![run_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
+        })?;
+        let mut helpers = Vec::new();
+        for row in rows {
+            let (id, pid, start) = row?;
+            if process_identity_matches(pid, start) {
+                helpers.push(crate::runtime::ManagedProcess::adopt(
+                    Id::new("helper", id)?,
+                    pid,
+                    start,
+                )?);
+            }
+        }
+        Ok(helpers)
+    }
+
     pub fn record_run(
         &self,
         run_id: Id,
@@ -72,6 +112,25 @@ impl Workspace {
             params![status, run_id.as_str()],
         )?;
         self.run(run_id)
+    }
+
+    /// Reconcile observed QEMU state separately from requested lifecycle transitions.
+    /// The active run and process identity must still match after the QMP query.
+    pub fn observe_run_status(&self, run: &Run, status: &str) -> Result<crate::domain::Instance> {
+        let target = crate::domain::InstanceState::from_qmp(status)?;
+        if !crate::runtime::process_identity_matches(run.pid, run.process_start)
+            || !self.active_run(&run.instance_id)?.is_some_and(|active| {
+                active.run_id == run.run_id
+                    && active.pid == run.pid
+                    && active.process_start == run.process_start
+            })
+        {
+            return Err(Error::Process(
+                "QMP observation belongs to a stale or dead run".into(),
+            ));
+        }
+        self.db.execute("UPDATE instances SET lifecycle = ?1, revision = revision + 1 WHERE instance_id = ?2 AND lifecycle != ?1", params![target.as_str(), run.instance_id.as_str()])?;
+        self.instance(&run.instance_id)
     }
 
     pub fn reconcile_active_runs(&self) -> Result<Vec<Run>> {

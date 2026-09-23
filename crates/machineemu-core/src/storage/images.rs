@@ -278,6 +278,60 @@ impl Workspace {
         Ok(digest)
     }
 
+    pub fn replace_image_manifest(&self, manifest: &ImageManifest) -> Result<String> {
+        validate_manifest(manifest, manifest.image_id.as_str())?;
+        let path = manifest_path(&self.root, &manifest.image_id)?;
+        if !path.is_file() {
+            return Err(Error::NotFound {
+                kind: "image",
+                id: manifest.image_id.as_str().to_owned(),
+            });
+        }
+        let directory = path.parent().expect("manifest has parent");
+        let canonical_root = fs::canonicalize(&self.root).map_err(|source| Error::Io {
+            path: self.root.clone(),
+            source,
+        })?;
+        let canonical_directory = fs::canonicalize(directory).map_err(|source| Error::Io {
+            path: directory.to_owned(),
+            source,
+        })?;
+        if !canonical_directory.starts_with(canonical_root) {
+            return Err(Error::InvalidBundlePath(
+                "image manifest directory escapes the workspace".into(),
+            ));
+        }
+        let temporary = directory.join(format!(
+            ".manifest-{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let bytes = serde_json::to_vec_pretty(manifest)?;
+        let result = (|| -> std::io::Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(&bytes)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)?;
+            fs::File::open(directory)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result.map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(hex_digest(&serde_json::to_vec(manifest)?))
+    }
+
     pub fn image(&self, image_id: &Id) -> Result<ImageManifest> {
         let path = manifest_path(&self.root, image_id)?;
         read_manifest(&path, image_id.as_str())

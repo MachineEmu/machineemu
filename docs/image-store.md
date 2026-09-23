@@ -102,12 +102,13 @@ Select a registered base image independently of the launch profile:
 target/debug/machineemu run malware-analysis-x64 analysis01 --image win11-dev --net bridge:br0
 ```
 
-`--image` overrides the profile's `image` field for this invocation and binds
+When `--image` is omitted, the profile's `image` field selects the registered
+base image. `--image` overrides that field for this invocation and binds
 the selected disk and NVRAM to the asset names referenced by the profile. It
 also supplies the image's TPM seed when the profile enables TPM. The profile
 still selects the engine and hardware; image and profile targets must match.
-Firmware code is not part of the
-image record: import it and bind the profile's loader asset before launching.
+Firmware code is not part of the image record: import it and bind the profile's
+loader asset before launching.
 The analysis example requires its analysis-capable QEMU engine to be configured
 or selected with `--qemu`. The Rust planner encodes the analysis payload and
 SMBIOS identity for that engine. Bridge networking requires a privileged QEMU

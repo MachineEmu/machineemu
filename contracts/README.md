@@ -33,3 +33,5 @@ Guest command execution and its dedicated SSE stream are described in
 [`../docs/operations/api-v2-guest-exec.md`](../docs/operations/api-v2-guest-exec.md).
 Create/start/restart and disposable instance behavior are described in
 [`../docs/operations/instance-lifecycle.md`](../docs/operations/instance-lifecycle.md).
+YAML and JSON document reads and updates are described in
+[`../docs/operations/config-documents.md`](../docs/operations/config-documents.md).

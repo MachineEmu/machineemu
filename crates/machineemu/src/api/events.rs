@@ -342,7 +342,7 @@ pub(super) fn publish_state_fields(
 ) {
     let event = StateEvent {
         base: EventBase::new(instance.instance_id.as_str(), run_id),
-        state: instance.state.clone(),
+        state: instance.state.to_string(),
         revision: instance.revision,
         run_status: run_status.map(str::to_owned),
         reason: reason.into(),
@@ -448,7 +448,7 @@ pub(super) async fn stream_events(
                     instance_id.as_str(),
                     run.as_ref().map(|run| run.run_id.as_str()),
                 ),
-                state: instance.state,
+                state: instance.state.to_string(),
                 revision: instance.revision,
                 run_status: run.map(|run| run.status),
                 active_operations: operations

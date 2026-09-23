@@ -100,16 +100,18 @@ and fit the Unix socket path limit. Give the printed path to the external
 QMP client; it must perform the normal QMP capability negotiation. The socket
 is created on launch, so existing runs need a restart to get one.
 
-Each instance has an editable profile at `<workspace>/instances/<instance>/profile.json`.
-For example, change `machineemu-workspace/instances/analysis01/profile.json` to adjust
-`analysis01`'s memory, CPU, network, audio, or analysis hardware settings.
-`machineemu start analysis01` uses the saved resolved launch configuration;
-editing `profile.json` does not change it. Use `machineemu run` during the
-compatibility period to replan an existing stopped instance explicitly. The
-shared catalog profile is copied only when an instance has no profile file, so
-later catalog edits do not change existing instances.
-`--fresh --image IMAGE` removes the instance and creates a new profile file from
-the selected shared profile.
+Each instance has a saved profile and resolved launch plan. Use
+`machineemu show instance INSTANCE` to export them as YAML, then
+`machineemu update instance INSTANCE --file instance.yaml` while it is stopped.
+The same commands accept `profile` and `image`; see
+[document operations](docs/operations/config-documents.md).
+SQLite commits the instance profile, plan and revision together. The file at
+`<workspace>/instances/<instance>/profile.json` is a derived helper cache.
+`machineemu start INSTANCE` uses the saved launch plan; changing the profile in
+the document does not automatically replan it. Use `machineemu run` during the
+compatibility period to replan an existing stopped instance explicitly.
+Shared catalog edits do not change existing instances. `--fresh --image IMAGE`
+removes the instance and creates new settings from the selected shared profile.
 
 Tests require `qemu-img` for overlay preparation. See the
 [crate map](crates/README.md) for module boundaries and validation commands.

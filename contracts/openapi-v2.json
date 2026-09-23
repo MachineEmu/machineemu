@@ -179,6 +179,56 @@
             "bearerAuth": []
           }
         ]
+      },
+      "put": {
+        "tags": [],
+        "summary": "Replace an image manifest (JSON or YAML)",
+        "operationId": "put_image",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterImage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Replace an image manifest (JSON or YAML)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/api/v2/instances": {
@@ -357,6 +407,98 @@
         "responses": {
           "200": {
             "description": "Issue SPICE audio tickets",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/instances/{id}/config": {
+      "get": {
+        "tags": [],
+        "summary": "Get saved instance profile and launch plan (Accept: application/yaml supported)",
+        "operationId": "get_instance_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get saved instance profile and launch plan (Accept: application/yaml supported)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [],
+        "summary": "Replace stopped instance profile and launch plan (JSON or YAML)",
+        "operationId": "put_instance_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstanceConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Replace stopped instance profile and launch plan (JSON or YAML)",
             "content": {
               "application/json": {
                 "schema": {}
@@ -1606,6 +1748,96 @@
         ]
       }
     },
+    "/api/v2/profiles/{id}": {
+      "get": {
+        "tags": [],
+        "summary": "Get a shared profile (Accept: application/yaml supported)",
+        "operationId": "get_profile",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get a shared profile (Accept: application/yaml supported)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [],
+        "summary": "Replace a workspace profile override (JSON or YAML)",
+        "operationId": "put_profile",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Replace a workspace profile override (JSON or YAML)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v2/reconcile": {
       "post": {
         "tags": [],
@@ -2036,6 +2268,40 @@
             ]
           }
         }
+      },
+      "InstanceConfig": {
+        "type": "object",
+        "required": [
+          "instance_id",
+          "image_id",
+          "profile_id",
+          "revision",
+          "auto_remove",
+          "launch_plan"
+        ],
+        "properties": {
+          "auto_remove": {
+            "type": "boolean"
+          },
+          "image_id": {
+            "type": "string"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "launch_plan": {
+            "$ref": "#/components/schemas/LaunchSpec"
+          },
+          "profile": {},
+          "profile_id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
       },
       "LaunchSpec": {
         "type": "object",

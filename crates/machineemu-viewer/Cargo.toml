@@ -1,0 +1,29 @@
+[package]
+name = "machineemu-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native viewer for the machineemu H.264 display stream"
+
+[dependencies]
+anyhow = "1"
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+bytes = "1"
+clap.workspace = true
+futures-util.workspace = true
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
+machineemu-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+softbuffer = "0.4"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+winit = "0.30"
+
+[lints]
+workspace = true

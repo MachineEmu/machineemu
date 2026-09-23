@@ -149,6 +149,26 @@
             iproute2
           ];
 
+          # machineemu-viewer decodes the H.264 display stream with GStreamer
+          # (VA-API through plugins-bad, avdec_h264 from gst-libav as the
+          # software fallback) and opens a winit window, which loads its
+          # Wayland/X11 client libraries at run time.
+          viewerLibs = with pkgs; [
+            gst_all_1.gstreamer
+            gst_all_1.gst-plugins-base
+            gst_all_1.gst-plugins-good
+            gst_all_1.gst-plugins-bad
+            gst_all_1.gst-libav
+          ];
+          windowLibs = with pkgs; [
+            wayland
+            libxkbcommon
+            libx11
+            libxcursor
+            libxrandr
+            libxi
+          ];
+
           # Firmware is consumed as a content-addressed asset, not from PATH:
           # the profile pins ovmf-code and ovmf-vars by digest, so these paths
           # are what an import reads from. aarch64 ships the same images under
@@ -179,6 +199,8 @@
               ++ rustPackages
               ++ hostHelpers;
 
+            buildInputs = viewerLibs;
+
             env = {
               PYTHONDONTWRITEBYTECODE = "1";
               # The planner's helper path: --swtpm and helpers.swtpm in
@@ -188,6 +210,7 @@
               # the store: NixOS publishes the wrapped copy here, and
               # security.wrappers is what grants it cap_net_admin.
               MACHINEEMU_BRIDGE_HELPER = "/run/wrappers/bin/qemu-bridge-helper";
+              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath windowLibs;
               OVMF_CODE = "${firmware}/FV/${firmwarePrefix}_CODE.fd";
               OVMF_VARS = "${firmware}/FV/${firmwarePrefix}_VARS.fd";
             };

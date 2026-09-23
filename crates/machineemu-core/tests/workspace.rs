@@ -93,6 +93,54 @@ fn prepared_instance_publishes_files_and_database_together() {
 }
 
 #[test]
+fn prepared_instance_recovers_empty_plan_directories_only() {
+    let root = temp_root("prepared-plan-directories");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let profile_id = Id::new("profile", "profile01").unwrap();
+    let destination = root.join("instances/recover01");
+    fs::create_dir_all(destination.join("sockets")).unwrap();
+    fs::create_dir_all(destination.join("control")).unwrap();
+    let staged = root.join("staging/recover01-new");
+    fs::create_dir(&staged).unwrap();
+    fs::write(staged.join("profile.json"), b"{}").unwrap();
+    workspace
+        .publish_prepared_instance(
+            Id::new("instance", "recover01").unwrap(),
+            image.image_id.clone(),
+            profile_id.clone(),
+            &staged,
+            "{}",
+            false,
+        )
+        .unwrap();
+    assert_eq!(fs::read(destination.join("profile.json")).unwrap(), b"{}");
+
+    let protected = root.join("instances/protected01");
+    fs::create_dir_all(protected.join("sockets")).unwrap();
+    fs::write(protected.join("sockets/qmp.sock"), b"occupied").unwrap();
+    let staged = root.join("staging/protected01-new");
+    fs::create_dir(&staged).unwrap();
+    assert!(
+        workspace
+            .publish_prepared_instance(
+                Id::new("instance", "protected01").unwrap(),
+                image.image_id,
+                profile_id,
+                &staged,
+                "{}",
+                false,
+            )
+            .is_err()
+    );
+    assert!(protected.join("sockets/qmp.sock").exists());
+    assert!(staged.exists());
+    drop(workspace);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn yaml_config_supports_server_only_and_relative_paths() {
     let root = temp_root("config");
     fs::create_dir_all(&root).unwrap();
@@ -775,7 +823,7 @@ async fn start_orchestrates_operation_process_run_and_qmp() {
             .push(operation.status.clone());
     };
     let on_state = |instance: &machineemu_core::domain::Instance| {
-        observed_states.lock().unwrap().push(instance.state.clone());
+        observed_states.lock().unwrap().push(instance.state);
     };
     let mut running = workspace
         .start_instance_async(StartRequest {
@@ -871,10 +919,10 @@ async fn start_orchestrates_operation_process_run_and_qmp() {
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn failed_start_reaps_child_and_finishes_operation() {
+#[tokio::test]
+async fn failed_start_reaps_child_and_finishes_operation() {
     let root = temp_root("failed-start-cleanup");
-    let workspace = Workspace::open(&root).unwrap();
+    let mut workspace = Workspace::open(&root).unwrap();
     let image = manifest();
     workspace.register_image(&image).unwrap();
     let instance = workspace
@@ -886,21 +934,23 @@ fn failed_start_reaps_child_and_finishes_operation() {
         .unwrap();
     let operation_id = Id::new("operation", "op01").unwrap();
     let run_id = Id::new("run", "run01").unwrap();
-    let result = workspace.start_instance(StartRequest {
-        operation_id: operation_id.clone(),
-        run_id: run_id.clone(),
-        instance_id: instance.instance_id.clone(),
-        idempotency_key: "start-01",
-        input_json: "{}",
-        argv: &["sleep".into(), "30".into()],
-        qmp_socket: &root.join("missing.sock"),
-        stdout: None,
-        stderr: None,
-        qmp_timeout: Duration::from_millis(50),
-        on_operation: None,
-        on_state: None,
-        complete_operation: true,
-    });
+    let result = workspace
+        .start_instance_async(StartRequest {
+            operation_id: operation_id.clone(),
+            run_id: run_id.clone(),
+            instance_id: instance.instance_id.clone(),
+            idempotency_key: "start-01",
+            input_json: "{}",
+            argv: &["sleep".into(), "30".into()],
+            qmp_socket: &root.join("missing.sock"),
+            stdout: None,
+            stderr: None,
+            qmp_timeout: Duration::from_millis(50),
+            on_operation: None,
+            on_state: None,
+            complete_operation: true,
+        })
+        .await;
     assert!(result.is_err());
     let run = workspace.run(&run_id).unwrap();
     assert_eq!(run.status, "failed");
@@ -915,14 +965,14 @@ fn failed_start_reaps_child_and_finishes_operation() {
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn recovered_run_can_be_stopped_through_qmp() {
+#[tokio::test]
+async fn recovered_run_can_be_stopped_through_qmp() {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
     use std::thread;
 
     let root = temp_root("recovered-stop");
-    let workspace = Workspace::open(&root).unwrap();
+    let mut workspace = Workspace::open(&root).unwrap();
     let image = manifest();
     workspace.register_image(&image).unwrap();
     let instance = workspace
@@ -958,24 +1008,33 @@ fn recovered_run_can_be_stopped_through_qmp() {
             .write_all(b"{\"QMP\":{\"version\":{},\"capabilities\":[]}}\r\n")
             .unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
-        for _ in 0..2 {
+        for _ in 0..3 {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
             let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            let reply = if request["execute"] == "query-status" {
+                serde_json::json!({"status":"running"})
+            } else {
+                serde_json::json!({})
+            };
             stream
-                .write_all(format!("{{\"return\":{{}},\"id\":{}}}\r\n", request["id"]).as_bytes())
+                .write_all(
+                    format!("{{\"return\":{reply},\"id\":{}}}\r\n", request["id"]).as_bytes(),
+                )
                 .unwrap();
         }
         process.terminate().unwrap();
         process.wait().unwrap();
     });
     let mut recovered = workspace
-        .recover_instance_run(&instance.instance_id)
+        .recover_instance_run_async(&instance.instance_id)
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
         workspace
-            .stop_instance(&instance.instance_id, &mut recovered)
+            .stop_instance_async(&instance.instance_id, &mut recovered)
+            .await
             .unwrap()
             .state,
         "stopped"
@@ -1218,5 +1277,134 @@ fn legacy_image_migration_preserves_edits_and_instance_references() {
     assert!(workspace.image(&image.image_id).is_err());
     assert_eq!(Workspace::list_images(&root).unwrap(), vec![second]);
     drop(workspace);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn configuration_commit_is_atomic_and_rebuilds_profile_cache() {
+    let root = temp_root("configuration-atomic");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let id = Id::new("instance", "configured01").unwrap();
+    let staged = root.join("staging/configured01");
+    fs::create_dir_all(&staged).unwrap();
+    let original = serde_json::json!({"id":"profile01", "memory":"1G"});
+    fs::write(
+        staged.join("profile.json"),
+        serde_json::to_vec(&original).unwrap(),
+    )
+    .unwrap();
+    workspace
+        .publish_prepared_instance(
+            id.clone(),
+            image.image_id,
+            Id::new("profile", "profile01").unwrap(),
+            &staged,
+            "{}",
+            false,
+        )
+        .unwrap();
+    let db = rusqlite::Connection::open(root.join("metadata.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_config BEFORE UPDATE ON instance_launch BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;").unwrap();
+    let changed = serde_json::json!({"id":"profile01", "memory":"2G"});
+    assert!(
+        workspace
+            .replace_instance_configuration(&id, 1, "{\"changed\":true}", false, Some(&changed))
+            .is_err()
+    );
+    assert_eq!(workspace.instance(&id).unwrap().revision, 1);
+    assert_eq!(workspace.instance_profile(&id).unwrap(), Some(original));
+    assert_eq!(workspace.instance_launch(&id).unwrap().unwrap().0, "{}");
+    db.execute_batch("DROP TRIGGER reject_config").unwrap();
+    workspace
+        .replace_instance_configuration(&id, 1, "{\"changed\":true}", false, Some(&changed))
+        .unwrap();
+    assert!(
+        workspace
+            .replace_instance_configuration(&id, 1, "{}", false, None)
+            .is_err()
+    );
+    fs::write(
+        root.join("instances/configured01/profile.json"),
+        b"interrupted cache write",
+    )
+    .unwrap();
+    drop(workspace);
+    let reopened = Workspace::open(&root).unwrap();
+    assert_eq!(
+        reopened.instance_profile(&id).unwrap(),
+        Some(changed.clone())
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(root.join("instances/configured01/profile.json")).unwrap()
+        )
+        .unwrap(),
+        changed
+    );
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn deletion_rolls_back_metadata_and_resumes_filesystem_cleanup() {
+    let root = temp_root("deletion-atomic");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let id = Id::new("instance", "delete01").unwrap();
+    workspace
+        .create_instance(
+            id.clone(),
+            image.image_id,
+            Id::new("profile", "profile01").unwrap(),
+        )
+        .unwrap();
+    workspace.save_instance_launch(&id, "{}", false).unwrap();
+    let db = rusqlite::Connection::open(root.join("metadata.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_delete BEFORE DELETE ON instances BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;").unwrap();
+    assert!(workspace.remove_instance(&id).is_err());
+    assert!(workspace.instance(&id).is_ok());
+    assert!(workspace.instance_launch(&id).unwrap().is_some());
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM pending_instance_deletions",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    db.execute_batch("DROP TRIGGER reject_delete").unwrap();
+    let directory = root.join("instances/delete01");
+    fs::rename(&directory, root.join("staging/deleted-files")).unwrap();
+    fs::write(&directory, b"simulate inaccessible instance directory").unwrap();
+    assert!(workspace.remove_instance(&id).is_err());
+    assert!(workspace.instance(&id).is_err());
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM pending_instance_deletions",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    fs::remove_file(&directory).unwrap();
+    fs::rename(root.join("staging/deleted-files"), &directory).unwrap();
+    drop(workspace);
+    let reopened = Workspace::open(&root).unwrap();
+    assert!(!directory.exists());
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM pending_instance_deletions",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }

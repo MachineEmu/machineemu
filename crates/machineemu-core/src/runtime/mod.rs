@@ -6,7 +6,7 @@ mod lifecycle;
 mod lifecycle_async;
 mod process;
 #[cfg(unix)]
-pub use lifecycle::{RunningInstance, StartRequest};
+pub use lifecycle::StartRequest;
 #[cfg(unix)]
 pub use lifecycle_async::AsyncRunningInstance;
 pub use process::{ManagedProcess, ProcessExit};

@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "id": "win11-dev",
+  "image": "win11-dev",
   "name": "Windows 11 Driver Development",
   "domain": "windows-driver-development",
   "engine": {
@@ -42,7 +43,9 @@
       "note": "Optional instance provisioning media; absent in the observed win1 launch."
     }
   ],
-  "assets": {},
+  "assets": {
+    "ovmf-code": "sha256:8f65267595ea75cc951deca1e86782e912962696fccfa6ec6e587f31783b72fa"
+  },
   "firmware": {
     "loader": {
       "asset": "ovmf-code",

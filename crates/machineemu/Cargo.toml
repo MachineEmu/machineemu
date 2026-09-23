@@ -12,11 +12,14 @@ hyper.workspace = true
 hyper-util.workspace = true
 clap.workspace = true
 futures-util.workspace = true
-machineemu-core.workspace = true
+machineemu-core = { workspace = true, features = ["api-schema"] }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 utoipa.workspace = true
 time = { version = "0.3.47", features = ["formatting"] }
 

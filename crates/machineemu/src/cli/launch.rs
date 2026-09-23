@@ -1,5 +1,6 @@
 use super::client::ensure_daemon;
 use super::*;
+use machineemu_core::launch::{HelperSpec, LaunchContext, LaunchSpec};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -135,14 +136,39 @@ pub(super) async fn run_rust_owned(
     } else {
         resolve_profile_path(profile_name, &workspace_root)
     };
-    let mut profile = load_document(&profile_path)?;
-    let selected_image = image.or_else(|| {
-        (!fresh)
-            .then_some(existing.as_ref())
-            .flatten()
-            .and_then(|value| value["image_id"].as_str())
-    });
+    let saved_config = if exists && !fresh {
+        Some(
+            daemon_request(
+                &daemon,
+                &token,
+                "GET",
+                &format!("/api/v2/instances/{instance}/config"),
+                None,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let mut profile = match saved_config
+        .as_ref()
+        .and_then(|config| config.get("profile"))
+        .filter(|value| !value.is_null())
+    {
+        Some(profile) => profile.clone(),
+        None => load_document(&profile_path)?,
+    };
+    let selected_image = image
+        .or_else(|| {
+            (!fresh)
+                .then_some(existing.as_ref())
+                .flatten()
+                .and_then(|value| value["image_id"].as_str())
+        })
+        .or_else(|| profile.get("image").and_then(serde_json::Value::as_str))
+        .map(str::to_owned);
     let tpm_seed = selected_image
+        .as_deref()
         .map(|image_id| {
             let selected = Workspace::list_images(&workspace_root)
                 .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?
@@ -358,33 +384,18 @@ pub(super) async fn run_rust_owned(
         None,
     )?;
     validate_profile_against_qemu(&profile, &options)?;
-    let relative = |path: &Path| -> Result<String, machineemu_core::engine::Error> {
-        path.strip_prefix(&workspace_root)
-            .map(|value| value.to_string_lossy().into_owned())
-            .map_err(|_| {
-                machineemu_core::engine::Error::Invalid(format!(
-                    "runtime path is outside workspace: {}",
-                    path.display()
-                ))
-            })
-    };
-    let preparation = serde_json::json!({
-        "disk_backing": plan.preparation.disk_overlay.as_ref().map(|value| relative(&value.backing)).transpose()?,
-        "backing_format": plan.preparation.disk_overlay.as_ref().map(|value| value.backing_format.clone()).unwrap_or_else(|| "qcow2".into()),
-        "disk_size": plan.preparation.disk_overlay.as_ref().and_then(|value| value.size.clone()),
-        "nvram_seed": plan.preparation.nvram.as_ref().map(|value| relative(&value.seed)).transpose()?,
-        "tpm_seed": tpm_seed.as_deref().map(relative).transpose()?
-    });
-    let launch_plan = serde_json::json!({
-        "argv": plan.argv,
-        "vnc_auto": display.as_ref().is_some_and(|display| display.auto),
-        "qmp_socket": relative(&qmp_socket)?,
-        "stdout": relative(&instance_dir.join("qemu.stdout"))?,
-        "stderr": relative(&instance_dir.join("qemu.stderr"))?,
-        "preparation": if plan.preparation.disk_overlay.is_some() { preparation } else { serde_json::Value::Null },
-        "helper_argv": plan.helper_argv,
-        "helpers": sidecars
-    });
+    let launch_plan = LaunchSpec::from_plan(
+        plan,
+        LaunchContext {
+            workspace: &workspace_root,
+            qmp_socket: &qmp_socket,
+            stdout: Some(&instance_dir.join("qemu.stdout")),
+            stderr: Some(&instance_dir.join("qemu.stderr")),
+            tpm_seed: tpm_seed.as_deref(),
+            vnc_auto: display.as_ref().is_some_and(|display| display.auto),
+            helpers: sidecars,
+        },
+    )?;
     if image.is_some()
         && !fresh
         && let Some(existing) = &existing
@@ -477,7 +488,7 @@ fn planned_helpers(
     instance: &str,
     config_path: Option<&Path>,
     configured: Option<&machineemu_core::config::HelperConfig>,
-) -> Result<Vec<serde_json::Value>, machineemu_core::engine::Error> {
+) -> Result<Vec<HelperSpec>, machineemu_core::engine::Error> {
     use machineemu_core::engine::Error;
     let runtime = root.join("instances").join(instance);
     let relative = format!("instances/{instance}");
@@ -506,10 +517,20 @@ fn planned_helpers(
             "unifi_helper.py",
             configured.and_then(|c| c.unifi_hub.as_ref()),
         )?;
-        helpers.push(serde_json::json!({
-            "name":"frontpanel", "argv":["python3",hub,"frontpanel","--runtime",runtime,"--profile",runtime.join("profile.json")],
-            "after_qemu":true,"ready_socket":format!("{relative}/frontpanel.sock")
-        }));
+        helpers.push(HelperSpec {
+            name: "frontpanel".into(),
+            argv: vec![
+                "python3".into(),
+                hub,
+                "frontpanel".into(),
+                "--runtime".into(),
+                runtime.to_string_lossy().into_owned(),
+                "--profile".into(),
+                runtime.join("profile.json").to_string_lossy().into_owned(),
+            ],
+            after_qemu: true,
+            ready_socket: Some(format!("{relative}/frontpanel.sock").into()),
+        });
         if profile["machine"] == "udm-pro"
             && profile.pointer("/devices/lcd") == Some(&serde_json::Value::Bool(true))
         {
@@ -517,10 +538,18 @@ fn planned_helpers(
                 "unifi_helper.py",
                 configured.and_then(|c| c.unifi_hub.as_ref()),
             )?;
-            helpers.push(serde_json::json!({
-                "name":"lcm", "argv":["python3",hub,"lcm","--runtime",runtime],
-                "after_qemu":true,"ready_socket":format!("{relative}/display-input.sock")
-            }));
+            helpers.push(HelperSpec {
+                name: "lcm".into(),
+                argv: vec![
+                    "python3".into(),
+                    hub,
+                    "lcm".into(),
+                    "--runtime".into(),
+                    runtime.to_string_lossy().into_owned(),
+                ],
+                after_qemu: true,
+                ready_socket: Some(format!("{relative}/display-input.sock").into()),
+            });
         }
         if profile["machine"] == "udm-pro"
             && profile.pointer("/devices/bluetooth") == Some(&serde_json::Value::Bool(true))
@@ -529,10 +558,25 @@ fn planned_helpers(
                 "hci_simulator.py",
                 configured.and_then(|c| c.bluetooth_simulator.as_ref()),
             )?;
-            helpers.push(serde_json::json!({
-                "name":"bluetooth", "argv":["python3",bluetooth,"--socket",runtime.join("bluetooth.sock"),"--control",runtime.join("bluetooth-control.sock")],
-                "after_qemu":true,"ready_socket":format!("{relative}/bluetooth-control.sock")
-            }));
+            helpers.push(HelperSpec {
+                name: "bluetooth".into(),
+                argv: vec![
+                    "python3".into(),
+                    bluetooth,
+                    "--socket".into(),
+                    runtime
+                        .join("bluetooth.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                    "--control".into(),
+                    runtime
+                        .join("bluetooth-control.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                ],
+                after_qemu: true,
+                ready_socket: Some(format!("{relative}/bluetooth-control.sock").into()),
+            });
         }
     }
     if profile.pointer("/wifi/enabled") == Some(&serde_json::Value::Bool(true)) {
@@ -589,10 +633,12 @@ fn planned_helpers(
         for radio in radios {
             argv.extend(["--radio".into(), radio]);
         }
-        helpers.push(serde_json::json!({
-            "name":"wifi", "argv":argv,
-            "after_qemu":false,"ready_socket":format!("{relative}/wifi.sock")
-        }));
+        helpers.push(HelperSpec {
+            name: "wifi".into(),
+            argv,
+            after_qemu: false,
+            ready_socket: Some(format!("{relative}/wifi.sock").into()),
+        });
     }
     Ok(helpers)
 }
@@ -834,17 +880,17 @@ mod tests {
         assert_eq!(
             helpers
                 .iter()
-                .map(|item| item["name"].as_str().unwrap())
+                .map(|item| item.name.as_str())
                 .collect::<Vec<_>>(),
             ["frontpanel", "lcm", "bluetooth"]
         );
-        assert!(helpers.iter().all(|item| item["after_qemu"] == true));
+        assert!(helpers.iter().all(|item| item.after_qemu));
         let wifi = serde_json::json!({"machine":"mt7981","wifi":{"enabled":true,"radio":"ap=02:00:00:00:00:01"}});
         assert!(planned_helpers(&wifi, &root, "lab", None, None).is_err());
         let wifi = serde_json::json!({"machine":"mt7981","wifi":{"enabled":true,"namespace":"lab-wifi","radio":"ap=02:00:00:00:00:01"}});
         let helpers = planned_helpers(&wifi, &root, "lab", None, None).unwrap();
-        assert_eq!(helpers[0]["name"], "wifi");
-        assert_eq!(helpers[0]["after_qemu"], false);
+        assert_eq!(helpers[0].name, "wifi");
+        assert!(!helpers[0].after_qemu);
     }
 
     #[test]

@@ -52,23 +52,13 @@ struct AppState {
     workspace: Arc<Mutex<Workspace>>,
     bearer_token: Arc<str>,
     launch_plans: Arc<BTreeMap<String, LaunchSpec>>,
-    running: Arc<
-        Mutex<
-            BTreeMap<
-                String,
-                Arc<tokio::sync::Mutex<machineemu_core::runtime::AsyncRunningInstance>>,
-            >,
-        >,
-    >,
+    supervisors: Arc<Mutex<BTreeMap<String, supervisor::RunSupervisor>>>,
     instance_locks: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
-    helpers: Arc<Mutex<BTreeMap<String, Vec<ManagedProcess>>>>,
-    display_streams: Arc<Mutex<BTreeMap<String, ManagedProcess>>>,
     display_stream: Arc<PathBuf>,
     stream_tickets: Arc<Mutex<BTreeMap<String, streams::StreamTicket>>>,
     audio_sessions: Arc<Mutex<BTreeMap<String, streams::AudioSession>>>,
     control_streams: Arc<Mutex<BTreeMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     events: Arc<Mutex<events::EventHub>>,
-    run_watchers: Arc<Mutex<std::collections::BTreeSet<String>>>,
     guest_executions: Arc<Mutex<BTreeMap<String, Arc<guest_exec::ExecutionJob>>>>,
     local_unix: bool,
 }
@@ -96,12 +86,45 @@ fn instance_lock(state: &AppState, id: &str) -> Result<Arc<tokio::sync::Mutex<()
         .clone())
 }
 
+/// Log to stderr, filtered by `RUST_LOG` (for example
+/// `RUST_LOG=machineemu=debug`). The default shows this crate's
+/// informational messages and warnings from dependencies.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,machineemu=info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
+/// Log every HTTP request by method, path and status. The query string is
+/// left out: WebSocket stream tickets travel in it.
+async fn log_request(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let status = response.status().as_u16();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if status >= 400 {
+        tracing::info!(%method, path, status, elapsed_ms, "request");
+    } else {
+        tracing::debug!(%method, path, status, elapsed_ms, "request");
+    }
+    response
+}
+
 pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     if args.print_openapi {
         println!("{}", openapi::document().to_pretty_json()?);
         return Ok(());
     }
+    init_tracing();
     let (config, config_path) = load_config(args.config.as_deref())?;
     let server = config.server.unwrap_or_default();
     let workspace_path = args
@@ -131,8 +154,18 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         .launch_plans
         .or(server.launch_plans)
         .map(|path| resolve_config_path(config_path.as_deref(), path));
-    let workspace = Workspace::open(&workspace_path)?;
+    let mut workspace = Workspace::open(&workspace_path)?;
     let recovered_runs = workspace.reconcile_active_runs()?;
+    for run in recovered_runs.iter().filter(|run| run.status == "running") {
+        // Query before reconciling operations, so interrupted starts see observed state.
+        // A temporarily unavailable QMP socket must not mark a live VM as dead.
+        if let Err(error) = workspace.recover_instance_run_async(&run.instance_id).await {
+            eprintln!(
+                "QMP recovery for {} will retry: {error}",
+                run.instance_id.as_str()
+            );
+        }
+    }
     workspace.reconcile_operations()?;
     let launch_plans = match launch_plans_path {
         Some(path) => serde_json::from_str(&fs::read_to_string(path)?)?,
@@ -142,10 +175,9 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         workspace: Arc::new(Mutex::new(workspace)),
         bearer_token: Arc::from(bearer_token.clone()),
         launch_plans: Arc::new(launch_plans),
-        running: Arc::new(Mutex::new(BTreeMap::new())),
+        supervisors: Arc::new(Mutex::new(BTreeMap::new())),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
-        helpers: Arc::new(Mutex::new(BTreeMap::new())),
-        display_streams: Arc::new(Mutex::new(BTreeMap::new())),
+
         display_stream: Arc::new(
             args.display_stream
                 .unwrap_or_else(|| PathBuf::from("display-stream")),
@@ -154,14 +186,32 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new()?)),
-        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: unix_socket.is_some(),
     };
+    tracing::info!(
+        workspace = %workspace_path.display(),
+        recovered_runs = recovered_runs.len(),
+        display_stream = %state.display_stream.display(),
+        "daemon starting"
+    );
     for run in recovered_runs
         .into_iter()
         .filter(|run| run.status == "running")
     {
+        let helpers = state
+            .workspace
+            .lock()
+            .map_err(|_| "workspace lock poisoned")?
+            .recover_run_helpers(&run.run_id)?;
+        supervisor::install(
+            &state,
+            run.instance_id.as_str(),
+            run.run_id.clone(),
+            None,
+            helpers,
+        )?;
         run_events::spawn(&state, run);
     }
     let app = router(state);
@@ -175,12 +225,13 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         let listener = tokio::net::UnixListener::bind(&socket)?;
         #[cfg(unix)]
         std::fs::set_permissions(&socket, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        tracing::info!(socket = %socket.display(), "listening on Unix socket");
         let served = serve_unix(app, listener).await;
         // The socket belongs to this daemon. Left behind, the next start finds
         // a path that exists but nothing listening on it, and a client sees
         // "connection refused" against what looks like a live daemon.
         if let Err(error) = fs::remove_file(&socket) {
-            eprintln!("could not remove {}: {error}", socket.display());
+            tracing::warn!(socket = %socket.display(), %error, "could not remove socket");
         }
         served?;
     } else {
@@ -188,6 +239,7 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
             return Err("bearer token is required for TCP server mode".into());
         }
         let listener = tokio::net::TcpListener::bind(listen).await?;
+        tracing::info!(%listen, "listening on TCP");
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown())
             .await?;
@@ -208,7 +260,10 @@ async fn serve_unix(
                 let io = TokioIo::new(stream);
                 let service = TowerToHyperService::new(app.clone().into_service());
                 tokio::spawn(async move {
-                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                    // with_upgrades keeps the connection alive for WebSockets.
+                    if let Err(error) = http1::Builder::new().serve_connection(io, service).with_upgrades().await {
+                        tracing::debug!(%error, "Unix socket connection ended with an error");
+                    }
                 });
             }
             _ = &mut shutdown => break,
@@ -222,7 +277,14 @@ fn router(state: AppState) -> Router {
         .route("/api/v2/health", get(health))
         .route("/api/v2/openapi.json", get(openapi_document))
         .route("/api/v2/images", post(register_image))
-        .route("/api/v2/images/:id", get(get_image))
+        .route(
+            "/api/v2/images/:id",
+            get(get_image).put(documents::put_image),
+        )
+        .route(
+            "/api/v2/profiles/:id",
+            get(documents::get_profile).put(documents::put_profile),
+        )
         .route(
             "/api/v2/instances",
             get(list_instances).post(create_instance),
@@ -230,6 +292,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/v2/instances/:id",
             get(get_instance).delete(remove_instance),
+        )
+        .route(
+            "/api/v2/instances/:id/config",
+            get(documents::get_instance_config).put(documents::put_instance_config),
         )
         .route("/api/v2/instances/:id/start", post(start_instance))
         .route(
@@ -296,6 +362,7 @@ fn router(state: AppState) -> Router {
             "/api/v2/instances/:id/devices/iso/:device_id/eject",
             post(eject_iso),
         )
+        .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
 }
 
@@ -327,6 +394,7 @@ async fn shutdown() {
 mod auth;
 mod devices;
 mod display_control;
+mod documents;
 mod dto;
 mod events;
 mod guest_agent;
@@ -343,6 +411,7 @@ mod run_events;
 mod snapshots;
 mod spice_audio;
 mod streams;
+mod supervisor;
 use auth::*;
 use devices::*;
 use dto::*;

@@ -114,7 +114,7 @@ async fn media_path(root: &FsPath, value: &str, iso: bool) -> Result<PathBuf, Ru
 
 struct DeviceSession {
     _gate: OwnedMutexGuard<()>,
-    qmp: AsyncQmp,
+    qmp: supervisor::QmpSession,
     root: PathBuf,
     instance_id: String,
 }
@@ -123,17 +123,17 @@ async fn session(state: &AppState, id: String) -> Result<DeviceSession, RuntimeE
     let instance_id = Id::new("instance", id.clone())?;
     let gate = instance_lock(state, &id)?.lock_owned().await;
     let workspace = state.workspace.clone();
-    let (qmp_socket, root) = blocking(move || {
+    let (run, root) = blocking(move || {
         let workspace = workspace
             .lock()
             .map_err(|_| invalid("workspace lock poisoned"))?;
         let run = workspace
             .live_run(&instance_id)?
             .ok_or_else(|| invalid("instance has no live run"))?;
-        Ok((run.qmp_socket, workspace.root().to_owned()))
+        Ok((run, workspace.root().to_owned()))
     })
     .await?;
-    let qmp = AsyncQmp::connect(&qmp_socket).await?;
+    let qmp = supervisor::qmp(state, &run).await?;
     Ok(DeviceSession {
         _gate: gate,
         qmp,

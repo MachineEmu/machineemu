@@ -42,6 +42,10 @@ impl AsyncQmp {
         Ok(client)
     }
 
+    pub fn drain_events(&mut self) -> impl Iterator<Item = Value> + '_ {
+        self.events.drain(..)
+    }
+
     pub async fn execute(&mut self, name: &str, arguments: Value) -> Result<Value, RuntimeError> {
         if name.is_empty() || name.contains(char::is_whitespace) {
             return Err(RuntimeError::Qmp("QMP command must be a token".into()));

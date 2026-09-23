@@ -2,24 +2,30 @@ use super::*;
 use machineemu_core::domain::Run;
 use serde_json::{Value, json};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 pub(super) fn spawn(state: &AppState, run: Run) {
-    let key = format!("{}:{}", run.instance_id.as_str(), run.run_id.as_str());
-    let Ok(mut watchers) = state.run_watchers.lock() else {
+    let Ok(mut owners) = state.supervisors.lock() else {
         return;
     };
-    if !watchers.insert(key.clone()) {
+    let owner = owners
+        .entry(run.instance_id.as_str().into())
+        .or_insert_with(|| supervisor::RunSupervisor::new(run.run_id.clone()));
+    if owner.run_id != run.run_id || owner.watching {
         return;
     }
-    drop(watchers);
+    owner.watching = true;
+    drop(owners);
     let state = state.clone();
     tokio::spawn(async move {
-        let qmp = qmp_reader(state.clone(), run.clone());
-        let process = process_watcher(state.clone(), run.clone());
-        tokio::join!(qmp, process);
-        if let Ok(mut watchers) = state.run_watchers.lock() {
-            watchers.remove(&key);
+        tokio::join!(
+            qmp_reader(state.clone(), run.clone()),
+            process_watcher(state.clone(), run.clone())
+        );
+        if let Ok(mut owners) = state.supervisors.lock()
+            && let Some(owner) = owners.get_mut(run.instance_id.as_str())
+            && owner.run_id == run.run_id
+        {
+            owner.watching = false;
         }
     });
 }
@@ -45,12 +51,7 @@ async fn process_watcher(state: AppState, run: Run) {
                 ) {
                     return Ok(true);
                 }
-                let running = state
-                    .running
-                    .lock()
-                    .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
-                    .get(run.instance_id.as_str())
-                    .cloned();
+                let running = supervisor::connection(&state, run.instance_id.as_str())?;
                 let exit = if let Some(running) = &running {
                     let mut running = running.blocking_lock();
                     if running.run_id != run.run_id {
@@ -66,17 +67,8 @@ async fn process_watcher(state: AppState, run: Run) {
                     None
                 };
                 let Some(exit) = exit else { return Ok(false) };
-                streams::revoke_display(&state, run.instance_id.as_str(), run.run_id.as_str());
-                let helper_cleanup = if let Some(mut helpers) = state
-                    .helpers
-                    .lock()
-                    .map_err(|_| RuntimeError::Process("helper map lock poisoned".into()))?
-                    .remove(run.instance_id.as_str())
-                {
-                    super::helpers::stop_all_checked(&mut helpers)
-                } else {
-                    Ok(())
-                };
+                let helper_cleanup =
+                    supervisor::teardown(&state, run.instance_id.as_str(), &run.run_id);
                 if let Err(error) = helper_cleanup {
                     let final_run = workspace.finish_run(&run.run_id, "uncertain")?;
                     let instance = workspace.instance(&run.instance_id)?;
@@ -92,27 +84,13 @@ async fn process_watcher(state: AppState, run: Run) {
                             "helper_cleanup_failed",
                         );
                     }
-                    eprintln!(
-                        "helper cleanup failed for {}: {error}",
-                        run.instance_id.as_str()
+                    tracing::warn!(
+                        instance = run.instance_id.as_str(),
+                        %error,
+                        "helper cleanup failed"
                     );
                     return Ok(true);
                 }
-                state
-                    .display_streams
-                    .lock()
-                    .map_err(|_| RuntimeError::Process("display stream map lock poisoned".into()))?
-                    .remove(run.instance_id.as_str());
-                state
-                    .audio_sessions
-                    .lock()
-                    .map_err(|_| RuntimeError::Process("audio session map lock poisoned".into()))?
-                    .retain(|_, session| session.instance_id != run.instance_id.as_str());
-                state
-                    .running
-                    .lock()
-                    .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
-                    .remove(run.instance_id.as_str());
                 let status = if exit.success { "exited" } else { "failed" };
                 let final_run = workspace.finish_run(&run.run_id, status)?;
                 let mut instance = workspace.instance(&run.instance_id)?;
@@ -178,12 +156,7 @@ async fn is_current(state: &AppState, run: &Run) -> bool {
 }
 
 fn run_is_alive(state: &AppState, workspace: &Workspace, run: &Run) -> Result<bool, RuntimeError> {
-    let owned = state
-        .running
-        .lock()
-        .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
-        .get(run.instance_id.as_str())
-        .cloned();
+    let owned = supervisor::connection(state, run.instance_id.as_str())?;
     if let Some(owned) = owned {
         let mut owned = owned.blocking_lock();
         return Ok(owned.run_id == run.run_id && owned.poll_exit()?.is_none());
@@ -191,151 +164,88 @@ fn run_is_alive(state: &AppState, workspace: &Workspace, run: &Run) -> Result<bo
     Ok(workspace.reconcile_run(&run.run_id)?.status == "running")
 }
 
-async fn read_frame(reader: &mut BufReader<tokio::net::UnixStream>) -> std::io::Result<Value> {
-    let mut bytes = Vec::new();
-    loop {
-        let byte = reader.read_u8().await?;
-        if byte == b'\n' {
-            break;
-        }
-        if bytes.len() >= 1024 * 1024 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "QMP frame too large",
-            ));
-        }
-        bytes.push(byte);
-    }
-    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
-}
-
-async fn command(
-    reader: &mut BufReader<tokio::net::UnixStream>,
-    name: &str,
-    id: u64,
-) -> std::io::Result<Value> {
-    reader
-        .get_mut()
-        .write_all(format!("{{\"execute\":\"{name}\",\"id\":{id}}}\r\n").as_bytes())
-        .await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "QMP command timed out",
-            ));
-        }
-        let message = tokio::time::timeout(remaining, read_frame(reader)).await??;
-        if message.get("id") == Some(&Value::from(id)) {
-            return message.get("return").cloned().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "QMP command failed")
-            });
-        }
-    }
-}
-
 async fn qmp_reader(state: AppState, run: Run) {
     let mut delay = Duration::from_millis(250);
     while is_current(&state, &run).await {
-        let attempt = async {
-            let socket = tokio::time::timeout(
-                Duration::from_secs(2),
-                tokio::net::UnixStream::connect(&run.qmp_socket),
-            )
-            .await??;
-            let mut reader = BufReader::new(socket);
-            let greeting =
-                tokio::time::timeout(Duration::from_secs(2), read_frame(&mut reader)).await??;
-            if greeting.get("QMP").is_none() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "QMP greeting missing",
-                ));
-            }
-            command(&mut reader, "qmp_capabilities", 1).await?;
-            let status = command(&mut reader, "query-status", 2).await?;
-            let observed = status
+        let observed = async {
+            let gate = instance_lock(&state, run.instance_id.as_str())?;
+            let guard = gate.lock_owned().await;
+            let mut qmp = supervisor::qmp(&state, &run).await?;
+            let reply = qmp.execute("query-status", Value::Null).await;
+            let events = qmp.drain_events().collect::<Vec<_>>();
+            drop(qmp);
+            let status = match reply {
+                Ok(status) => status,
+                Err(error) => {
+                    supervisor::disconnect(&state, run.instance_id.as_str(), &run.run_id)?;
+                    return Err(error);
+                }
+            };
+            let status = status
                 .get("status")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
+                .ok_or_else(|| RuntimeError::Qmp("query-status response has no status".into()))?
                 .to_owned();
-            apply_status(&state, &run, &observed).await;
-            delay = Duration::from_millis(250);
-            let mut frame = Vec::new();
-            loop {
-                let byte =
-                    match tokio::time::timeout(Duration::from_secs(1), reader.read_u8()).await {
-                        Ok(result) => result?,
-                        Err(_) => {
-                            if !is_current(&state, &run).await {
-                                return Ok(());
-                            }
-                            continue;
-                        }
-                    };
-                if byte == b'\n' {
-                    let message: Value =
-                        serde_json::from_slice(&frame).map_err(std::io::Error::other)?;
-                    frame.clear();
-                    if message.get("event").is_some() {
-                        apply_qmp(&state, &run, message).await;
-                    }
-                } else if frame.len() >= 1024 * 1024 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "QMP frame too large",
-                    ));
-                } else {
-                    frame.push(byte);
+            let state = state.clone();
+            let run = run.clone();
+            blocking(move || {
+                // Keep the instance gate through publication so a stale query
+                // cannot overwrite a concurrent pause/resume response.
+                let _guard = guard;
+                for event in events {
+                    apply_qmp_locked(&state, &run, event)?;
                 }
-            }
-        };
-        let _ = attempt.await;
-        if !is_current(&state, &run).await {
-            return;
+                apply_status_locked(&state, &run, &status)
+            })
+            .await
         }
+        .await;
+        delay = if observed.is_ok() {
+            Duration::from_millis(250)
+        } else {
+            (delay * 2).min(Duration::from_secs(5))
+        };
         tokio::time::sleep(delay).await;
-        delay = (delay * 2).min(Duration::from_secs(5));
     }
 }
 
-async fn apply_status(state: &AppState, run: &Run, status: &str) {
+fn apply_status_locked(state: &AppState, run: &Run, status: &str) -> Result<(), RuntimeError> {
     let target = match status {
         "running" => "running",
         "paused" | "prelaunch" => "paused",
-        _ => return,
+        _ => return Ok(()),
     };
+    let workspace = state
+        .workspace
+        .lock()
+        .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
+    if !workspace
+        .active_run(&run.instance_id)?
+        .is_some_and(|active| active.run_id == run.run_id)
+        || !run_is_alive(state, &workspace, run)?
+    {
+        return Ok(());
+    }
+    let current = workspace.instance(&run.instance_id)?;
+    let changed = workspace.observe_run_status(run, target)?;
+    if changed.revision != current.revision {
+        events::publish_state(state, &changed, Some(run), "qmp_status");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn apply_status(state: &AppState, run: &Run, status: &str) {
     let state = state.clone();
     let run = run.clone();
-    let _ = blocking(move || -> Result<_, RuntimeError> {
-        let lock = instance_lock(&state, run.instance_id.as_str())?;
-        let _guard = lock.blocking_lock();
-        let workspace = state
-            .workspace
-            .lock()
-            .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
-        if !workspace
-            .active_run(&run.instance_id)?
-            .is_some_and(|active| active.run_id == run.run_id)
-            || !run_is_alive(&state, &workspace, &run)?
-        {
-            return Ok(());
-        }
-        let current = workspace.instance(&run.instance_id)?;
-        if current.state != target
-            && matches!(
-                (current.state.as_str(), target),
-                ("running", "paused") | ("paused", "running")
-            )
-        {
-            let changed = workspace.transition_instance(&run.instance_id, target)?;
-            events::publish_state(&state, &changed, Some(&run), "qmp_status");
-        }
-        Ok(())
+    let status = status.to_owned();
+    blocking(move || {
+        let gate = instance_lock(&state, run.instance_id.as_str())?;
+        let _guard = gate.blocking_lock();
+        apply_status_locked(&state, &run, &status)
     })
-    .await;
+    .await
+    .unwrap();
 }
 
 fn filtered_fields(name: &str, data: &Value) -> Option<Value> {
@@ -357,55 +267,61 @@ fn filtered_fields(name: &str, data: &Value) -> Option<Value> {
     }
 }
 
-async fn apply_qmp(state: &AppState, run: &Run, message: Value) {
+fn apply_qmp_locked(state: &AppState, run: &Run, message: Value) -> Result<(), RuntimeError> {
     let Some(name) = message.get("event").and_then(Value::as_str) else {
-        return;
+        return Ok(());
     };
     let Some(fields) = filtered_fields(name, &message["data"]) else {
-        return;
+        return Ok(());
     };
     let name = name.to_owned();
+    let workspace = state
+        .workspace
+        .lock()
+        .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
+    if !workspace
+        .active_run(&run.instance_id)?
+        .is_some_and(|active| active.run_id == run.run_id)
+        || !run_is_alive(state, &workspace, run)?
+    {
+        return Ok(());
+    }
+    let current = workspace.instance(&run.instance_id)?;
+    events::publish_qmp(
+        state,
+        run.instance_id.as_str(),
+        run.run_id.as_str(),
+        &name,
+        fields,
+    );
+    let target = match name.as_str() {
+        "STOP" => "paused",
+        "RESUME" => "running",
+        _ => return Ok(()),
+    };
+    if current.state != target
+        && matches!(
+            (current.state.as_str(), target),
+            ("running", "paused") | ("paused", "running")
+        )
+    {
+        let changed = workspace.transition_instance(&run.instance_id, target)?;
+        events::publish_state(state, &changed, Some(run), "qmp_event");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn apply_qmp(state: &AppState, run: &Run, message: Value) {
     let state = state.clone();
     let run = run.clone();
-    let _ = blocking(move || -> Result<_, RuntimeError> {
-        let lock = instance_lock(&state, run.instance_id.as_str())?;
-        let _guard = lock.blocking_lock();
-        let workspace = state
-            .workspace
-            .lock()
-            .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
-        if !workspace
-            .active_run(&run.instance_id)?
-            .is_some_and(|active| active.run_id == run.run_id)
-            || !run_is_alive(&state, &workspace, &run)?
-        {
-            return Ok(());
-        }
-        let current = workspace.instance(&run.instance_id)?;
-        events::publish_qmp(
-            &state,
-            run.instance_id.as_str(),
-            run.run_id.as_str(),
-            &name,
-            fields,
-        );
-        let target = match name.as_str() {
-            "STOP" => "paused",
-            "RESUME" => "running",
-            _ => return Ok(()),
-        };
-        if current.state != target
-            && matches!(
-                (current.state.as_str(), target),
-                ("running", "paused") | ("paused", "running")
-            )
-        {
-            let changed = workspace.transition_instance(&run.instance_id, target)?;
-            events::publish_state(&state, &changed, Some(&run), "qmp_event");
-        }
-        Ok(())
+    blocking(move || {
+        let gate = instance_lock(&state, run.instance_id.as_str())?;
+        let _guard = gate.blocking_lock();
+        apply_qmp_locked(&state, &run, message)
     })
-    .await;
+    .await
+    .unwrap();
 }
 
 #[cfg(test)]
@@ -413,7 +329,7 @@ mod tests {
     use super::*;
     use machineemu_core::domain::ImageManifest;
 
-    fn fixture(name: &str) -> (std::path::PathBuf, AppState, Run, ManagedProcess) {
+    pub(super) fn fixture(name: &str) -> (std::path::PathBuf, AppState, Run, ManagedProcess) {
         let root =
             std::env::temp_dir().join(format!("machineemu-qmp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -458,16 +374,15 @@ mod tests {
             workspace: Arc::new(Mutex::new(workspace)),
             bearer_token: Arc::from("secret"),
             launch_plans: Arc::new(BTreeMap::new()),
-            running: Arc::new(Mutex::new(BTreeMap::new())),
+            supervisors: Arc::new(Mutex::new(BTreeMap::new())),
             instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
-            helpers: Arc::new(Mutex::new(BTreeMap::new())),
-            display_streams: Arc::new(Mutex::new(BTreeMap::new())),
+
             display_stream: Arc::new(PathBuf::from("display-stream")),
             stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
             audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             control_streams: Arc::new(Mutex::new(BTreeMap::new())),
             events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
-            run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+
             guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
             local_unix: false,
         };
@@ -533,7 +448,13 @@ mod tests {
                     reader.read_line(&mut line).unwrap();
                     let request: Value = serde_json::from_str(line.trim()).unwrap();
                     let result = if request["execute"] == "query-status" {
-                        json!({"status":"running"})
+                        {
+                            let event = if connection == 0 { "STOP" } else { "RESUME" };
+                            stream
+                                .write_all(format!("{}\r\n", json!({"event":event})).as_bytes())
+                                .unwrap();
+                            json!({"status":if connection == 0 { "paused" } else { "running" }})
+                        }
                     } else {
                         json!({})
                     };
@@ -543,12 +464,6 @@ mod tests {
                                 .as_bytes(),
                         )
                         .unwrap();
-                }
-                stream.write_all(b"{\"event\":\"STOP\"}\r\n").unwrap();
-                std::thread::sleep(Duration::from_millis(100));
-                if connection == 1 {
-                    stream.write_all(b"{\"event\":\"RESUME\"}\r\n").unwrap();
-                    std::thread::sleep(Duration::from_millis(100));
                 }
             }
         });
@@ -561,7 +476,7 @@ mod tests {
                     .unwrap()
                     .instance(&run.instance_id)
                     .unwrap();
-                if instance.revision >= 7 {
+                if instance.revision >= 5 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -638,5 +553,77 @@ mod tests {
         drop(workspace);
         drop(state);
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn qmp_observation_repairs_error_and_starting_but_rejects_stale_runs() {
+        let (root, state, run, mut process) = super::tests::fixture("recovery-state");
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .transition_instance(&run.instance_id, "error")
+            .unwrap();
+        apply_status(&state, &run, "running").await;
+        assert_eq!(
+            state
+                .workspace
+                .lock()
+                .unwrap()
+                .instance(&run.instance_id)
+                .unwrap()
+                .state,
+            "running"
+        );
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .transition_instance(&run.instance_id, "error")
+            .unwrap();
+        apply_status(&state, &run, "prelaunch").await;
+        assert_eq!(
+            state
+                .workspace
+                .lock()
+                .unwrap()
+                .instance(&run.instance_id)
+                .unwrap()
+                .state,
+            "paused"
+        );
+        let mut stale = run.clone();
+        stale.run_id = Id::new("run", "old-run").unwrap();
+        apply_status(&state, &stale, "running").await;
+        assert_eq!(
+            state
+                .workspace
+                .lock()
+                .unwrap()
+                .instance(&run.instance_id)
+                .unwrap()
+                .state,
+            "paused"
+        );
+        process.terminate().unwrap();
+        process.wait().unwrap();
+        apply_status(&state, &run, "running").await;
+        assert_eq!(
+            state
+                .workspace
+                .lock()
+                .unwrap()
+                .instance(&run.instance_id)
+                .unwrap()
+                .state,
+            "paused"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

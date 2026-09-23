@@ -4,7 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct Id(String);
+
+impl TryFrom<String> for Id {
+    type Error = Error;
+    fn try_from(value: String) -> Result<Self> {
+        Self::new("id", value)
+    }
+}
 
 impl Id {
     /// Rehydrate an ID already stored by this workspace.
@@ -69,7 +77,7 @@ pub struct Instance {
     pub instance_id: Id,
     pub image_id: Id,
     pub profile_id: Id,
-    pub state: String,
+    pub state: InstanceState,
     pub revision: i64,
 }
 
@@ -101,21 +109,103 @@ pub struct Snapshot {
     pub files: std::collections::BTreeMap<String, String>,
 }
 
-pub(crate) fn allowed_transition(from: &str, to: &str) -> bool {
-    matches!(
-        (from, to),
-        ("created", "starting")
-            | ("stopped", "starting")
-            | ("starting", "running")
-            | ("starting", "error")
-            | ("running", "paused")
-            | ("running", "stopping")
-            | ("running", "error")
-            | ("paused", "running")
-            | ("paused", "stopping")
-            | ("paused", "error")
-            | ("stopping", "stopped")
-            | ("stopping", "error")
-            | ("error", "starting")
-    )
+/// Persisted lifecycle state. Serde and SQLite retain the existing lowercase format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstanceState {
+    Created,
+    Starting,
+    Running,
+    Paused,
+    Stopping,
+    Stopped,
+    Error,
+}
+
+impl InstanceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Stopping => "stopping",
+            Self::Stopped => "stopped",
+            Self::Error => "error",
+        }
+    }
+    pub fn allows(self, next: Self) -> bool {
+        use InstanceState::*;
+        matches!(
+            (self, next),
+            (Created | Stopped | Error, Starting)
+                | (Starting, Running | Paused | Error)
+                | (Running, Paused | Stopping | Error)
+                | (Paused, Running | Stopping | Error)
+                | (Stopping, Stopped | Error)
+        )
+    }
+    pub fn from_qmp(status: &str) -> Result<Self> {
+        match status {
+            "running" => Ok(Self::Running),
+            "paused" | "prelaunch" => Ok(Self::Paused),
+            _ => Err(Error::Qmp(format!("unsupported QEMU status {status}"))),
+        }
+    }
+}
+impl std::fmt::Display for InstanceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl std::str::FromStr for InstanceState {
+    type Err = Error;
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "created" => Ok(Self::Created),
+            "starting" => Ok(Self::Starting),
+            "running" => Ok(Self::Running),
+            "paused" => Ok(Self::Paused),
+            "stopping" => Ok(Self::Stopping),
+            "stopped" => Ok(Self::Stopped),
+            "error" => Ok(Self::Error),
+            _ => Err(Error::Process(format!("unknown instance state {value:?}"))),
+        }
+    }
+}
+impl PartialEq<&str> for InstanceState {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+impl rusqlite::types::FromSql for InstanceState {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn deserialization_preserves_id_validation() {
+        for value in ["", "../escape", "Upper", "/absolute"] {
+            assert!(serde_json::from_value::<Id>(serde_json::json!(value)).is_err());
+        }
+        let id = Id::new("instance", "lab-01").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Id>(&serde_json::to_string(&id).unwrap()).unwrap(),
+            id
+        );
+    }
+    #[test]
+    fn starting_accepts_every_supported_initial_qmp_state() {
+        for status in ["running", "paused", "prelaunch"] {
+            assert!(InstanceState::Starting.allows(InstanceState::from_qmp(status).unwrap()));
+        }
+        assert!(!InstanceState::Error.allows(InstanceState::Running));
+    }
 }

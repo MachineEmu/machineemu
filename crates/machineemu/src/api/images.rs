@@ -66,7 +66,7 @@ pub(super) async fn get_image(
     })
     .await;
     match result {
-        Ok(image) => axum::Json(image).into_response(),
+        Ok(image) => documents::render_document(&headers, image),
         Err(error) => (
             StatusCode::NOT_FOUND,
             axum::Json(ErrorBody {
