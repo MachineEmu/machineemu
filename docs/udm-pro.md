@@ -5,9 +5,9 @@ The portable base and its default lab template live in
 `python3 scripts/import-udm-pro.py images/udm-pro`, then launch by name with
 `machineemu run udm-pro-lab udmlab`.
 
-The `udm-pro` profile boots a prepared UDM Pro firmware bundle using the
-`unifi-10.2` AArch64 engine. It follows the boot wiring in
-`unifi-qemu/config/udm-pro.yaml` and `scripts/run.sh`.
+The `udm-pro` template boots a prepared UDM Pro firmware bundle using the
+`unifi-10.2` AArch64 engine. Import creates a workspace template; the instance
+gets its own document when created.
 
 Build the Rust CLI and import the prepared bundle (not a vendor firmware
 update file):
@@ -25,9 +25,9 @@ local profile with their asset references. Firmware and host paths stay out
 of the catalog. Configure the `unifi-10.2` engine as described in
 [configuration](configuration.md).
 
-This initial profile boots offline, with four CPUs, 2 GiB RAM, and serial
-output in `machineemu-workspace/instances/udm01/serial.log`. The run command preserves profile networking by default; `--net none` can
-also explicitly disable it.
+This template boots offline, with four CPUs, 2 GiB RAM, and serial output in
+`machineemu-workspace/instances/udm01/serial.log`. The run command preserves
+template networking by default; `--net none` can explicitly disable it.
 It omits `-cpu` so the board retains the AL324 CPU identity, and omits the
 vendor DTB so QEMU supplies its matching device tree.
 
@@ -86,18 +86,9 @@ For this checkout's locally prepared engine wrapper, add:
   --qemu "$PWD/machineemu-workspace/udm-qemu"
 ```
 
-In a second terminal, run the simulated Bluetooth controller. Its sockets
-belong to this instance; stop the helper when the instance is stopped:
-
-```sh
-python3 scripts/compat/hci_simulator.py \
-  --socket "$PWD/machineemu-workspace/instances/udmlab/bluetooth.sock" \
-  --peer-socket "$PWD/machineemu-workspace/instances/udmlab/bt-peer.sock" \
-  --control "$PWD/machineemu-workspace/instances/udmlab/bt-control.sock" \
-  --address 00:1a:7d:da:71:15 --name 'UDM Pro lab'
-```
-
-The helper reconnects to QEMU automatically. The patched initramfs installs
+The daemon starts and stops the simulated Bluetooth helper with the instance.
+Its socket and control socket live under `instances/udmlab/`. The patched
+initramfs installs
 `qemu-btattach.service`, which runs `btattach -B /dev/ttyS1 -P h4`, and sets the
 `UDMPRO` Bluetooth shortname. The vendor BCSP/GPIO controller service remains
 masked. This is a simulated controller with simulated BLE peers; it does not
@@ -136,8 +127,7 @@ These commands read the local workspace selected by configuration or
 produced, so it also diagnoses failed starts. `--source serial`, `stderr`, or
 `stdout` selects an explicit stream; `-n` controls the number of lines.
 
-The UDM profiles now use `devices.serial=socket`, with output also saved to
+The UDM templates use `devices.serial=socket`, with output also saved to
 `serial.log`. Ctrl-C is forwarded to the guest; Ctrl-] disconnects without
-stopping QEMU. A run started with the earlier file-only profile cannot accept
-UART input: `serial` follows its log read-only until you restart the instance
-with the updated profile. Profile edits do not change a running QEMU process.
+stopping QEMU. Existing instances keep their saved launch settings; editing a
+shared template does not reconfigure them.

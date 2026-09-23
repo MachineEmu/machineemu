@@ -42,7 +42,6 @@ pub struct ServerConfig {
     pub listen: Option<String>,
     pub unix_socket: Option<PathBuf>,
     pub bearer_token: Option<String>,
-    pub launch_plans: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -373,7 +373,6 @@ mod tests {
         let state = AppState {
             workspace: Arc::new(Mutex::new(workspace)),
             bearer_token: Arc::from("secret"),
-            launch_plans: Arc::new(BTreeMap::new()),
             supervisors: Arc::new(Mutex::new(BTreeMap::new())),
             instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
 

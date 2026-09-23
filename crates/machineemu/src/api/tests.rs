@@ -44,7 +44,6 @@ fn bearer_auth_requires_exact_token() {
     let state = AppState {
         workspace: Arc::new(Mutex::new(Workspace::open(&root).unwrap())),
         bearer_token: Arc::from("secret"),
-        launch_plans: Arc::new(BTreeMap::new()),
         supervisors: Arc::new(Mutex::new(BTreeMap::new())),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
 
@@ -73,7 +72,6 @@ async fn api_routes_require_bearer_authentication() {
     let state = AppState {
         workspace: Arc::new(Mutex::new(Workspace::open(&root).unwrap())),
         bearer_token: Arc::from("secret"),
-        launch_plans: Arc::new(BTreeMap::new()),
         supervisors: Arc::new(Mutex::new(BTreeMap::new())),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
 
@@ -437,7 +435,6 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
     let state = AppState {
         workspace: Arc::new(Mutex::new(workspace)),
         bearer_token: Arc::from("secret"),
-        launch_plans: Arc::new(BTreeMap::new()),
         supervisors: Arc::new(Mutex::new(BTreeMap::new())),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
 
@@ -752,6 +749,52 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
             .state,
         "stopped"
     );
+    // Direct file edits invalidate an older API editor without a lifecycle change.
+    let document_path = root.join("instances/persist01/instance.json");
+    let mut direct: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&document_path).unwrap()).unwrap();
+    direct["launch_plan"]["argv"][2] = "sleep 4".into();
+    std::fs::write(&document_path, serde_json::to_vec(&direct).unwrap()).unwrap();
+    // No request-side plan can bypass the file.
+    let override_start = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/start",
+            serde_json::json!({"launch_plan": {}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(override_start.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    direct["launch_plan"]["argv"][2] = "printf from-instance-file; sleep 2".into();
+    direct["launch_plan"]["stdout"] = "instances/persist01/from-file.stdout".into();
+    std::fs::write(&document_path, serde_json::to_vec(&direct).unwrap()).unwrap();
+    let from_file = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/start",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(from_file.status(), StatusCode::OK);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if std::fs::read(root.join("instances/persist01/from-file.stdout")).unwrap_or_default()
+                == b"from-instance-file"
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let stopped_again = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/stop",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stopped_again.status(), StatusCode::OK);
     let stale = router(state.clone())
         .oneshot(put_config(yaml))
         .await
@@ -762,9 +805,10 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
             .workspace
             .lock()
             .unwrap()
-            .instance(&persistent_id)
+            .instance_document(&persistent_id)
             .unwrap()
-            .revision
+            .revision()
+            .unwrap()
     );
     let updated = router(state.clone())
         .oneshot(put_config(serde_yaml::to_string(&config).unwrap()))
@@ -954,7 +998,6 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
     let state = AppState {
         workspace: Arc::new(Mutex::new(workspace)),
         bearer_token: Arc::from("secret"),
-        launch_plans: Arc::new(BTreeMap::new()),
         supervisors: Arc::new(Mutex::new(running_map)),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
 

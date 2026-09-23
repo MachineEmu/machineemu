@@ -2,7 +2,6 @@ use super::client::ensure_daemon;
 use super::*;
 use machineemu_core::launch::{HelperSpec, LaunchContext, LaunchSpec};
 use sha2::{Digest, Sha256};
-use std::fs::OpenOptions;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum LaunchMode {
     Create,
@@ -17,6 +16,7 @@ pub(super) struct RunOptions<'a> {
     pub net: &'a str,
     pub vnc: &'a str,
     pub vnc_password_file: Option<&'a Path>,
+    pub h264: bool,
     pub external_qmp_socket: Option<&'a Path>,
     pub fresh: bool,
     pub auto_remove: bool,
@@ -28,6 +28,66 @@ pub(super) struct RunOptions<'a> {
     pub mac: Option<&'a str>,
     pub daemon: &'a str,
     pub token: &'a str,
+}
+
+pub(super) async fn create_from_document(
+    file: &Path,
+    workspace_root: &Path,
+    daemon: &str,
+    token: &str,
+    start: bool,
+    auto_remove: bool,
+) -> Result<(), machineemu_core::engine::Error> {
+    let mut value = load_document(file)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("revision");
+    }
+    let mut document: machineemu_core::storage::InstanceDocument = serde_json::from_value(value)
+        .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
+    if document.schema_version != 1 || document.launch_plan.is_none() {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "instance file requires schema_version 1 and a launch_plan".into(),
+        ));
+    }
+    Id::new("instance", document.instance_id.clone())
+        .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
+    if auto_remove {
+        document.auto_remove = true;
+    }
+    let id = document.instance_id.clone();
+    let (config, config_path) = machineemu_core::config::load_config(None)
+        .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+    let configured = config
+        .client
+        .as_ref()
+        .and_then(|c| c.workspace.clone())
+        .or_else(|| config.server.as_ref().and_then(|s| s.workspace.clone()));
+    let workspace = if workspace_root == Path::new("machineemu-workspace") {
+        configured
+            .map(|p| machineemu_core::config::resolve_config_path(config_path.as_deref(), p))
+            .unwrap_or_else(|| workspace_root.into())
+    } else {
+        workspace_root.into()
+    };
+    let (daemon, token) = effective_client(daemon, token)?;
+    ensure_daemon(&daemon, &token, &workspace).await?;
+    let value = serde_json::to_value(document)
+        .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
+    daemon_request(&daemon, &token, "POST", "/api/v2/instances", Some(value)).await?;
+    if start {
+        daemon_request(
+            &daemon,
+            &token,
+            "POST",
+            &format!("/api/v2/instances/{id}/start"),
+            Some(serde_json::json!({})),
+        )
+        .await?;
+        println!("started {id}");
+    } else {
+        println!("created {id}");
+    }
+    Ok(())
 }
 
 pub(super) async fn run_rust_owned(
@@ -42,6 +102,7 @@ pub(super) async fn run_rust_owned(
         net,
         vnc,
         vnc_password_file,
+        h264,
         external_qmp_socket,
         fresh,
         auto_remove,
@@ -90,6 +151,11 @@ pub(super) async fn run_rust_owned(
     .await
     .ok();
     let exists = existing.is_some();
+    if h264 && exists && !fresh {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--h264 for an existing instance requires --fresh".into(),
+        ));
+    }
     if mode == LaunchMode::Create && fresh {
         return Err(machineemu_core::engine::Error::Invalid(
             "create does not accept --fresh".into(),
@@ -100,9 +166,9 @@ pub(super) async fn run_rust_owned(
             "--rm is only valid with run".into(),
         ));
     }
-    if exists && (mode == LaunchMode::Create || auto_remove) {
+    if exists && (!fresh || mode == LaunchMode::Create || auto_remove) {
         return Err(machineemu_core::engine::Error::Invalid(format!(
-            "instance {instance} already exists"
+            "instance {instance} already exists; use start {instance}"
         )));
     }
     // The flag wins, then helpers.swtpm from the configuration; a relative
@@ -130,41 +196,9 @@ pub(super) async fn run_rust_owned(
             .and_then(|helpers| helpers.qemu_bridge_helper.clone()),
     );
     let instance_dir = workspace_root.join("instances").join(instance);
-    let instance_profile = instance_dir.join("profile.json");
-    let profile_path = if exists && !fresh && instance_profile.exists() {
-        instance_profile.clone()
-    } else {
-        resolve_profile_path(profile_name, &workspace_root)
-    };
-    let saved_config = if exists && !fresh {
-        Some(
-            daemon_request(
-                &daemon,
-                &token,
-                "GET",
-                &format!("/api/v2/instances/{instance}/config"),
-                None,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    let mut profile = match saved_config
-        .as_ref()
-        .and_then(|config| config.get("profile"))
-        .filter(|value| !value.is_null())
-    {
-        Some(profile) => profile.clone(),
-        None => load_document(&profile_path)?,
-    };
+    let profile_path = resolve_profile_path(profile_name, &workspace_root);
+    let mut profile = load_document(&profile_path)?;
     let selected_image = image
-        .or_else(|| {
-            (!fresh)
-                .then_some(existing.as_ref())
-                .flatten()
-                .and_then(|value| value["image_id"].as_str())
-        })
         .or_else(|| profile.get("image").and_then(serde_json::Value::as_str))
         .map(str::to_owned);
     let tpm_seed = selected_image
@@ -201,23 +235,27 @@ pub(super) async fn run_rust_owned(
         };
         profile_object.insert("network".into(), network);
     }
+    if h264 {
+        let devices = profile_object
+            .entry("devices")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                machineemu_core::engine::Error::Invalid("profile.devices must be a mapping".into())
+            })?;
+        devices.insert("h264".into(), serde_json::json!(true));
+        devices.insert("video".into(), serde_json::json!({"type": "virtio-vga-gl"}));
+        devices.insert("usb_tablet".into(), serde_json::json!(true));
+        // VNC's CLI override replaces the D-Bus display backend. H.264 mode
+        // needs dbus,p2p=on,gl=on for virtio-vga-gl, so disable profile VNC
+        // for this launch rather than producing an invalid mixed plan.
+        devices.insert("vnc".into(), serde_json::json!(false));
+    }
     let profile_id = profile_object
         .get("id")
         .and_then(|value| value.as_str())
         .ok_or_else(|| machineemu_core::engine::Error::Invalid("profile.id is required".into()))?
         .to_owned();
-    if exists
-        && !fresh
-        && existing
-            .as_ref()
-            .and_then(|value| value["profile_id"].as_str())
-            != Some(profile_id.as_str())
-    {
-        return Err(machineemu_core::engine::Error::Invalid(format!(
-            "{} has a different profile ID; edit its settings without changing profile.id or use --fresh",
-            instance_profile.display()
-        )));
-    }
     let image_id = profile_object
         .get("image")
         .and_then(|v| v.as_str())
@@ -396,12 +434,6 @@ pub(super) async fn run_rust_owned(
             helpers: sidecars,
         },
     )?;
-    if image.is_some()
-        && !fresh
-        && let Some(existing) = &existing
-    {
-        check_instance_image(existing, &image_id)?;
-    }
     if fresh && exists {
         let _ = daemon_request(
             &daemon,
@@ -429,9 +461,6 @@ pub(super) async fn run_rust_owned(
             Some(serde_json::json!({"instance_id":instance,"image_id":image_id,"profile_id":profile_id,"launch_plan":launch_plan.clone(),"auto_remove":auto_remove,"profile":saved_profile})),
         ).await?;
     }
-    if exists && !fresh && !instance_profile.exists() {
-        write_instance_profile(&instance_profile, &saved_profile)?;
-    }
     let suffix = format!(
         "{}-{}",
         std::process::id(),
@@ -444,9 +473,6 @@ pub(super) async fn run_rust_owned(
         println!("created {instance} using profile {profile_id}");
         return Ok(());
     }
-    if exists && !fresh {
-        eprintln!("machineemu: run on an existing instance is deprecated; use start {instance}");
-    }
     let started = daemon_request(
         &daemon,
         &token,
@@ -455,8 +481,7 @@ pub(super) async fn run_rust_owned(
         Some(serde_json::json!({
             "operation_id": format!("start-{suffix}"),
             "run_id": format!("run-{suffix}"),
-            "idempotency_key": format!("run-{suffix}"),
-            "launch_plan": if exists && !fresh { Some(launch_plan) } else { None }
+            "idempotency_key": format!("run-{suffix}")
         })),
     )
     .await;
@@ -643,30 +668,6 @@ fn planned_helpers(
     Ok(helpers)
 }
 
-fn write_instance_profile(
-    path: &Path,
-    profile: &serde_json::Value,
-) -> Result<(), machineemu_core::engine::Error> {
-    let bytes = serde_json::to_vec_pretty(profile)
-        .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| {
-            machineemu_core::engine::Error::Invalid(format!(
-                "cannot create instance settings {}: {error}",
-                path.display()
-            ))
-        })?;
-    file.write_all(&bytes).map_err(|error| {
-        machineemu_core::engine::Error::Invalid(format!(
-            "cannot write instance settings {}: {error}",
-            path.display()
-        ))
-    })
-}
-
 fn prepare_external_qmp_socket(
     requested: &Path,
     internal: &Path,
@@ -725,18 +726,6 @@ fn prepare_external_qmp_socket(
         Err(error) => return Err(invalid(format!("cannot check QMP socket path: {error}"))),
     }
     Ok(path)
-}
-
-fn check_instance_image(
-    existing: &serde_json::Value,
-    image_id: &str,
-) -> Result<(), machineemu_core::engine::Error> {
-    if existing["image_id"].as_str() != Some(image_id) {
-        return Err(machineemu_core::engine::Error::Invalid(format!(
-            "instance uses a different image; choose a new instance name or use --fresh to recreate it with {image_id:?}"
-        )));
-    }
-    Ok(())
 }
 
 fn bind_image(
@@ -894,31 +883,6 @@ mod tests {
     }
 
     #[test]
-    fn instance_profile_preserves_user_edits() {
-        let directory = std::env::temp_dir().join(format!(
-            "machineemu-instance-profile-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("profile.json");
-        write_instance_profile(
-            &path,
-            &serde_json::json!({"id":"analysis", "resources":{"memory":"8GiB"}}),
-        )
-        .unwrap();
-        let mut edited = load_document(&path).unwrap();
-        edited["resources"]["memory"] = serde_json::json!("12GiB");
-        fs::write(&path, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
-        assert!(write_instance_profile(&path, &serde_json::json!({"id":"analysis"})).is_err());
-        assert_eq!(
-            load_document(&path).unwrap()["resources"]["memory"],
-            "12GiB"
-        );
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn external_qmp_path_is_separate_and_cannot_replace_an_existing_file() {
         let root = std::env::temp_dir().join(format!(
             "machineemu-external-qmp-{}-{}",
@@ -1058,15 +1022,23 @@ mod tests {
     }
 
     #[test]
-    fn existing_instance_cannot_silently_change_image() {
-        let existing = serde_json::json!({"image_id": "win11-dev"});
-        assert!(check_instance_image(&existing, "win11-dev").is_ok());
+    fn complete_instance_file_does_not_require_a_template() {
+        assert!(Cli::try_parse_from(["machineemu", "create", "--file", "instance.yaml"]).is_ok());
         assert!(
-            check_instance_image(&existing, "other")
-                .unwrap_err()
-                .to_string()
-                .contains("--fresh")
+            Cli::try_parse_from(["machineemu", "run", "--file", "instance.json", "--rm"]).is_ok()
         );
+        assert!(
+            Cli::try_parse_from([
+                "machineemu",
+                "create",
+                "--file",
+                "instance.yaml",
+                "--net",
+                "user"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["machineemu", "create"]).is_err());
     }
 
     #[test]

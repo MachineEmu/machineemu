@@ -49,9 +49,8 @@ machineemu rm INSTANCE
 
 `machineemu run PROFILE INSTANCE` combines create and start. For a disposable
 VM, `machineemu run --rm PROFILE INSTANCE` removes the new instance after its
-terminal run and helper cleanup; it refuses an existing instance. `run` on an
-existing stopped instance remains available temporarily and prints a
-deprecation message. See [instance lifecycle](docs/operations/instance-lifecycle.md).
+terminal run and helper cleanup; it refuses an existing instance. Use `start`
+for an existing stopped instance. See [instance lifecycle](docs/operations/instance-lifecycle.md).
 
 For a VNC-enabled profile, set `devices.vnc` to `{"port":"auto"}` or
 `{"port":5901}`. `machineemu run PROFILE INSTANCE --vnc auto` overrides the
@@ -66,7 +65,7 @@ libgcrypt, GnuTLS, or Nettle before using this option.
 
 `console.uart: true` enables an interactive socket at the instance's
 `serial.sock`; connect with `machineemu serial INSTANCE`. A running instance
-must be restarted for profile or port changes to take effect.
+must be restarted for saved launch-setting changes to take effect.
 
 `machineemu inspect INSTANCE` shows what an instance is running: the QEMU and
 helper processes (swtpm), every socket they listen on or have connected, with
@@ -100,34 +99,34 @@ and fit the Unix socket path limit. Give the printed path to the external
 QMP client; it must perform the normal QMP capability negotiation. The socket
 is created on launch, so existing runs need a restart to get one.
 
-Each instance has a saved profile and resolved launch plan. Use
-`machineemu show instance INSTANCE` to export them as YAML, then
-`machineemu update instance INSTANCE --file instance.yaml` while it is stopped.
-The same commands accept `profile` and `image`; see
-[document operations](docs/operations/config-documents.md).
-SQLite commits the instance profile, plan and revision together. The file at
-`<workspace>/instances/<instance>/profile.json` is a derived helper cache.
-`machineemu start INSTANCE` uses the saved launch plan; changing the profile in
-the document does not automatically replan it. Use `machineemu run` during the
-compatibility period to replan an existing stopped instance explicitly.
-Shared catalog edits do not change existing instances. `--fresh --image IMAGE`
-removes the instance and creates new settings from the selected shared profile.
+Each instance owns an editable `<workspace>/instances/<instance>/instance.json`
+(or `instance.yaml`) with its copied settings, resolved launch plan, helpers and
+asset paths. `start` reads this file each time. Profiles are optional creation
+templates; `machineemu create --file instance.yaml` accepts a complete instance
+configuration without a shared profile. `show instance` and `update instance`
+read and edit the same document. See [document operations](docs/operations/config-documents.md).
+
+Opening an old workspace exports its SQLite profile/plan records to instance
+files once, then removes the legacy configuration tables. For a standalone
+export, stop the old daemon and run `machineemu migrate-instances`. Missing or
+invalid files are errors; there is no database or template fallback. The
+resolved `launch_plan` controls QEMU; editing copied `profile` values alone does
+not regenerate it. `--fresh --image IMAGE` removes and recreates an instance
+from its selected creation template.
 
 Tests require `qemu-img` for overlay preparation. See the
 [crate map](crates/README.md) for module boundaries and validation commands.
 
-The migration is in progress. Python and the existing browser remain in the
-repository while Rust replacement gates are completed; the Rust pilot is not
-yet a full runtime cutover.
+The Rust daemon and CLI own instances. The browser still uses the earlier API
+contract and has not moved to API v2.
 
 ## Documentation
 
 - [Configuration](docs/configuration.md)
+- [Instance files and templates](docs/operations/config-documents.md)
+- [Instance lifecycle](docs/operations/instance-lifecycle.md)
 - [Image store and portable bundles](docs/image-store.md)
 - [Analysis firmware](docs/analysis-firmware.md)
-- [Domain model](docs/domain-model.md)
-- [Rust migration plan](docs/migration/rust.md)
-- [First usable milestone](docs/migration/rust-first-milestone.md)
 
 Build and test this repository without a sibling checkout. Engine installations
 are explicit; releases record the engine build digest in `release-set.json`.

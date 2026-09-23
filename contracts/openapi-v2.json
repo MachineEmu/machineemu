@@ -2095,8 +2095,7 @@
         "type": "object",
         "required": [
           "instance_id",
-          "image_id",
-          "profile_id"
+          "image_id"
         ],
         "properties": {
           "auto_remove": {
@@ -2272,6 +2271,7 @@
       "InstanceConfig": {
         "type": "object",
         "required": [
+          "schema_version",
           "instance_id",
           "image_id",
           "profile_id",
@@ -2299,6 +2299,11 @@
           "revision": {
             "type": "integer",
             "format": "int64"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -2604,16 +2609,6 @@
               "null"
             ]
           },
-          "launch_plan": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/LaunchSpec"
-              }
-            ]
-          },
           "operation_id": {
             "type": [
               "string",
@@ -2626,7 +2621,8 @@
               "null"
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "StateEvent": {
         "allOf": [

@@ -38,8 +38,10 @@ engines:
 `engines.<track>.path` may point directly to a QEMU executable or to a build
 directory containing the executable for its `target`. When `machineemu run` is invoked
 without an explicit `--qemu`, it selects the engine matching the profile's
-`engine.track`, then falls back to `system`. `build_digest` is optional and
-can be added after a QEMU rebuild when the build should be pinned.
+`engine.track`, then falls back to `system`. This choice is saved in the new
+instance's launch plan; changing an engine setting does not replan existing
+instances. `build_digest` is optional and can be added after a QEMU rebuild
+when the build should be pinned.
 
 An engine without `target` is a multi-target engine. The system entry above
 selects `/run/current-system/sw/bin/qemu-system-<architecture>` from the
@@ -58,7 +60,8 @@ helpers:
 ```
 
 `machineemu run --swtpm`, or `MACHINEEMU_SWTPM` in its environment, overrides
-the configured value for one run. A relative configured path is read against
+the configured value when creating the instance. Its resolved helper command
+is saved with that instance. A relative configured path is read against
 the configuration file, as engine paths are. When the helper cannot be started
 the run is rejected with the executable that was not found, so a host that
 never installed swtpm says so instead of reporting a missing file.

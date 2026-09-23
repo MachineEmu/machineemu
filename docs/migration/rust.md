@@ -1,12 +1,10 @@
-# Rust migration plan
+# Historical Rust migration design
 
-Date: 2026-09-21. Status: migration in progress; planner and runtime foundations
-are implemented. The full-migration gates below remain acceptance criteria.
-
-For initial delivery, follow the [first usable milestone](rust-first-milestone.md).
-It takes precedence for first-milestone scope and implementation order. This
-document defines the destination architecture and full-migration gates; completing
-all of it is not a prerequisite for piloting one machine under Rust.
+Date: 2026-09-21. This is the original design record, not current setup or
+operation guidance. Its Python references, implementation order, and proposed
+contracts describe the state at the time it was written. For current behavior,
+use the [crate map](../../crates/README.md), [instance configuration](../operations/config-documents.md),
+and [instance lifecycle](../operations/instance-lifecycle.md).
 Begin with a direct port of the existing YAML/JSON configuration resolver and
 QEMU argument generator, before new domain schemas, persistence or daemon work.
 Existing authored configuration is the initial planner input; the product API

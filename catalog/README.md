@@ -1,13 +1,16 @@
 # MachineEmu catalog
 
-Profiles live in `profiles/` and contain redistributable launch metadata only.
+Profiles live in `profiles/` and are optional creation templates. They contain
+redistributable launch metadata only. Each created instance keeps its own
+resolved settings in `instances/<id>/instance.json` (or YAML); later template
+edits do not change it.
 They refer to engine tracks, logical asset identifiers, resources, devices, and
 policy. Firmware, prepared disks, credentials, and host-specific paths remain
 external and must be imported through the asset boundary with content hashes.
 
-A profile may be written as JSON (`.json`) or YAML (`.yaml`, `.yml`); the file
-name is the profile ID, and the same ID must not appear in two formats. Reading
-YAML needs the `yaml` extra.
+Named catalog and workspace profiles use JSON (`<id>.json`). An explicit
+profile path may point to a YAML (`.yaml` or `.yml`) file. The selected
+profile's `id` supplies template provenance in the instance document.
 
 `devices.nic` names the NIC model and `devices.mac` may pin its address. A
 profile that pins one is asserting an identity every instance launched from it
@@ -33,7 +36,8 @@ copy digest-named files from the internal workspace store by hand.
 `udm-pro-lab.json` extends the UDM Pro boot wiring with WAN on `br0`,
 SFP+ LAN on `br10`, an emulated LCD, and the H4 Bluetooth UART. Import it with
 `--profile udm-pro-lab` to include the guest Bluetooth attachment hook.
-The host simulator is started separately; see the boot instructions below.
+The Rust daemon starts the host simulator with the instance; see the
+[boot instructions](../docs/udm-pro.md).
 
 `udm-pro.json` is the minimal Rust boot profile. See [UDM Pro boot](../docs/udm-pro.md)
 for importing its prepared firmware and starting an offline instance.

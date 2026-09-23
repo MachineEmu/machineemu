@@ -1,12 +1,12 @@
 # Proposed domain model
 
-Status: migration design, 2026-09-21. This defines the intended vocabulary;
-the current API and manifests have not yet been migrated. The detailed
-[Rust migration plan](migration/rust.md) applies these definitions with a clean
-API break; backward-compatible endpoints are not required.
+Status: proposed architecture from 2026-09-21. This is a design record, not
+the current API or manifest contract. See [instance configuration](operations/config-documents.md)
+and [image storage](image-store.md) for implemented behavior. The related
+[migration design](migration/rust.md) is also historical.
 
 The three primary objects are **device model**, **image**, and **instance**.
-Execution is represented separately by a **run** (currently called a session).
+Execution is represented separately by a **run**.
 
 | Object | Question it answers | Examples | Ownership |
 | --- | --- | --- | --- |
@@ -176,22 +176,7 @@ Operator policy remains authoritative over preset defaults. Runtime host paths,
 credentials, sockets and allocated resources are resolved separately from
 portable model/image metadata.
 
-## Mapping from the current project
-
-- `catalog/profiles/*.json` currently mixes model, image requirements, defaults,
-  and policy. Split these responsibilities logically before introducing new
-  storage systems. Keep profiles as presets where useful.
-- `/devices` currently projects profiles and groups sessions by profile ID.
-  Replace that interpretation with a model catalog; make instances first-class
-  resources and link execution history to instance IDs.
-- Firmware bundle manifests and asset digests are the foundation for images.
-  Add explicit component roles, compatibility and initialization semantics.
-- `InstanceStore` is the foundation for instances, but it must own the complete
-  machine-state inventory and immutable creation references.
-- `SessionStore` becomes run history/runtime metadata. Each process start gets
-  a new run ID. Update the API, CLI and browser together; this is a behavior
-  change, not just a class rename.
-
-The intended user flow is: **choose a device model → select a compatible image →
-configure and create an instance → start/stop that instance → inspect its runs**.
-This model works in Python and provides a clear boundary for a later Rust port.
+The intended future flow is: **choose a device model → select a compatible
+image → configure and create an instance → start/stop it → inspect its runs**.
+The current CLI uses optional profiles as creation templates and saves each
+instance's resolved configuration in its own JSON/YAML document.

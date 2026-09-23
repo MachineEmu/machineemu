@@ -1,6 +1,7 @@
 use super::*;
 pub(super) use machineemu_core::launch::{HelperSpec, LaunchSpec, PreparationSpec};
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct StartInstance {
     #[serde(default)]
     pub(super) operation_id: Option<String>,
@@ -8,8 +9,6 @@ pub(super) struct StartInstance {
     pub(super) run_id: Option<String>,
     #[serde(default)]
     pub(super) idempotency_key: Option<String>,
-    #[serde(default)]
-    pub(super) launch_plan: Option<LaunchSpec>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -27,6 +26,7 @@ pub(super) struct CloneSnapshot {
 pub(super) struct CreateInstance {
     pub(super) instance_id: String,
     pub(super) image_id: String,
+    #[serde(default = "custom_profile_id")]
     pub(super) profile_id: String,
     #[serde(default)]
     pub(super) launch_plan: Option<LaunchSpec>,
@@ -59,4 +59,8 @@ pub(super) struct InstanceStatus {
     pub(super) ip: Option<String>,
     pub(super) configured: bool,
     pub(super) auto_remove: bool,
+}
+
+fn custom_profile_id() -> String {
+    "custom".into()
 }

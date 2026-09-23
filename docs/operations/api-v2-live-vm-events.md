@@ -5,7 +5,8 @@
 After `POST /api/v2/instances/{id}/stop` reaches `stopped`, call
 `POST /api/v2/instances/{id}/start` with `{}` to use the saved launch plan and
 let the daemon generate a new `run_id`, `operation_id`, and `idempotency_key`.
-Existing clients may continue to supply these IDs and an inline `launch_plan`.
+Clients may supply these IDs. Launch settings always come from the instance
+document; an inline `launch_plan` is rejected.
 The old run remains in history and its disk, NVRAM, and TPM state are reused.
 `machineemu start INSTANCE` starts an existing stopped instance. The combined
 `POST /api/v2/instances/{id}/restart` route and `machineemu restart INSTANCE`

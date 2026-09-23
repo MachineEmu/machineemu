@@ -638,6 +638,23 @@ pub(super) fn append_devices(
         Some(Value::Bool(value)) => *value,
         _ => return Err(invalid("profile.devices.h264 must be a boolean")),
     };
+    let usb_tablet = match devices.get("usb_tablet") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(invalid("profile.devices.usb_tablet must be a boolean")),
+    };
+    if usb_tablet {
+        // The D-Bus display's SetAbsPosition method requires an absolute
+        // pointing device; the default PS/2 mouse is relative.
+        // q35 does not necessarily create a usable USB bus by itself, so
+        // create an explicit xHCI controller and attach the tablet to it.
+        argv.extend([
+            "-device".into(),
+            "qemu-xhci,id=usb".into(),
+            "-device".into(),
+            "usb-tablet,bus=usb.0".into(),
+        ]);
+    }
     if h264 {
         let video_model = devices
             .get("video")

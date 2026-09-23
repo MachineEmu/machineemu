@@ -158,24 +158,14 @@ async fn start_instance_with_lock(
                 .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
             owner.attach()?
         };
-        let instance = workspace.instance(&instance_id)?;
-        workspace.materialize_instance_profile(&instance_id)?;
-        let plan = if let Some(plan) = &input.launch_plan {
-            plan.clone()
-        } else if let Some((saved, _)) = workspace.instance_launch(&instance_id)? {
-            serde_json::from_str::<LaunchSpec>(&saved)?
-        } else {
-            state
-                .launch_plans
-                .get(instance.profile_id.as_str())
-                .cloned()
-                .ok_or_else(|| {
-                    RuntimeError::Process(format!(
-                        "no saved launch plan for instance {}",
-                        instance_id.as_str()
-                    ))
-                })?
-        };
+        let document = workspace.instance_document(&instance_id)?;
+        workspace.materialize_document_profile(&document)?;
+        let plan: LaunchSpec = serde_json::from_value(document.launch_plan.ok_or_else(|| {
+            RuntimeError::Process(format!(
+                "instance {} has no launch plan in its document",
+                instance_id.as_str()
+            ))
+        })?)?;
         let (qmp, stdout, stderr) = plan_paths(workspace.root(), &plan)?;
         let workspace_root = workspace.root().to_owned();
         if let Some(preparation) = &plan.preparation {
@@ -321,15 +311,6 @@ async fn start_instance_with_lock(
             }
         }
         let publication = (|| -> Result<_, RuntimeError> {
-            if input.launch_plan.is_some() {
-                workspace.save_instance_launch(
-                    &instance_id,
-                    &serde_json::to_string(&plan)?,
-                    workspace
-                        .instance_launch(&instance_id)?
-                        .is_some_and(|(_, auto_remove)| auto_remove),
-                )?;
-            }
             workspace.save_run_helpers(&run_id, &helpers)?;
             let result = workspace.instance(&instance_id)?;
             let completed = workspace.complete_operation(
@@ -524,7 +505,6 @@ pub(super) async fn restart_instance(
             operation_id: None,
             run_id: None,
             idempotency_key: None,
-            launch_plan: None,
         },
         true,
     )

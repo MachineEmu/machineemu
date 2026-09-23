@@ -1,6 +1,6 @@
 # Rust API v2: guest command execution
 
-The VM profile must enable `devices.guest_agent: true`, and the QEMU guest
+The instance must have been created with `devices.guest_agent: true`, and the QEMU guest
 agent must be running inside the guest. Command execution uses QGA
 `guest-exec`, as in `vmmanager-sh/src/vm-exec`.
 Guest-agent calls and polling use Tokio Unix sockets and timers. The daemon

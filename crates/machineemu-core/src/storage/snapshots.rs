@@ -216,19 +216,48 @@ impl Workspace {
     ) -> Result<Instance> {
         let snapshot = self.snapshot(snapshot_id)?;
         let source_instance = self.instance(&snapshot.instance_id)?;
-        let instance = self.create_instance(instance_id, source_instance.image_id, profile_id)?;
-        if let Err(error) = self.restore_snapshot(snapshot_id, destination) {
-            let _ = self.db.execute(
-                "DELETE FROM instances WHERE instance_id = ?1",
-                params![instance.instance_id.as_str()],
+        // Restore before creating metadata: creation now publishes instance.json.
+        self.restore_snapshot(snapshot_id, destination)?;
+        let owned = self.root.join("instances").join(instance_id.as_str());
+        if destination == owned {
+            // A clone must never launch the source machine's saved paths or identity.
+            for name in [
+                "instance.json",
+                "instance.yaml",
+                "instance.yml",
+                "profile.json",
+            ] {
+                let path = destination.join(name);
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => return Err(Error::Io { path, source }),
+                }
+            }
+            // publish_prepared_instance accepts only a private staging directory.
+            let staged = self.root.join("staging").join(format!(
+                "clone-{}-{}",
+                instance_id.as_str(),
+                std::process::id()
+            ));
+            fs::rename(destination, &staged).map_err(|source| Error::Io {
+                path: staged.clone(),
+                source,
+            })?;
+            let result = self.publish_prepared_instance(
+                instance_id,
+                source_instance.image_id,
+                profile_id,
+                &staged,
+                "null",
+                false,
             );
-            let _ = fs::remove_dir_all(
-                self.root
-                    .join("instances")
-                    .join(instance.instance_id.as_str()),
-            );
-            return Err(error);
+            if result.is_err() {
+                let _ = fs::rename(&staged, destination);
+            }
+            return result;
         }
+        let instance = self.create_instance(instance_id, source_instance.image_id, profile_id)?;
         Ok(instance)
     }
 }

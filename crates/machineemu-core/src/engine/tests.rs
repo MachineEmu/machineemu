@@ -34,7 +34,7 @@ fn h264_plan_uses_dbus_display_and_keeps_raw_vnc() {
     let mut argv = Vec::new();
     append_devices(
         &mut argv,
-        Some(&serde_json::json!({"vnc": true, "h264": true, "video": {"type":"virtio-vga-gl"}})),
+        Some(&serde_json::json!({"vnc": true, "h264": true, "usb_tablet": true, "video": {"type":"virtio-vga-gl"}})),
         None,
         Path::new("/tmp/machineemu-test-instance"),
     )
@@ -46,6 +46,14 @@ fn h264_plan_uses_dbus_display_and_keeps_raw_vnc() {
     assert!(
         argv.windows(2)
             .any(|args| args == ["-device", "virtio-vga-gl,id=me-video"])
+    );
+    assert!(
+        argv.windows(2)
+            .any(|args| args == ["-device", "qemu-xhci,id=usb"])
+    );
+    assert!(
+        argv.windows(2)
+            .any(|args| args == ["-device", "usb-tablet,bus=usb.0"])
     );
     assert!(argv.windows(2).any(|args| args
         == [

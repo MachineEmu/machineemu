@@ -16,13 +16,13 @@ machineemu restart INSTANCE
 machineemu rm INSTANCE
 ```
 
-`machineemu run PROFILE INSTANCE` combines create and start. Existing stopped
-instances can still be passed to `run` during the CLI transition; the CLI warns
-and explicitly replans them. Prefer `start INSTANCE` for normal restarts.
+`machineemu run PROFILE INSTANCE` combines create and start and requires a new
+instance. Use `start INSTANCE` for normal restarts. `create --file instance.yaml`
+and `run --file instance.yaml` accept complete configurations without a template.
 `--fresh` on `run` explicitly deletes and recreates an existing instance.
 
-`machineemu run --rm PROFILE INSTANCE` requires a new instance. The daemon
-records `auto_remove` with its saved plan and deletes the instance after an
+`machineemu run --rm PROFILE INSTANCE` requires a new instance. The instance
+document records `auto_remove` with its saved plan. The daemon deletes it after an
 operator stop, guest shutdown, or QEMU exit once QEMU and helper cleanup has
 completed. A failed start also removes the disposable instance when no run
 remains active. If cleanup fails, the instance is retained for investigation.
@@ -32,13 +32,13 @@ leaves a small tombstone at `GET /api/v2/instances/{id}/tombstone` containing
 the last run ID, removal reason, and timestamp.
 
 The API equivalents are `POST /api/v2/instances` with `instance_id`,
-`image_id`, `profile_id`, and `launch_plan`, optionally `auto_remove:true` and
-the resolved `profile` JSON;
+`image_id`, and `launch_plan`, optionally `profile_id` (default `custom`),
+`auto_remove:true`, and the resolved `profile` JSON;
 `POST /api/v2/instances/{id}/start` with `{}`; and the `stop`, `restart`, and
-`DELETE /api/v2/instances/{id}` routes. Old clients can create a metadata-only
-instance and send an inline plan at start. A bare start needs a saved plan or
-a daemon configured profile plan. Caller-supplied run and operation IDs remain
-accepted for compatibility. Start and restart responses include the generated
+`DELETE /api/v2/instances/{id}` routes. Start requires a launch plan in the
+instance's JSON/YAML document. Inline start plans and daemon profile launch maps
+are no longer accepted. Callers can still supply run and operation IDs. Start
+and restart responses include the generated
 `run_id` and `operation_id` alongside the instance fields. A local VNC port is
 checked again at each start. For an automatically selected port, Start chooses
 a currently free port and returns it as `vnc_port`.

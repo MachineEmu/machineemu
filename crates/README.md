@@ -1,9 +1,7 @@
 # Rust workspace
 
-The main application follows the two-package boundary in
-[the Rust migration plan](../docs/migration/rust.md). The
-[first usable milestone](../docs/migration/rust-first-milestone.md) still controls
-implementation order.
+The application has two Rust packages: `machineemu-core` for planning, storage,
+and runtime services, and `machineemu` for the CLI and daemon.
 
 | Package/module | Responsibility |
 | --- | --- |
@@ -56,9 +54,10 @@ implementation. Per-instance gates serialize mutations, while a per-run
 supervisor owns the QMP connection, helpers, display process and watcher state.
 Control requests and event polling share that QMP connection.
 
-SQLite owns the instance profile, launch plan and revision. Existing profile
-files are imported during workspace migration; `profile.json` becomes a derived
-helper cache. Configuration replacement commits all three values together.
+Each instance JSON/YAML file owns its configuration. Migration exports the old
+SQLite profile and plan records, then drops those tables. `profile.json` is a
+derived helper input. Atomic file replacement commits configuration changes;
+content revisions detect direct edits as well as API edits.
 Instance deletion commits its metadata changes and a cleanup record together;
 retry or workspace reopen completes filesystem cleanup before an ID is reused.
 

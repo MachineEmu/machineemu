@@ -18,10 +18,15 @@ use machineemu_core::{domain::Id, storage::Workspace};
 
 #[derive(Debug, clap::Args)]
 struct LaunchArgs {
-    /// Named profile or profile file.
-    profile: String,
-    /// Instance ID.
-    instance: String,
+    /// Optional creation template (name or file); omitted with --file.
+    #[arg(required_unless_present = "file")]
+    profile: Option<String>,
+    /// Instance ID; a complete --file supplies its own ID.
+    #[arg(required_unless_present = "file")]
+    instance: Option<String>,
+    /// Create directly from a complete instance JSON/YAML document.
+    #[arg(long, conflicts_with_all = ["profile", "instance", "image", "seed", "vnc_password_file", "h264", "qmp_socket", "mac", "swtpm", "bridge_helper", "net", "vnc", "qemu"])]
+    file: Option<PathBuf>,
     /// Registered image to use for disk and firmware state.
     #[arg(long)]
     image: Option<String>,
@@ -40,6 +45,9 @@ struct LaunchArgs {
     /// File containing a VNC password.
     #[arg(long)]
     vnc_password_file: Option<PathBuf>,
+    /// Enable the D-Bus H.264 display with an absolute USB tablet.
+    #[arg(long)]
+    h264: bool,
     /// External QMP relay socket path.
     #[arg(long)]
     qmp_socket: Option<PathBuf>,
@@ -86,14 +94,15 @@ impl LaunchArgs {
         auto_remove: bool,
     ) -> launch::RunOptions<'_> {
         launch::RunOptions {
-            profile_name: &self.profile,
-            instance: &self.instance,
+            profile_name: self.profile.as_deref().unwrap_or_default(),
+            instance: self.instance.as_deref().unwrap_or_default(),
             image: self.image.as_deref(),
             force: self.force,
             seed: self.seed.as_deref(),
             net: &self.net,
             vnc: &self.vnc,
             vnc_password_file: self.vnc_password_file.as_deref(),
+            h264: self.h264,
             external_qmp_socket: self.qmp_socket.as_deref(),
             fresh,
             auto_remove,
@@ -141,6 +150,11 @@ enum Command {
         daemon: String,
         #[arg(long, default_value = "machineemu-dev-token")]
         token: String,
+    },
+    /// Export old instance configuration to files and remove legacy SQLite config.
+    MigrateInstances {
+        #[arg(long, default_value = "machineemu-workspace")]
+        workspace: PathBuf,
     },
     /// Migrate legacy SQLite image metadata to editable images/<id>/manifest.json files.
     MigrateImages {
@@ -437,6 +451,14 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
             daemon_request(&daemon, &token, "PUT", &kind.path(&id), Some(document)).await?;
             println!("updated {kind:?} {id}");
         }
+        Command::MigrateInstances { workspace } => {
+            let workspace = Workspace::open(workspace)
+                .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+            println!(
+                "instance documents: {}",
+                workspace.root().join("instances").display()
+            );
+        }
         Command::MigrateImages { workspace } => {
             let workspace = Workspace::open(workspace)
                 .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
@@ -554,14 +576,43 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
             }
         }
         Command::Create(args) => {
-            run_rust_owned(args.options(launch::LaunchMode::Create, false, false)).await?
+            if let Some(file) = &args.file {
+                launch::create_from_document(
+                    file,
+                    &args.workspace,
+                    &args.daemon,
+                    &args.token,
+                    false,
+                    false,
+                )
+                .await?;
+            } else {
+                run_rust_owned(args.options(launch::LaunchMode::Create, false, false)).await?;
+            }
         }
         Command::Run(args) => {
-            run_rust_owned(
-                args.launch
-                    .options(launch::LaunchMode::Run, args.fresh, args.rm),
-            )
-            .await?
+            if let Some(file) = &args.launch.file {
+                if args.fresh {
+                    return Err(machineemu_core::engine::Error::Invalid(
+                        "--fresh cannot be combined with --file".into(),
+                    ));
+                }
+                launch::create_from_document(
+                    file,
+                    &args.launch.workspace,
+                    &args.launch.daemon,
+                    &args.launch.token,
+                    true,
+                    args.rm,
+                )
+                .await?;
+            } else {
+                run_rust_owned(
+                    args.launch
+                        .options(launch::LaunchMode::Run, args.fresh, args.rm),
+                )
+                .await?;
+            }
         }
         Command::Start {
             instance,

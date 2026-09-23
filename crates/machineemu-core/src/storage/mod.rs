@@ -9,6 +9,7 @@ use std::{
 };
 mod blobs;
 mod configuration;
+pub use configuration::InstanceDocument;
 mod images;
 mod instances;
 mod lock;
@@ -98,7 +99,7 @@ impl Workspace {
             "PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
              INSERT INTO schema_version(version)
-               SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
+               SELECT 3 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
              CREATE TABLE IF NOT EXISTS images (
                image_id TEXT PRIMARY KEY
              );
@@ -109,15 +110,6 @@ impl Workspace {
                lifecycle TEXT NOT NULL,
                revision INTEGER NOT NULL DEFAULT 1,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-             );
-             CREATE TABLE IF NOT EXISTS instance_launch (
-               instance_id TEXT PRIMARY KEY REFERENCES instances(instance_id),
-               plan_json TEXT NOT NULL,
-               auto_remove INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE IF NOT EXISTS instance_configuration (
-               instance_id TEXT PRIMARY KEY REFERENCES instances(instance_id),
-               profile_json TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS pending_instance_deletions (
                instance_id TEXT PRIMARY KEY
@@ -188,7 +180,7 @@ impl Workspace {
         })?;
         self.migrate_image_manifests()?;
         self.reconcile_instance_deletions()?;
-        self.migrate_instance_profiles()?;
+        self.migrate_instance_documents()?;
         Ok(())
     }
 }

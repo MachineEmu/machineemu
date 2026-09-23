@@ -195,6 +195,12 @@ pub struct App {
     frame: Option<Frame>,
     cursor: Option<Cursor>,
     pointer_in_view: bool,
+    /// Last guest position reported by the host pointer.
+    ///
+    /// A winit click is not guaranteed to be preceded by a CursorMoved event
+    /// in the same event batch. Keep this so a button press can re-establish
+    /// QEMU's absolute pointer position before sending the button event.
+    pointer_position: Option<(u32, u32)>,
     /// Guest display size from the latest video configuration.
     source: Option<(u32, u32)>,
     sized_to_guest: bool,
@@ -235,6 +241,7 @@ impl App {
             frame: None,
             cursor: None,
             pointer_in_view: false,
+            pointer_position: None,
             source: None,
             sized_to_guest: false,
             decoder: None,
@@ -533,6 +540,7 @@ impl ApplicationHandler<UiEvent> for App {
                     .zip(self.source_size())
                     .and_then(|(view, source)| view.guest_position(source, position.x, position.y));
                 self.pointer_in_view = guest_position.is_some();
+                self.pointer_position = guest_position;
                 if let Some(window) = &self.window {
                     window.set_cursor_visible(
                         !(self.options.control
@@ -556,6 +564,9 @@ impl ApplicationHandler<UiEvent> for App {
                 };
                 match state {
                     ElementState::Pressed => {
+                        if let Some((x, y)) = self.pointer_position {
+                            self.control(message::mouse_abs(x, y));
+                        }
                         self.buttons.insert(button);
                         self.control(message::mouse_button(button, true));
                     }

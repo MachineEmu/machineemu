@@ -1305,24 +1305,34 @@ fn configuration_commit_is_atomic_and_rebuilds_profile_cache() {
             false,
         )
         .unwrap();
-    let db = rusqlite::Connection::open(root.join("metadata.sqlite3")).unwrap();
-    db.execute_batch("CREATE TRIGGER reject_config BEFORE UPDATE ON instance_launch BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;").unwrap();
+    let revision = workspace
+        .instance_document(&id)
+        .unwrap()
+        .revision()
+        .unwrap();
     let changed = serde_json::json!({"id":"profile01", "memory":"2G"});
+    // A stale editor must not replace the file, even after a direct disk edit.
+    let path = workspace.instance_document_path(&id).unwrap();
+    let original_bytes = fs::read(&path).unwrap();
+    let mut edited: serde_json::Value = serde_json::from_slice(&original_bytes).unwrap();
+    edited["profile"]["memory"] = "3G".into();
+    fs::write(&path, serde_json::to_vec(&edited).unwrap()).unwrap();
     assert!(
         workspace
-            .replace_instance_configuration(&id, 1, "{\"changed\":true}", false, Some(&changed))
+            .replace_instance_configuration(&id, revision, "{}", false, Some(&changed))
             .is_err()
     );
-    assert_eq!(workspace.instance(&id).unwrap().revision, 1);
-    assert_eq!(workspace.instance_profile(&id).unwrap(), Some(original));
-    assert_eq!(workspace.instance_launch(&id).unwrap().unwrap().0, "{}");
-    db.execute_batch("DROP TRIGGER reject_config").unwrap();
+    assert_eq!(
+        workspace.instance_profile(&id).unwrap().unwrap()["memory"],
+        "3G"
+    );
+    fs::write(&path, original_bytes).unwrap();
     workspace
-        .replace_instance_configuration(&id, 1, "{\"changed\":true}", false, Some(&changed))
+        .replace_instance_configuration(&id, revision, "{\"changed\":true}", false, Some(&changed))
         .unwrap();
     assert!(
         workspace
-            .replace_instance_configuration(&id, 1, "{}", false, None)
+            .replace_instance_configuration(&id, revision, "{}", false, None)
             .is_err()
     );
     fs::write(
@@ -1332,6 +1342,7 @@ fn configuration_commit_is_atomic_and_rebuilds_profile_cache() {
     .unwrap();
     drop(workspace);
     let reopened = Workspace::open(&root).unwrap();
+    reopened.materialize_instance_profile(&id).unwrap();
     assert_eq!(
         reopened.instance_profile(&id).unwrap(),
         Some(changed.clone())
@@ -1406,5 +1417,113 @@ fn deletion_rolls_back_metadata_and_resumes_filesystem_cleanup() {
         0
     );
     drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn instance_documents_export_legacy_configuration_once_without_fallback() {
+    let root = temp_root("instance-document-migration");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let id = Id::new("instance", "legacy01").unwrap();
+    workspace
+        .create_instance(
+            id.clone(),
+            image.image_id,
+            Id::new("profile", "template01").unwrap(),
+        )
+        .unwrap();
+    let path = workspace.instance_document_path(&id).unwrap();
+    fs::remove_file(&path).unwrap();
+    let db = rusqlite::Connection::open(root.join("metadata.sqlite3")).unwrap();
+    db.execute_batch("CREATE TABLE instance_launch(instance_id TEXT PRIMARY KEY, plan_json TEXT, auto_remove INTEGER); CREATE TABLE instance_configuration(instance_id TEXT PRIMARY KEY, profile_json TEXT); INSERT INTO instance_launch VALUES ('legacy01', '{\"argv\":[\"original\"]}', 0); INSERT INTO instance_configuration VALUES ('legacy01', '{\"id\":\"template01\",\"memory\":\"4G\"}');").unwrap();
+    drop(workspace);
+    let workspace = Workspace::open(&root).unwrap();
+    let document = workspace.instance_document(&id).unwrap();
+    assert_eq!(document.profile.as_ref().unwrap()["memory"], "4G");
+    assert_eq!(
+        document.launch_plan.as_ref().unwrap()["argv"][0],
+        "original"
+    );
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('instance_launch', 'instance_configuration')", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    // YAML is equally authoritative, including after restarting the daemon.
+    let yaml = path.with_extension("yaml");
+    let mut edited = document;
+    edited.launch_plan.as_mut().unwrap()["argv"][0] = "edited".into();
+    fs::write(&yaml, serde_yaml::to_string(&edited).unwrap()).unwrap();
+    assert!(
+        workspace
+            .instance_document(&id)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple")
+    );
+    fs::remove_file(&path).unwrap();
+    drop(workspace);
+    let workspace = Workspace::open(&root).unwrap();
+    assert!(
+        workspace
+            .instance_launch(&id)
+            .unwrap()
+            .unwrap()
+            .0
+            .contains("edited")
+    );
+    let document = workspace.instance_document(&id).unwrap();
+    workspace
+        .replace_instance_configuration(
+            &id,
+            document.revision().unwrap(),
+            "{\"argv\":[\"updated-yaml\"]}",
+            false,
+            document.profile.as_ref(),
+        )
+        .unwrap();
+    assert!(!path.exists());
+    assert!(fs::read_to_string(&yaml).unwrap().contains("updated-yaml"));
+    let mut document = workspace.instance_document(&id).unwrap();
+    document.profile = None;
+    fs::write(&yaml, serde_yaml::to_string(&document).unwrap()).unwrap();
+    workspace.materialize_instance_profile(&id).unwrap();
+    assert!(!root.join("instances/legacy01/profile.json").exists());
+    fs::write(&yaml, b"invalid: [").unwrap();
+    assert!(workspace.instance_launch(&id).is_err());
+    fs::remove_file(&yaml).unwrap();
+    drop(workspace);
+    let workspace = Workspace::open(&root).unwrap();
+    assert!(workspace.instance_launch(&id).is_err());
+    assert!(!path.exists());
+    drop(workspace);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_instance_export_preserves_legacy_configuration() {
+    let root = temp_root("instance-document-export-failure");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let id = Id::new("instance", "legacy01").unwrap();
+    workspace
+        .create_instance(
+            id.clone(),
+            image.image_id,
+            Id::new("profile", "template01").unwrap(),
+        )
+        .unwrap();
+    let path = workspace.instance_document_path(&id).unwrap();
+    fs::write(&path, b"invalid JSON").unwrap();
+    let db = rusqlite::Connection::open(root.join("metadata.sqlite3")).unwrap();
+    db.execute_batch("CREATE TABLE instance_launch(instance_id TEXT PRIMARY KEY, plan_json TEXT, auto_remove INTEGER); INSERT INTO instance_launch VALUES ('legacy01', '{}', 0);").unwrap();
+    drop(workspace);
+    assert!(Workspace::open(&root).is_err());
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM instance_launch", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(fs::read(path).unwrap(), b"invalid JSON");
     fs::remove_dir_all(root).unwrap();
 }

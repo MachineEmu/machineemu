@@ -6,6 +6,7 @@ use std::{fs, io::Write, path::Path as FsPath};
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InstanceConfig {
+    schema_version: u32,
     instance_id: String,
     image_id: String,
     profile_id: String,
@@ -157,19 +158,19 @@ pub(super) async fn get_instance_config(
             .workspace
             .lock()
             .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
-        let instance = workspace.instance(&instance_id)?;
-        let (plan, auto_remove) = workspace
-            .instance_launch(&instance_id)?
-            .ok_or_else(|| RuntimeError::Process("instance has no saved launch plan".into()))?;
-        let profile = workspace.instance_profile(&instance_id)?;
+        let document = workspace.instance_document(&instance_id)?;
+        let revision = document.revision()?;
         Ok(InstanceConfig {
-            instance_id: instance.instance_id.as_str().into(),
-            image_id: instance.image_id.as_str().into(),
-            profile_id: instance.profile_id.as_str().into(),
-            revision: instance.revision,
-            auto_remove,
-            profile,
-            launch_plan: serde_json::from_str(&plan)?,
+            schema_version: document.schema_version,
+            instance_id: document.instance_id,
+            image_id: document.image_id,
+            profile_id: document.profile_id,
+            revision,
+            auto_remove: document.auto_remove,
+            profile: document.profile,
+            launch_plan: serde_json::from_value(document.launch_plan.ok_or_else(|| {
+                RuntimeError::Process("instance has no saved launch plan".into())
+            })?)?,
         })
     })
     .await;
@@ -193,6 +194,11 @@ pub(super) async fn put_instance_config(
         Err(error) => return bad_request(error),
     };
     let result = blocking(move || -> Result<_, RuntimeError> {
+        if input.schema_version != 1 {
+            return Err(RuntimeError::Process(
+                "instance document schema_version must be 1".into(),
+            ));
+        }
         let instance_id = Id::new("instance", id)?;
         let lock = instance_lock(&state, instance_id.as_str())?;
         let _guard = lock.blocking_lock();
@@ -208,10 +214,11 @@ pub(super) async fn put_instance_config(
                 "stop the instance before editing its configuration".into(),
             ));
         }
-        if input.revision != instance.revision {
+        let current_revision = workspace.instance_document(&instance_id)?.revision()?;
+        if input.revision != current_revision {
             return Err(RuntimeError::Process(format!(
                 "instance configuration changed since revision {}; current revision is {}",
-                input.revision, instance.revision
+                input.revision, current_revision
             )));
         }
         let (old_plan, auto_remove) = workspace
@@ -247,7 +254,7 @@ pub(super) async fn put_instance_config(
             auto_remove,
             input.profile.as_ref(),
         )?;
-        input.revision = updated.revision;
+        input.revision = updated;
         Ok(input)
     })
     .await;

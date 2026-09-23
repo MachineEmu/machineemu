@@ -36,9 +36,6 @@ struct Args {
     unix_socket: Option<PathBuf>,
     #[arg(long, env = "MACHINEEMU_BEARER_TOKEN")]
     bearer_token: Option<String>,
-    /// JSON map of profile ID to a planner-produced launch specification.
-    #[arg(long)]
-    launch_plans: Option<PathBuf>,
     /// Path to the display-stream encoder.
     #[arg(long)]
     display_stream: Option<PathBuf>,
@@ -51,7 +48,6 @@ struct Args {
 struct AppState {
     workspace: Arc<Mutex<Workspace>>,
     bearer_token: Arc<str>,
-    launch_plans: Arc<BTreeMap<String, LaunchSpec>>,
     supervisors: Arc<Mutex<BTreeMap<String, supervisor::RunSupervisor>>>,
     instance_locks: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     display_stream: Arc<PathBuf>,
@@ -150,10 +146,6 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         .bearer_token
         .or(server.bearer_token)
         .unwrap_or_default();
-    let launch_plans_path = args
-        .launch_plans
-        .or(server.launch_plans)
-        .map(|path| resolve_config_path(config_path.as_deref(), path));
     let mut workspace = Workspace::open(&workspace_path)?;
     let recovered_runs = workspace.reconcile_active_runs()?;
     for run in recovered_runs.iter().filter(|run| run.status == "running") {
@@ -167,14 +159,9 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     workspace.reconcile_operations()?;
-    let launch_plans = match launch_plans_path {
-        Some(path) => serde_json::from_str(&fs::read_to_string(path)?)?,
-        None => BTreeMap::new(),
-    };
     let state = AppState {
         workspace: Arc::new(Mutex::new(workspace)),
         bearer_token: Arc::from(bearer_token.clone()),
-        launch_plans: Arc::new(launch_plans),
         supervisors: Arc::new(Mutex::new(BTreeMap::new())),
         instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
 

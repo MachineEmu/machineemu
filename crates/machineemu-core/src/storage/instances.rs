@@ -1,4 +1,4 @@
-use super::Workspace;
+use super::{InstanceDocument, Workspace};
 use crate::domain::{Id, Instance, InstanceState};
 use crate::{Error, Result};
 use rusqlite::{OptionalExtension, params};
@@ -48,24 +48,21 @@ impl Workspace {
         plan_json: &str,
         auto_remove: bool,
     ) -> Result<()> {
-        self.instance(instance_id)?;
-        self.db.execute(
-            "INSERT INTO instance_launch(instance_id, plan_json, auto_remove) VALUES (?1, ?2, ?3)
-             ON CONFLICT(instance_id) DO UPDATE SET plan_json = excluded.plan_json, auto_remove = excluded.auto_remove",
-            params![instance_id.as_str(), plan_json, auto_remove],
-        )?;
-        Ok(())
+        let mut document = self.instance_document(instance_id)?;
+        document.launch_plan = Some(serde_json::from_str(plan_json)?);
+        document.auto_remove = auto_remove;
+        self.write_instance_document_at(&self.instance_document_path(instance_id)?, &document)
     }
 
     pub fn instance_launch(&self, instance_id: &Id) -> Result<Option<(String, bool)>> {
-        self.db
-            .query_row(
-                "SELECT plan_json, auto_remove FROM instance_launch WHERE instance_id = ?1",
-                params![instance_id.as_str()],
-                |row| Ok((row.get(0)?, row.get::<_, bool>(1)?)),
-            )
-            .optional()
-            .map_err(Error::from)
+        if matches!(self.instance(instance_id), Err(Error::NotFound { .. })) {
+            return Ok(None);
+        }
+        let document = self.instance_document(instance_id)?;
+        document
+            .launch_plan
+            .map(|plan| Ok((serde_json::to_string(&plan)?, document.auto_remove)))
+            .transpose()
     }
 
     pub fn record_instance_tombstone(
@@ -100,29 +97,32 @@ impl Workspace {
         image_id: Id,
         profile_id: Id,
     ) -> Result<Instance> {
-        self.finish_instance_deletion(&instance_id)?;
-        self.image(&image_id)?;
-        // A hand-written manifest is sufficient to create an instance. SQLite
-        // only indexes its ID for runtime foreign-key integrity.
-        self.db.execute(
-            "INSERT OR IGNORE INTO images(image_id) VALUES (?1)",
-            params![image_id.as_str()],
-        )?;
-        self.db.execute(
-            "INSERT INTO instances(instance_id, image_id, profile_id, lifecycle) VALUES (?1, ?2, ?3, 'created')",
-            params![instance_id.as_str(), image_id.as_str(), profile_id.as_str()],
-        )?;
-        self.db.execute(
-            "DELETE FROM instance_tombstones WHERE instance_id = ?1",
-            params![instance_id.as_str()],
-        )?;
-        fs::create_dir_all(self.root.join("instances").join(instance_id.as_str())).map_err(
-            |source| Error::Io {
-                path: self.root.join("instances").join(instance_id.as_str()),
-                source,
-            },
-        )?;
-        self.instance(&instance_id)
+        let staging_root = self.root.join("staging");
+        let staged = staging_root.join(format!(
+            "create-{}-{}-{}",
+            instance_id.as_str(),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir(&staged).map_err(|source| Error::Io {
+            path: staged.clone(),
+            source,
+        })?;
+        let result = self.publish_prepared_instance(
+            instance_id,
+            image_id,
+            profile_id,
+            &staged,
+            "null",
+            false,
+        );
+        if result.is_err() {
+            let _ = fs::remove_dir_all(staged);
+        }
+        result
     }
 
     /// Materialize the writable files owned by one instance from immutable
@@ -293,6 +293,16 @@ impl Workspace {
             }
         }
         let profile = self.read_legacy_profile(staged)?;
+        let document = InstanceDocument {
+            schema_version: 1,
+            instance_id: instance_id.as_str().into(),
+            image_id: image_id.as_str().into(),
+            profile_id: profile_id.as_str().into(),
+            auto_remove,
+            profile,
+            launch_plan: serde_json::from_str(plan_json)?,
+        };
+        self.write_instance_document_at(&staged.join("instance.json"), &document)?;
         fs::write(staged.join(".machineemu-create"), b"staged\n").map_err(|source| Error::Io {
             path: staged.join(".machineemu-create"),
             source,
@@ -311,16 +321,6 @@ impl Workspace {
                 "INSERT INTO instances(instance_id, image_id, profile_id, lifecycle) VALUES (?1, ?2, ?3, 'created')",
                 params![instance_id.as_str(), image_id.as_str(), profile_id.as_str()],
             )?;
-            transaction.execute(
-                "INSERT INTO instance_launch(instance_id, plan_json, auto_remove) VALUES (?1, ?2, ?3)",
-                params![instance_id.as_str(), plan_json, auto_remove],
-            )?;
-            if let Some(profile) = &profile {
-                transaction.execute(
-                    "INSERT INTO instance_configuration(instance_id, profile_json) VALUES (?1, ?2)",
-                    params![instance_id.as_str(), serde_json::to_string(profile)?],
-                )?;
-            }
             transaction.execute(
                 "DELETE FROM instance_tombstones WHERE instance_id = ?1",
                 params![instance_id.as_str()],
@@ -423,13 +423,7 @@ impl Workspace {
             "INSERT INTO pending_instance_deletions(instance_id) VALUES (?1)",
             params![instance_id.as_str()],
         )?;
-        for table in [
-            "instance_configuration",
-            "instance_launch",
-            "operations",
-            "runs",
-            "instances",
-        ] {
+        for table in ["operations", "runs", "instances"] {
             transaction.execute(
                 &format!("DELETE FROM {table} WHERE instance_id = ?1"),
                 params![instance_id.as_str()],

@@ -1,6 +1,6 @@
 # Rust API v2: guest agent information
 
-Enable `devices.guest_agent: true` in the VM profile and install and start the
+Enable `devices.guest_agent: true` in the creation template and install and start the
 QEMU guest agent inside the guest. The planner exposes the agent on the
 instance-owned `qga.sock` channel. The daemon reads from that channel only.
 

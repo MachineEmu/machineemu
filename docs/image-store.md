@@ -58,7 +58,7 @@ blob store:
 ├── metadata.sqlite3
 ├── blobs/sha256/<digest>
 ├── images/<image-id>/manifest.json
-├── instances/<instance-id>/
+├── instances/<instance-id>/instance.json
 ├── snapshots/<snapshot-id>/
 └── staging/
 ```
@@ -83,14 +83,16 @@ target/debug/machineemu migrate-images --workspace ./machineemu-workspace
 Migration also runs automatically when the updated daemon opens a workspace.
 It exports legacy image records without replacing existing valid manifests,
 then removes their configuration columns from SQLite. Stop the daemon before
-running the standalone migration command. SQLite continues to own instance,
-operation, run, and snapshot state, with only image IDs retained for instance
-references. Image listing and metadata reads use files exclusively.
+running the standalone migration command. Instance configurations also live in
+`instances/<id>/instance.json` (or YAML). SQLite owns instance lifecycle,
+operation, run, and snapshot state, with image IDs retained for references.
+Image listing and metadata reads use files exclusively.
 
-This means a profile or image can be copied as one directory, inspected in a
-normal file browser, and imported on another workspace without reproducing
-opaque digest filenames by hand. Runtime state under `instances/` and
-`snapshots/` is deliberately separate from the portable image bundle.
+An image can be copied as one bundle directory and inspected in a normal file
+browser without reproducing opaque digest filenames by hand. A profile is a
+reusable template file; each instance owns a separate configuration document
+and writable state. Runtime state under `instances/` and `snapshots/` is
+separate from the portable image bundle.
 
 Profiles can set `storage.disk.size`, such as `64GiB`. The planner converts
 that value to QEMU's size syntax and the daemon grows the instance overlay
@@ -129,10 +131,10 @@ track against these declarations. `--force` overrides a track mismatch for
 that invocation and prints a warning; it does not change the image's declared
 compatibility or bypass architecture, asset, or QEMU capability checks.
 
-An existing instance with a different image is rejected. Choose a new instance
-name, or explicitly use `--fresh` to discard and recreate its state. Neither
-the stored profile nor the image record is changed by `--image`. Without the
-flag, existing profile asset bindings and image selection remain unchanged.
+`run` requires a new instance name. To reuse an existing instance, call
+`start`; to discard its state and create it from a selected template and image,
+use `run --fresh --image IMAGE`. Changing a template or image manifest does not
+change an existing instance's saved launch plan.
 
 To import a `vmmanager-sh` base, point the importer at the immutable base
 directory, not at an instance directory under `vm-state`:

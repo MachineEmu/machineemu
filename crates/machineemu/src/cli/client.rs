@@ -10,9 +10,6 @@ pub(super) async fn ensure_daemon(
     {
         return Ok(());
     }
-    let launch_plans = workspace.join("staging/launch-plans.json");
-    fs::write(&launch_plans, "{}")
-        .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
     let executable = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join("machineemu-daemon")))
@@ -36,10 +33,6 @@ pub(super) async fn ensure_daemon(
         args.extend(["--listen".into(), endpoint.into()]);
         args.extend(["--bearer-token".into(), token.into()]);
     }
-    args.extend([
-        "--launch-plans".into(),
-        launch_plans.to_string_lossy().into_owned(),
-    ]);
     command
         .args(args)
         .stdin(std::process::Stdio::null())
