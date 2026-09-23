@@ -30,11 +30,11 @@ fn console_uart_creates_interactive_serial_socket() {
 }
 
 #[test]
-fn h264_plan_uses_dbus_display_and_keeps_raw_vnc() {
+fn h264_plan_uses_dbus_display_and_usb_tablet() {
     let mut argv = Vec::new();
     append_devices(
         &mut argv,
-        Some(&serde_json::json!({"vnc": true, "h264": true, "usb_tablet": true, "video": {"type":"virtio-vga-gl"}})),
+        Some(&serde_json::json!({"vnc": false, "h264": true, "usb_tablet": true, "video": {"type":"virtio-vga-gl"}})),
         None,
         Path::new("/tmp/machineemu-test-instance"),
     )
@@ -55,16 +55,70 @@ fn h264_plan_uses_dbus_display_and_keeps_raw_vnc() {
         argv.windows(2)
             .any(|args| args == ["-device", "usb-tablet,bus=usb.0"])
     );
-    assert!(argv.windows(2).any(|args| args
-        == [
-            "-vnc",
-            "unix:/tmp/machineemu-test-instance/sockets/vnc.sock"
-        ]));
+    assert!(!argv.iter().any(|arg| arg == "-vnc"));
     let mut invalid = Vec::new();
     assert!(
         append_devices(
             &mut invalid,
             Some(&serde_json::json!({"h264":true})),
+            None,
+            Path::new("/tmp/machineemu-test-instance")
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn gl_video_conflicts_with_vnc_for_both_gpu_names() {
+    for model in ["virtio-vga-gl", "virtio-gpu-gl"] {
+        for vnc in [serde_json::json!(true), serde_json::json!({"port":"auto"})] {
+            let devices = serde_json::json!({"vnc":vnc,"h264":true,"video":{"type":model}});
+            let error = append_devices(
+                &mut Vec::new(),
+                Some(&devices),
+                None,
+                Path::new("/tmp/machineemu-test-instance"),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("vnc conflicts with GL video"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn usb_pointers_share_one_xhci_controller() {
+    for (mouse, tablet, expected) in [
+        (true, false, vec!["usb-mouse,bus=usb.0"]),
+        (false, true, vec!["usb-tablet,bus=usb.0"]),
+        (
+            true,
+            true,
+            vec!["usb-tablet,bus=usb.0", "usb-mouse,bus=usb.0"],
+        ),
+    ] {
+        let mut argv = Vec::new();
+        append_devices(
+            &mut argv,
+            Some(&serde_json::json!({"usb_mouse":mouse,"usb_tablet":tablet})),
+            None,
+            Path::new("/tmp/machineemu-test-instance"),
+        )
+        .unwrap();
+        let devices: Vec<_> = argv
+            .windows(2)
+            .filter(|pair| pair[0] == "-device")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(devices[0], "qemu-xhci,id=usb");
+        assert_eq!(&devices[1..], expected);
+    }
+    assert!(
+        append_devices(
+            &mut Vec::new(),
+            Some(&serde_json::json!({"usb_mouse":"yes"})),
             None,
             Path::new("/tmp/machineemu-test-instance")
         )
@@ -231,6 +285,37 @@ fn profile_validation_checks_declared_devices() {
     };
     let error = validate_profile_against_qemu(&profile, &options).unwrap_err();
     assert!(error.to_string().contains("missing-nic"));
+}
+
+#[test]
+fn profile_validation_requires_vsock_from_the_selected_qemu() {
+    let profile = serde_json::json!({
+        "schema_version":1,"id":"vsock","machine":"q35","devices":{"vsock":true}
+    });
+    let options = QemuOptions {
+        executable: PathBuf::from("qemu"),
+        version: None,
+        machines: vec!["q35".into()],
+        cpus: vec![],
+        accelerators: vec![],
+        devices: vec![],
+        display_backends: vec![],
+        chardev_backends: vec![],
+        tpm_backends: vec![],
+        audio_drivers: vec![],
+        machine_properties: vec![],
+        analysis_machine_properties: vec![],
+        device_properties: vec![],
+    };
+    assert!(
+        validate_profile_against_qemu(&profile, &options)
+            .unwrap_err()
+            .to_string()
+            .contains("vhost-vsock-pci")
+    );
+    let mut supported = options;
+    supported.devices.push("vhost-vsock-pci".into());
+    assert!(validate_profile_against_qemu(&profile, &supported).is_ok());
 }
 
 #[test]
@@ -557,6 +642,222 @@ fn plan_resolves_a_fixture_engine_without_writing_runtime_state() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn bundled_input(root: &Path, name: &str) -> PlanInput {
+    let (_, release, bundle) = tpm_fixture(root);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../profiles")
+        .join(format!("{name}.json"));
+    let mut profile: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    profile["engine"] = serde_json::json!({"track":"fixture"});
+    let assets = root.join("assets");
+    let digest = "b".repeat(64);
+    fs::create_dir_all(assets.join("sha256")).unwrap();
+    fs::write(assets.join("sha256").join(&digest), b"fixture").unwrap();
+    let references = profile["external_assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|asset| {
+            (
+                asset["id"].as_str().unwrap().to_owned(),
+                Value::from(format!("sha256:{digest}")),
+            )
+        })
+        .collect();
+    profile["assets"] = Value::Object(references);
+    PlanInput {
+        profile,
+        release_set: release,
+        bundle_root: bundle,
+        asset_root: Some(assets),
+        target: "x86_64-softmmu".into(),
+        runtime_dir: root.join("runtime"),
+        state_dir: Some(root.join("state")),
+        seed: None,
+        swtpm: None,
+        bridge_helper: None,
+        mac: None,
+        instance: Some("fixture01".into()),
+    }
+}
+
+#[test]
+fn win11_profile_renders_boot_storage_and_pointer_devices() {
+    let root = test_root("win11-profile");
+    let input = bundled_input(&root, "win11-dev");
+    let plan = build_plan(input).unwrap();
+    assert!(
+        plan.argv
+            .windows(2)
+            .any(|pair| pair == ["-boot", "menu=off"])
+    );
+    assert!(
+        plan.argv
+            .iter()
+            .any(|arg| arg.contains("id=pc-disk") && arg.contains("discard=unmap"))
+    );
+    assert!(
+        plan.argv
+            .windows(2)
+            .any(|pair| pair == ["-device", "qemu-xhci,id=usb"])
+    );
+    assert!(
+        plan.argv
+            .windows(2)
+            .any(|pair| pair == ["-device", "usb-tablet,bus=usb.0"])
+    );
+    assert!(
+        plan.argv
+            .iter()
+            .any(|arg| arg.contains("org.qemu.guest_agent.0"))
+    );
+    assert_eq!(
+        plan.preparation.disk_overlay.unwrap().path,
+        root.join("state/overlay.qcow2")
+    );
+    assert_eq!(
+        plan.preparation.nvram.unwrap().path,
+        root.join("state/OVMF_VARS.fd")
+    );
+    assert!(plan.helper_argv.is_some());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundled_profiles_render_vsock_and_explain_unsupported_boot_settings() {
+    let root = test_root("bundled-validation");
+    let debian = bundled_input(&root, "debian13-cloud");
+    let plan = build_plan(debian.clone()).unwrap();
+    assert!(
+        plan.argv
+            .windows(2)
+            .any(|pair| pair == ["-boot", "menu=off"])
+    );
+    assert!(plan.argv.iter().any(|arg| arg.contains("discard=unmap")));
+    let cid = plan.manifest["vsock"]["guest_cid"].as_u64().unwrap();
+    assert!((3..=u64::from(u32::MAX)).contains(&cid));
+    assert!(plan.argv.windows(2).any(|pair| pair[0] == "-device"
+        && pair[1] == format!("vhost-vsock-pci,id=machineemu-vsock,guest-cid={cid}")));
+    assert_eq!(
+        build_plan(debian.clone()).unwrap().manifest["vsock"]["guest_cid"],
+        cid
+    );
+    let mut other = debian.clone();
+    other.instance = Some("fixture02".into());
+    assert_ne!(
+        build_plan(other).unwrap().manifest["vsock"]["guest_cid"],
+        cid
+    );
+    let mut disabled = debian.clone();
+    disabled.profile["devices"]["vsock"] = Value::Bool(false);
+    let plan = build_plan(disabled).unwrap();
+    assert!(plan.manifest.get("vsock").is_none());
+    assert!(
+        !plan
+            .argv
+            .iter()
+            .any(|arg| arg.starts_with("vhost-vsock-pci,"))
+    );
+    let mut invalid = debian;
+    invalid.profile["devices"]["vsock"] = Value::from("yes");
+    assert!(
+        build_plan(invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("profile.devices.vsock must be a boolean")
+    );
+
+    let mut analysis = bundled_input(&root, "malware-analysis-x64");
+    assert!(
+        build_plan(analysis.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("profile.boot.splash")
+    );
+    analysis.profile["boot"]
+        .as_object_mut()
+        .unwrap()
+        .remove("splash");
+    analysis.profile["boot"]
+        .as_object_mut()
+        .unwrap()
+        .remove("timeout");
+    let plan = build_plan(analysis).unwrap();
+    assert!(
+        plan.argv
+            .windows(2)
+            .any(|pair| pair == ["-boot", "menu=on"])
+    );
+    assert!(plan.argv.windows(2).any(|pair| pair == ["-vga", "none"]));
+    assert!(
+        plan.argv
+            .iter()
+            .any(|arg| arg.contains("model=SATA SSD,serial=ANSSD-0"))
+    );
+    assert!(
+        plan.argv
+            .iter()
+            .any(|arg| arg.contains("analysis-profile=on"))
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn planner_rejects_silent_hardware_mismatches() {
+    let root = test_root("planner-mismatches");
+    let input = bundled_input(&root, "win11-dev");
+    let mut vga = input.clone();
+    vga.profile["devices"]["video"] = serde_json::json!({"type":"vga"});
+    assert!(
+        build_plan(vga)
+            .unwrap()
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["-vga", "std"])
+    );
+
+    for (pointer, value, expected) in [
+        (
+            "/devices/wifi_hwsim",
+            serde_json::json!(true),
+            "profile.devices.wifi_hwsim",
+        ),
+        (
+            "/boot/unknown",
+            serde_json::json!(true),
+            "profile.boot.unknown",
+        ),
+        (
+            "/storage/disk/wwn",
+            serde_json::json!("123"),
+            "profile.storage.disk.wwn",
+        ),
+        (
+            "/tpm/backend/version",
+            serde_json::json!("1.2"),
+            "profile.tpm.backend.version",
+        ),
+    ] {
+        let mut broken = input.clone();
+        let (parent, key) = pointer.rsplit_once('/').unwrap();
+        broken
+            .profile
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(key.into(), value);
+        assert!(
+            build_plan(broken)
+                .unwrap_err()
+                .to_string()
+                .contains(expected),
+            "{pointer}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn test_root(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("machineemu-plan-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
@@ -699,7 +1000,7 @@ fn udm_pro_uses_board_cpu_and_disposable_native_storage() {
         build_plan(lab)
             .unwrap_err()
             .to_string()
-            .contains("reserve ttyS0")
+            .contains("profile.devices.serial")
     );
     let mut networked = input;
     networked.profile["network"] = serde_json::json!({"type":"user"});

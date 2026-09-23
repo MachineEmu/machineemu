@@ -20,6 +20,18 @@ overrides both for one run. QEMU's own default address is the same
 52:54:00:12:34:56 for every guest, which two instances on one bridge cannot
 both keep.
 
+`devices.usb_mouse` and `devices.usb_tablet` add USB pointer devices. The
+planner creates one xHCI controller when either is enabled and attaches both
+to it when requested together. VNC cannot be combined with a GL video model
+(`virtio-vga-gl` or `virtio-gpu-gl`), including H.264 launches. A launch setting
+that the Rust planner cannot honor produces a field-specific error instead of
+being silently omitted; `boot.splash` is currently such a setting.
+
+`devices.vsock: true` adds a `vhost-vsock-pci` device with a stable guest CID
+derived from the instance and workspace path. The resolved CID is recorded in
+the launch manifest. The selected QEMU must support `vhost-vsock-pci`, and the
+Linux host must provide `/dev/vhost-vsock` to start the VM with this device.
+
 The guest's hostname is not the planner's to set: it comes from the cloud-init
 seed, whose meta-data carries `local-hostname` and `instance-id`. A seed reused
 across instances names them all the same, so build one per instance --

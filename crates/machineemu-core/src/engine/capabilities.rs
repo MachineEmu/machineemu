@@ -276,6 +276,16 @@ pub fn validate_profile_against_qemu(profile: &Value, options: &QemuOptions) -> 
     }
     if let Some(devices) = profile.get("devices") {
         let devices = object(devices, "profile.devices")?;
+        if devices.get("vsock").and_then(Value::as_bool) == Some(true)
+            && !options
+                .devices
+                .iter()
+                .any(|device| device == "vhost-vsock-pci")
+        {
+            return Err(invalid(
+                "QEMU does not support vsock device vhost-vsock-pci",
+            ));
+        }
         if devices.get("lcd").and_then(Value::as_bool) == Some(true) {
             for device in ["qemu-xhci", "unifi-lcm"] {
                 if !options.devices.iter().any(|v| v == device) {

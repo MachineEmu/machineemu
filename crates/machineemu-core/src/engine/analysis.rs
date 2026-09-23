@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn analysis_rejects_unsupported_or_invalid_settings() {
-        let profile = catalog_profile();
+        let profile = bundled_profile();
         for (path, value) in [
             ("/analysis/enabled", json!(false)),
             ("/analysis/device_descriptors/display/xres", json!(100)),

@@ -246,10 +246,6 @@ pub(super) async fn run_rust_owned(
         devices.insert("h264".into(), serde_json::json!(true));
         devices.insert("video".into(), serde_json::json!({"type": "virtio-vga-gl"}));
         devices.insert("usb_tablet".into(), serde_json::json!(true));
-        // VNC's CLI override replaces the D-Bus display backend. H.264 mode
-        // needs dbus,p2p=on,gl=on for virtio-vga-gl, so disable profile VNC
-        // for this launch rather than producing an invalid mixed plan.
-        devices.insert("vnc".into(), serde_json::json!(false));
     }
     let profile_id = profile_object
         .get("id")
@@ -283,6 +279,7 @@ pub(super) async fn run_rust_owned(
         config.helpers.as_ref(),
     )?;
     let display = super::vnc::resolve(&profile, &profile_path, vnc, vnc_password_file)?;
+    validate_h264_display(h264, display.is_some())?;
     super::vnc::normalize_profile(&mut profile, display.is_some())?;
     let configured_engine = if qemu == Path::new("/run/current-system/sw/bin/qemu-system-x86_64") {
         config
@@ -504,6 +501,15 @@ pub(super) async fn run_rust_owned(
         println!("VNC: 127.0.0.1:{port}");
     }
     println!("QMP: {}", external_qmp_socket.display());
+    Ok(())
+}
+
+fn validate_h264_display(h264: bool, vnc: bool) -> Result<(), machineemu_core::engine::Error> {
+    if h264 && vnc {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "VNC conflicts with GL video selected by --h264".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1122,5 +1128,17 @@ mod tests {
             PathBuf::from("profiles/udm-pro.json")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn h264_rejects_a_selected_vnc_display() {
+        assert!(
+            validate_h264_display(true, true)
+                .unwrap_err()
+                .to_string()
+                .contains("VNC conflicts with GL video")
+        );
+        assert!(validate_h264_display(true, false).is_ok());
+        assert!(validate_h264_display(false, true).is_ok());
     }
 }

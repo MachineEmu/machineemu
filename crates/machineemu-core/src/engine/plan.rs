@@ -77,6 +77,7 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
     }
     let profile_id = string(profile, "id")?;
     let machine = string(profile, "machine")?;
+    validate_launch_settings(profile)?;
     let target = &input.target;
     let track = string(
         object(
@@ -269,6 +270,18 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         profile.get("console"),
         &runtime,
     )?;
+    let vsock_cid = profile
+        .get("devices")
+        .and_then(|devices| devices.get("vsock"))
+        .and_then(Value::as_bool)
+        .filter(|enabled| *enabled)
+        .map(|_| derive_vsock_cid(&runtime, input.instance.as_deref()));
+    if let Some(cid) = vsock_cid {
+        argv.extend([
+            "-device".into(),
+            format!("vhost-vsock-pci,id=machineemu-vsock,guest-cid={cid}"),
+        ]);
+    }
     append_audio(
         &mut argv,
         profile
@@ -282,6 +295,16 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         profile.get("devices").and_then(|d| d.get("video")),
         display_desc,
     )?;
+    if display_desc.is_none()
+        && profile
+            .get("devices")
+            .and_then(|d| d.get("video"))
+            .and_then(|v| v.get("type"))
+            .and_then(Value::as_str)
+            == Some("vga")
+    {
+        argv.extend(["-vga".into(), "std".into()]);
+    }
     if machine == "udm-pro" {
         append_udm_devices(&mut argv, profile.get("devices"), &runtime)?;
     } else if machine == "us24pro" {
@@ -308,6 +331,9 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         manifest["analysis_argv"] = serde_json::json!(analysis.argv);
         manifest["analysis_payload"] = analysis.payload;
     }
+    if let Some(cid) = vsock_cid {
+        manifest["vsock"] = serde_json::json!({"guest_cid":cid});
+    }
     Ok(LaunchPlan {
         schema_version: 1,
         executable,
@@ -317,6 +343,150 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         helper_argv,
         manifest,
     })
+}
+
+fn validate_launch_settings(profile: &Map<String, Value>) -> Result<(), Error> {
+    if let Some(boot) = profile.get("boot") {
+        let boot = object(boot, "profile.boot")?;
+        for key in boot.keys() {
+            if ![
+                "kernel", "initrd", "dtb", "append", "menu", "from", "splash", "timeout",
+            ]
+            .contains(&key.as_str())
+            {
+                return Err(invalid(&format!(
+                    "profile.boot.{key} is not supported by the launch planner"
+                )));
+            }
+        }
+        for key in ["splash", "timeout"] {
+            if boot.contains_key(key) {
+                return Err(invalid(&format!(
+                    "profile.boot.{key} is not supported by the launch planner"
+                )));
+            }
+        }
+        if let Some(from) = boot.get("from") {
+            if from.as_str() != Some("disk") {
+                return Err(invalid("profile.boot.from only supports disk"));
+            }
+            if profile
+                .get("storage")
+                .and_then(|storage| storage.get("disk"))
+                .is_none()
+            {
+                return Err(invalid(
+                    "profile.boot.from=disk requires profile.storage.disk",
+                ));
+            }
+        }
+    }
+    let Some(devices) = profile.get("devices") else {
+        return Ok(());
+    };
+    let devices = object(devices, "profile.devices")?;
+    for key in devices.keys() {
+        if ![
+            "nic",
+            "mac",
+            "vnc",
+            "video",
+            "audio",
+            "h264",
+            "usb_tablet",
+            "usb_mouse",
+            "guest_agent",
+            "serial",
+            "vsock",
+            "snapshots",
+            "usb",
+            "lcd",
+            "bluetooth",
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(invalid(&format!(
+                "profile.devices.{key} is not supported by the launch planner"
+            )));
+        }
+    }
+    if devices
+        .get("vsock")
+        .is_some_and(|vsock| !vsock.is_boolean())
+    {
+        return Err(invalid("profile.devices.vsock must be a boolean"));
+    }
+    if devices
+        .get("vnc")
+        .is_some_and(|v| !v.is_boolean() && !v.is_object())
+    {
+        return Err(invalid(
+            "profile.devices.vnc must be a boolean or a mapping",
+        ));
+    }
+    if devices.get("guest_agent").is_some_and(|v| !v.is_boolean()) {
+        return Err(invalid("profile.devices.guest_agent must be a boolean"));
+    }
+    if devices
+        .get("serial")
+        .is_some_and(|v| !matches!(v.as_str(), Some("file" | "socket")))
+    {
+        return Err(invalid("profile.devices.serial must be file or socket"));
+    }
+    if devices
+        .get("nic")
+        .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.contains(',')))
+    {
+        return Err(invalid("profile.devices.nic must be a QEMU device name"));
+    }
+    if let Some(address) = devices.get("mac") {
+        mac(address
+            .as_str()
+            .ok_or_else(|| invalid("profile.devices.mac must be a string"))?)?;
+    }
+    let vnc = devices
+        .get("vnc")
+        .is_some_and(|v| v.as_bool() == Some(true) || v.is_object());
+    let video = devices
+        .get("video")
+        .map(|v| object(v, "profile.devices.video"))
+        .transpose()?;
+    if let Some(video) = video {
+        for key in video.keys() {
+            if !["type", "heads", "primary"].contains(&key.as_str()) {
+                return Err(invalid(&format!(
+                    "profile.devices.video.{key} is not supported"
+                )));
+            }
+        }
+        if video.get("heads").is_some_and(|v| v.as_u64() != Some(1)) {
+            return Err(invalid("profile.devices.video.heads only supports 1"));
+        }
+        if video
+            .get("primary")
+            .is_some_and(|v| v.as_bool() != Some(true))
+        {
+            return Err(invalid("profile.devices.video.primary only supports true"));
+        }
+        let model = video
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("profile.devices.video.type is required"))?;
+        if vnc && matches!(model, "virtio-vga-gl" | "virtio-gpu-gl") {
+            return Err(invalid("profile.devices.vnc conflicts with GL video"));
+        }
+        if !matches!(model, "vga" | "virtio-vga-gl" | "virtio-gpu-gl") {
+            return Err(invalid(
+                "profile.devices.video.type is not supported by the launch planner",
+            ));
+        }
+        if matches!(model, "virtio-vga-gl" | "virtio-gpu-gl")
+            && devices.get("h264") != Some(&Value::Bool(true))
+        {
+            return Err(invalid("GL video requires profile.devices.h264=true"));
+        }
+    }
+    Ok(())
 }
 
 fn append_wifi(
@@ -488,6 +658,21 @@ pub fn derive_mac(instance: &str) -> String {
     )
 }
 
+fn derive_vsock_cid(runtime: &Path, instance: Option<&str>) -> u32 {
+    // Linux reserves CIDs 0, 1 and 2. Include the runtime path so instances
+    // with the same name in separate workspaces normally receive different CIDs.
+    let mut hasher = Sha256::new();
+    hasher.update(b"machineemu-vsock-cid-v1\0");
+    hasher.update(runtime.as_os_str().as_encoded_bytes());
+    hasher.update(b"\0");
+    if let Some(instance) = instance {
+        hasher.update(instance.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let candidate = u32::from_be_bytes(digest[..4].try_into().expect("SHA-256 has four bytes"));
+    3 + (u64::from(candidate) % (u64::from(u32::MAX) - 2)) as u32
+}
+
 fn mac(value: &str) -> Result<String, Error> {
     let octets: Vec<&str> = value.split(':').collect();
     let valid = octets.len() == 6
@@ -643,23 +828,30 @@ pub(super) fn append_devices(
         Some(Value::Bool(value)) => *value,
         _ => return Err(invalid("profile.devices.usb_tablet must be a boolean")),
     };
-    if usb_tablet {
-        // The D-Bus display's SetAbsPosition method requires an absolute
-        // pointing device; the default PS/2 mouse is relative.
-        // q35 does not necessarily create a usable USB bus by itself, so
-        // create an explicit xHCI controller and attach the tablet to it.
-        argv.extend([
-            "-device".into(),
-            "qemu-xhci,id=usb".into(),
-            "-device".into(),
-            "usb-tablet,bus=usb.0".into(),
-        ]);
+    let usb_mouse = match devices.get("usb_mouse") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(invalid("profile.devices.usb_mouse must be a boolean")),
+    };
+    let video_model = devices
+        .get("video")
+        .and_then(|video| video.get("type"))
+        .and_then(Value::as_str);
+    if vnc && matches!(video_model, Some("virtio-vga-gl" | "virtio-gpu-gl")) {
+        return Err(invalid("profile.devices.vnc conflicts with GL video"));
+    }
+    if usb_tablet || usb_mouse {
+        // Q35 does not necessarily create a usable USB bus by itself. Share
+        // one explicit xHCI controller across the requested USB pointers.
+        argv.extend(["-device".into(), "qemu-xhci,id=usb".into()]);
+        if usb_tablet {
+            argv.extend(["-device".into(), "usb-tablet,bus=usb.0".into()]);
+        }
+        if usb_mouse {
+            argv.extend(["-device".into(), "usb-mouse,bus=usb.0".into()]);
+        }
     }
     if h264 {
-        let video_model = devices
-            .get("video")
-            .and_then(|video| video.get("type"))
-            .and_then(Value::as_str);
         if video_model != Some("virtio-vga-gl") {
             return Err(invalid(
                 "profile.devices.h264 requires devices.video.type=virtio-vga-gl",
@@ -955,13 +1147,54 @@ fn append_storage(
 ) -> Result<(), Error> {
     let Some(v) = v else { return Ok(()) };
     let x = object(v, "profile.storage")?;
+    for key in x.keys() {
+        if key != "disk" {
+            return Err(invalid(&format!(
+                "profile.storage.{key} is not supported for this machine"
+            )));
+        }
+    }
     let disk = object(
         x.get("disk")
             .ok_or_else(|| invalid("profile.storage.disk must be a mapping"))?,
         "profile.storage.disk",
     )?;
+    for key in disk.keys() {
+        if ![
+            "asset",
+            "bus",
+            "format",
+            "size",
+            "readonly",
+            "cache",
+            "aio",
+            "discard",
+            "detect_zeroes",
+            "serial",
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(invalid(&format!(
+                "profile.storage.disk.{key} is not supported by the launch planner"
+            )));
+        }
+    }
     let backing = asset(assets, disk.get("asset"), "profile.storage.disk.asset")?;
+    if disk.get("bus").is_some_and(|v| !v.is_string()) {
+        return Err(invalid("profile.storage.disk.bus must be a string"));
+    }
+    if disk.get("format").is_some_and(|v| !v.is_string()) {
+        return Err(invalid("profile.storage.disk.format must be raw or qcow2"));
+    }
+    if disk.get("readonly").is_some_and(|v| !v.is_boolean()) {
+        return Err(invalid("profile.storage.disk.readonly must be a boolean"));
+    }
     let bus = disk.get("bus").and_then(Value::as_str).unwrap_or("sata");
+    if bus == "virtio" && disk.contains_key("serial") {
+        return Err(invalid(
+            "profile.storage.disk.serial is unsupported on virtio",
+        ));
+    }
     let legacy = machine == "pc" || machine.starts_with("pc-i440fx");
     if (legacy && bus == "sata") || (!legacy && bus == "ide") {
         return Err(invalid(if legacy {
@@ -988,6 +1221,20 @@ fn append_storage(
         })
         .transpose()?;
     let mut opt = format!("if=none,id=pc-disk,file={},format=qcow2", path.display());
+    for (field, option) in [
+        ("cache", "cache"),
+        ("aio", "aio"),
+        ("discard", "discard"),
+        ("detect_zeroes", "detect-zeroes"),
+    ] {
+        if let Some(value) = disk.get(field) {
+            let value = value
+                .as_str()
+                .filter(|value| !value.is_empty() && !value.contains([',', '\n', '\r']))
+                .ok_or_else(|| invalid(&format!("profile.storage.disk.{field} is invalid")))?;
+            opt.push_str(&format!(",{option}={value}"));
+        }
+    }
     if disk
         .get("readonly")
         .and_then(Value::as_bool)
@@ -1070,6 +1317,21 @@ fn append_tpm(argv: &mut Vec<String>, v: Option<&Value>, socket: &Path) -> Resul
     let model = x.get("model").and_then(Value::as_str).unwrap_or("tpm-tis");
     if !["tpm-tis", "tpm-crb"].contains(&model) {
         return Err(invalid("profile.tpm.model must be tpm-tis or tpm-crb"));
+    }
+    if let Some(backend) = x.get("backend") {
+        let backend = object(backend, "profile.tpm.backend")?;
+        if backend
+            .get("type")
+            .is_some_and(|v| v.as_str() != Some("emulator"))
+        {
+            return Err(invalid("profile.tpm.backend.type must be emulator"));
+        }
+        if backend
+            .get("version")
+            .is_some_and(|v| v.as_str() != Some("2.0"))
+        {
+            return Err(invalid("profile.tpm.backend.version only supports 2.0"));
+        }
     }
     argv.extend([
         "-chardev".into(),
@@ -1285,6 +1547,15 @@ fn append_direct_boot(
     assets: &BTreeMap<String, PathBuf>,
 ) -> Result<(), Error> {
     let Some(boot) = boot else { return Ok(()) };
+    if let Some(menu) = boot.get("menu") {
+        let menu = menu
+            .as_bool()
+            .ok_or_else(|| invalid("profile.boot.menu must be a boolean"))?;
+        argv.extend([
+            "-boot".into(),
+            format!("menu={}", if menu { "on" } else { "off" }),
+        ]);
+    }
     for (key, flag) in [
         ("kernel", "-kernel"),
         ("initrd", "-initrd"),
