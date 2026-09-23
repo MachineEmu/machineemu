@@ -47,5 +47,7 @@ h2 { margin: 0; }
 .terminal-input input { border: 1px solid #9aabb3; border-radius: 6px; min-height: 40px; padding: 8px 10px; }
 .vnc-host { background: #10181d; border-radius: 6px; min-height: 420px; margin-top: 20px; overflow: auto; padding: 8px; }
 .vnc-host canvas { display: block; max-width: 100%; }
-.video-canvas { background: #10181d; border-radius: 6px; display: block; margin-top: 20px; max-width: 100%; min-height: 320px; width: 100%; }
+.video-canvas-wrap { position: relative; margin-top: 20px; }
+.video-canvas { background: #10181d; border-radius: 6px; display: block; max-width: 100%; min-height: 320px; width: 100%; }
+.video-cursor-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .gdb-output { background: #10181d; border-radius: 6px; color: #dcebf1; margin: 20px 0; min-height: 320px; overflow: auto; padding: 14px; white-space: pre-wrap; }

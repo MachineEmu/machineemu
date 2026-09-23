@@ -20,7 +20,7 @@ use winit::window::{Window, WindowId};
 use crate::keymap;
 use crate::media::{Frame, Video};
 use crate::net;
-use crate::protocol::{MAX_CLIPBOARD_BYTES, message};
+use crate::protocol::{Cursor, MAX_CLIPBOARD_BYTES, message};
 
 /// Wait this long after the last window resize before asking the guest to
 /// change resolution, so a drag does not produce a mode switch per pixel.
@@ -113,6 +113,65 @@ fn blit(frame: &Frame, target: &mut [u32], stride: u32, view: Viewport) {
     }
 }
 
+fn draw_cursor(
+    cursor: &Cursor,
+    target: &mut [u32],
+    stride: u32,
+    view: Viewport,
+    source: (u32, u32),
+) {
+    if !cursor.visible
+        || !cursor.valid()
+        || cursor.width == 0
+        || cursor.height == 0
+        || source.0 == 0
+        || source.1 == 0
+    {
+        return;
+    }
+    let scale_x = f64::from(view.width) / f64::from(source.0);
+    let scale_y = f64::from(view.height) / f64::from(source.1);
+    let left = i64::from(view.x)
+        + ((f64::from(cursor.x) - f64::from(cursor.hot_x)) * scale_x).round() as i64;
+    let top = i64::from(view.y)
+        + ((f64::from(cursor.y) - f64::from(cursor.hot_y)) * scale_y).round() as i64;
+    let width = (f64::from(cursor.width) * scale_x).round().max(1.0) as i64;
+    let height = (f64::from(cursor.height) * scale_y).round().max(1.0) as i64;
+    let x0 = left.max(i64::from(view.x)).max(0);
+    let y0 = top.max(i64::from(view.y)).max(0);
+    let x1 = (left + width)
+        .min(i64::from(view.x + view.width))
+        .min(i64::from(stride));
+    let rows = target.len() / stride as usize;
+    let y1 = (top + height)
+        .min(i64::from(view.y + view.height))
+        .min(rows as i64);
+    for y in y0..y1 {
+        let cy = ((y - top) * i64::from(cursor.height) / height) as usize;
+        for x in x0..x1 {
+            let cx = ((x - left) * i64::from(cursor.width) / width) as usize;
+            let at = (cy * cursor.width as usize + cx) * 4;
+            let pixel = u32::from_le_bytes(cursor.data[at..at + 4].try_into().unwrap());
+            let alpha = (pixel >> 24) & 0xff;
+            if alpha == 0 {
+                continue;
+            }
+            let target = &mut target[y as usize * stride as usize + x as usize];
+            if alpha == 255 {
+                *target = pixel & 0x00ff_ffff;
+                continue;
+            }
+            let dst = *target;
+            let blend = |shift: u32| {
+                let src = (pixel >> shift) & 0xff_u32;
+                let old = (dst >> shift) & 0xff_u32;
+                ((src * alpha + old * (255 - alpha) + 127) / 255) << shift
+            };
+            *target = blend(16) | blend(8) | blend(0);
+        }
+    }
+}
+
 fn mouse_button(button: MouseButton) -> Option<u32> {
     // QEMU InputButton: left, middle, right, wheel-up, wheel-down, side, extra.
     Some(match button {
@@ -134,6 +193,8 @@ pub struct App {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     frame: Option<Frame>,
+    cursor: Option<Cursor>,
+    pointer_in_view: bool,
     /// Guest display size from the latest video configuration.
     source: Option<(u32, u32)>,
     sized_to_guest: bool,
@@ -172,6 +233,8 @@ impl App {
             window: None,
             surface: None,
             frame: None,
+            cursor: None,
+            pointer_in_view: false,
             source: None,
             sized_to_guest: false,
             decoder: None,
@@ -261,6 +324,9 @@ impl App {
         if let (Some(frame), Some(view)) = (&self.frame, view) {
             blit(frame, &mut buffer, width, view);
         }
+        if let (Some(cursor), Some(view), Some(source)) = (&self.cursor, view, self.source) {
+            draw_cursor(cursor, &mut buffer, width, view, source);
+        }
         if let Err(error) = buffer.present() {
             warn!(%error, "cannot present");
         }
@@ -303,6 +369,17 @@ impl App {
 
     fn handle_net(&mut self, event: net::Event) {
         match event {
+            net::Event::Cursor(cursor) => {
+                self.cursor = Some(cursor);
+                if let Some(window) = &self.window {
+                    window.set_cursor_visible(
+                        !(self.options.control
+                            && self.pointer_in_view
+                            && self.cursor.as_ref().is_some_and(|cursor| cursor.visible)),
+                    );
+                    window.request_redraw();
+                }
+            }
             net::Event::Config(config) => {
                 let size = (config.coded_width, config.coded_height);
                 if self.source != Some(size) {
@@ -451,10 +528,26 @@ impl ApplicationHandler<UiEvent> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if let (Some(view), Some(source)) = (self.viewport(), self.source_size())
-                    && let Some((x, y)) = view.guest_position(source, position.x, position.y)
-                {
+                let guest_position = self
+                    .viewport()
+                    .zip(self.source_size())
+                    .and_then(|(view, source)| view.guest_position(source, position.x, position.y));
+                self.pointer_in_view = guest_position.is_some();
+                if let Some(window) = &self.window {
+                    window.set_cursor_visible(
+                        !(self.options.control
+                            && self.pointer_in_view
+                            && self.cursor.as_ref().is_some_and(|cursor| cursor.visible)),
+                    );
+                }
+                if let Some((x, y)) = guest_position {
                     self.control(message::mouse_abs(x, y));
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.pointer_in_view = false;
+                if let Some(window) = &self.window {
+                    window.set_cursor_visible(true);
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -519,6 +612,37 @@ impl ApplicationHandler<UiEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draws_cursor_at_hotspot_and_clips_to_viewport() {
+        let cursor = Cursor {
+            kind: "cursor".into(),
+            x: 1,
+            y: 0,
+            visible: true,
+            width: 2,
+            height: 1,
+            hot_x: 1,
+            hot_y: 0,
+            data: vec![0, 0, 255, 255, 255, 0, 0, 128],
+        };
+        let mut pixels = vec![0u32; 4 * 3];
+        draw_cursor(
+            &cursor,
+            &mut pixels,
+            4,
+            Viewport {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 1,
+            },
+            (2, 1),
+        );
+        assert_eq!(pixels[5], 0x00ff0000);
+        assert_eq!(pixels[6], 0x00000080);
+        assert_eq!(pixels[4], 0);
+    }
 
     #[test]
     fn letterboxes_and_maps_pointer() {

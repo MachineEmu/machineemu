@@ -1,6 +1,6 @@
 # Rust workspace
 
-The workspace follows the two-package boundary in
+The main application follows the two-package boundary in
 [the Rust migration plan](../docs/migration/rust.md). The
 [first usable milestone](../docs/migration/rust-first-milestone.md) still controls
 implementation order.
@@ -16,6 +16,9 @@ implementation order.
 | `machineemu-core::protocols` | QMP and guest-agent communication |
 | `machineemu::api` | Server setup, authentication, request/response types and resource handlers |
 | `machineemu::cli` | Argument dispatch, daemon client and launch workflow |
+| `display-stream-protocol` | Display record framing, configuration and control messages shared by streamer and viewer |
+| `display-stream` | QEMU D-Bus capture, H.264 encoding, recording and video socket |
+| `machineemu-viewer` | Native display client and decoder |
 
 Core has no dependency on the application, Axum or Clap. It uses Tokio for
 asynchronous lifecycle and protocol I/O; its optional `api-schema` feature

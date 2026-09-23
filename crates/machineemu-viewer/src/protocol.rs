@@ -1,136 +1,18 @@
-//! The display-stream record format carried in the `video` WebSocket.
-//!
-//! Each record has a 16-byte header: type (u8), flags (u8), a reserved u16
-//! that must be zero, the big-endian payload length (u32) and the capture
-//! time in microseconds (u64), followed by the payload. The authoritative
-//! encoder lives in the sibling QEMU project's `display-stream` crate.
+//! Shared display wire format and viewer protocol checks.
 
-use bytes::{Buf, Bytes, BytesMut};
-use serde::Deserialize;
-use serde_json::json;
-use thiserror::Error;
+pub use display_stream_protocol::{
+    AudioConfig, Control, Cursor, MAX_CLIPBOARD_BYTES, RecordType, VideoConfig, decode, message,
+};
 
-pub const HEADER_LEN: usize = 16;
-pub const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
-/// Largest clipboard text either side of the stream accepts.
-pub const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordType {
-    /// JSON [`VideoConfig`], sent before every keyframe.
-    Config,
-    /// Annex-B access unit containing an IDR and its SPS/PPS.
-    Keyframe,
-    /// Annex-B access unit that depends on earlier frames.
-    Delta,
-    /// JSON [`VideoConfig`] after a scanout size change.
-    Resize,
-    /// JSON [`Control`] message, currently clipboard state.
-    Control,
-    /// JSON [`AudioConfig`].
-    AudioConfig,
-    /// Raw PCM in the most recent audio configuration's format.
-    AudioData,
+/// Playback conversion for the native GStreamer viewer.
+pub trait AudioConfigExt {
+    fn caps(&self) -> Option<String>;
+    fn gain(&self) -> f64;
 }
 
-impl TryFrom<u8> for RecordType {
-    type Error = ProtocolError;
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        Ok(match value {
-            0 => Self::Config,
-            1 => Self::Keyframe,
-            2 => Self::Delta,
-            3 => Self::Resize,
-            4 => Self::Control,
-            5 => Self::AudioConfig,
-            6 => Self::AudioData,
-            other => return Err(ProtocolError::UnknownType(other)),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Record {
-    pub kind: RecordType,
-    pub pts_us: u64,
-    pub payload: Bytes,
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum ProtocolError {
-    #[error("unknown display record type {0}")]
-    UnknownType(u8),
-    #[error("display record has a non-zero reserved field")]
-    Reserved,
-    #[error("display record payload is too large")]
-    PayloadTooLarge,
-}
-
-/// Take one complete record from the front of `input`, or return `None` when
-/// more bytes are needed. Records may span WebSocket messages.
-pub fn decode(input: &mut BytesMut) -> Result<Option<Record>, ProtocolError> {
-    if input.len() < HEADER_LEN {
-        return Ok(None);
-    }
-    let mut header = &input[..HEADER_LEN];
-    let kind = RecordType::try_from(header.get_u8())?;
-    let _flags = header.get_u8();
-    if header.get_u16() != 0 {
-        return Err(ProtocolError::Reserved);
-    }
-    let length = header.get_u32() as usize;
-    let pts_us = header.get_u64();
-    if length > MAX_PAYLOAD {
-        return Err(ProtocolError::PayloadTooLarge);
-    }
-    if input.len() < HEADER_LEN + length {
-        return Ok(None);
-    }
-    input.advance(HEADER_LEN);
-    Ok(Some(Record {
-        kind,
-        pts_us,
-        payload: input.split_to(length).freeze(),
-    }))
-}
-
-/// Video configuration, named for the browser's WebCodecs `VideoDecoderConfig`.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct VideoConfig {
-    pub codec: String,
-    #[serde(rename = "codedWidth")]
-    pub coded_width: u32,
-    #[serde(rename = "codedHeight")]
-    pub coded_height: u32,
-    #[serde(default)]
-    pub capture: String,
-    #[serde(default)]
-    pub encoder: String,
-    #[serde(default)]
-    pub hardware: bool,
-}
-
-/// Guest audio format as reported by QEMU's D-Bus audio interface.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AudioConfig {
-    pub id: u64,
-    pub bits: u8,
-    pub signed: bool,
-    pub float: bool,
-    pub frequency: u32,
-    pub channels: u8,
-    pub bytes_per_frame: u32,
-    pub big_endian: bool,
-    pub enabled: bool,
-    pub muted: bool,
-    #[serde(default)]
-    pub volume: Vec<u8>,
-}
-
-impl AudioConfig {
+impl AudioConfigExt for AudioConfig {
     /// GStreamer raw audio caps for this format, or `None` if unsupported.
-    pub fn caps(&self) -> Option<String> {
+    fn caps(&self) -> Option<String> {
         let channels = u32::from(self.channels);
         if channels == 0 || self.frequency == 0 {
             return None;
@@ -175,7 +57,7 @@ impl AudioConfig {
     }
 
     /// Linear playback gain from QEMU's per-channel 0-255 volume and mute.
-    pub fn gain(&self) -> f64 {
+    fn gain(&self) -> f64 {
         if self.muted {
             return 0.0;
         }
@@ -187,55 +69,12 @@ impl AudioConfig {
     }
 }
 
-/// A control record. `text` is present when the guest clipboard changed and
-/// `null` when the guest released it.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct Control {
-    #[serde(rename = "type")]
-    pub kind: String,
-    #[serde(default)]
-    pub available: bool,
-    #[serde(default)]
-    pub text: Option<String>,
-}
-
-/// Messages the viewer sends to the stream as JSON text frames.
-pub mod message {
-    use super::*;
-
-    pub fn request_idr() -> String {
-        json!({"type": "request_idr"}).to_string()
-    }
-    pub fn key(keycode: u32, down: bool) -> String {
-        let kind = if down { "key_down" } else { "key_up" };
-        json!({"type": kind, "keycode": keycode}).to_string()
-    }
-    pub fn mouse_abs(x: u32, y: u32) -> String {
-        json!({"type": "mouse_abs", "x": x, "y": y}).to_string()
-    }
-    pub fn mouse_button(button: u32, down: bool) -> String {
-        let kind = if down { "mouse_down" } else { "mouse_up" };
-        json!({"type": kind, "button": button}).to_string()
-    }
-    /// Negative steps scroll up, positive steps scroll down.
-    pub fn mouse_wheel(steps: i64) -> String {
-        json!({"type": "mouse_wheel", "steps": steps.clamp(-10, 10)}).to_string()
-    }
-    /// Guest resolution request; `None` when outside what QEMU accepts.
-    pub fn resize(width: u32, height: u32) -> Option<String> {
-        ((320..=7680).contains(&width) && (200..=4320).contains(&height))
-            .then(|| json!({"type": "resize", "width": width, "height": height}).to_string())
-    }
-    pub fn clipboard_set(text: &str) -> Option<String> {
-        (text.len() <= MAX_CLIPBOARD_BYTES)
-            .then(|| json!({"type": "clipboard_set", "text": text}).to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::BufMut;
+    use bytes::BytesMut;
+    use display_stream_protocol::{MAX_PAYLOAD, ProtocolError};
 
     fn encode(kind: u8, pts: u64, payload: &[u8]) -> BytesMut {
         let mut out = BytesMut::new();

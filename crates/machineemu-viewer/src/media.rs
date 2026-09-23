@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
-use crate::protocol::AudioConfig;
+use crate::protocol::{AudioConfig, AudioConfigExt};
 
 /// One decoded frame as tightly packed `0x00RRGGBB` pixels.
 pub struct Frame {

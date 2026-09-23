@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, trace, warn};
 
 use crate::media::{self, Audio, DecoderChoice, Video, VideoError};
-use crate::protocol::{self, AudioConfig, Control, RecordType, VideoConfig, message};
+use crate::protocol::{self, AudioConfig, Control, Cursor, RecordType, VideoConfig, message};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
@@ -76,6 +76,7 @@ pub struct Settings {
 /// Events for the window.
 pub enum Event {
     Config(VideoConfig),
+    Cursor(Cursor),
     Decoder {
         name: String,
         hardware: bool,
@@ -276,7 +277,17 @@ pub async fn run(
                                 }
                                 RecordType::Delta => stats.skipped += 1,
                                 RecordType::Control => {
-                                    match serde_json::from_slice::<Control>(&record.payload) {
+                                    let value: serde_json::Value = serde_json::from_slice(&record.payload)
+                                        .context("invalid control record")?;
+                                    if value["type"] == "cursor" {
+                                        match serde_json::from_value::<Cursor>(value) {
+                                            Ok(cursor) if cursor.valid() => events(Event::Cursor(cursor)),
+                                            Ok(_) => warn!("invalid cursor geometry or image"),
+                                            Err(error) => warn!(%error, "invalid cursor record"),
+                                        }
+                                        continue;
+                                    }
+                                    match serde_json::from_value::<Control>(value) {
                                         Ok(control) if control.kind == "clipboard" => {
                                             debug!(
                                                 available = control.available,

@@ -10,6 +10,7 @@ anyhow = "1"
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 bytes = "1"
 clap.workspace = true
+display-stream-protocol.workspace = true
 futures-util.workspace = true
 gstreamer = "0.25"
 gstreamer-app = "0.25"

@@ -149,16 +149,18 @@
             iproute2
           ];
 
-          # machineemu-viewer decodes the H.264 display stream with GStreamer
-          # (VA-API through plugins-bad, avdec_h264 from gst-libav as the
-          # software fallback) and opens a winit window, which loads its
-          # Wayland/X11 client libraries at run time.
+          # The viewer decodes H.264 with GStreamer. display-stream encodes
+          # with GStreamer and links EGL, GLES, and GBM for DMABUF capture.
           viewerLibs = with pkgs; [
             gst_all_1.gstreamer
             gst_all_1.gst-plugins-base
             gst_all_1.gst-plugins-good
             gst_all_1.gst-plugins-bad
             gst_all_1.gst-libav
+            libglvnd
+            libgbm
+            libdrm
+            libva-utils
           ];
           windowLibs = with pkgs; [
             wayland

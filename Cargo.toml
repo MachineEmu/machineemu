@@ -1,14 +1,17 @@
 [workspace]
-members = ["crates/machineemu-core", "crates/machineemu", "crates/machineemu-viewer"]
+members = ["crates/machineemu-core", "crates/machineemu", "crates/machineemu-viewer", "crates/display-stream", "crates/display-stream-protocol"]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
 license = "AGPL-3.0-or-later"
+rust-version = "1.96"
 version = "0.1.0"
 
 [workspace.dependencies]
+anyhow = "1"
 axum = { version = "0.7", features = ["ws"] }
+bytes = "1"
 futures-util = "0.3"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
@@ -26,6 +29,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 utoipa = { version = "5.5", features = ["macros"] }
 machineemu-core = { path = "crates/machineemu-core" }
 nix = { version = "0.29", features = ["socket", "uio", "signal"] }
+display-stream-protocol = { path = "crates/display-stream-protocol" }
+zbus = { version = "5.19", default-features = false, features = ["p2p", "tokio"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

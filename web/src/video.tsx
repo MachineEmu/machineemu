@@ -5,6 +5,18 @@ import { MachineEmuClient } from "./client";
 const HEADER = 16;
 const MAX_RECORD = 16 * 1024 * 1024;
 
+type CursorRecord = { type: "cursor"; x: number; y: number; visible: boolean; width: number; height: number; hot_x: number; hot_y: number; data: number[] };
+
+function validCursor(value: CursorRecord): boolean {
+  return value.type === "cursor" && Number.isInteger(value.width) && Number.isInteger(value.height)
+    && value.width >= 0 && value.height >= 0 && value.width <= 256 && value.height <= 256
+    && Number.isInteger(value.hot_x) && Number.isInteger(value.hot_y)
+    && value.hot_x >= 0 && value.hot_y >= 0
+    && (value.width === 0 || value.hot_x < value.width)
+    && (value.height === 0 || value.hot_y < value.height)
+    && Array.isArray(value.data) && value.data.length === value.width * value.height * 4;
+}
+
 function socketUrl(instance: string, session: string, clientId: string): string {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
   return `${scheme}://${location.host}/ws/v1/sessions/${encodeURIComponent(instance)}/${encodeURIComponent(session)}/video?client_id=${encodeURIComponent(clientId)}`;
@@ -49,6 +61,7 @@ export function Video() {
   const [query] = useSearchParams();
   const instance = query.get("instance") ?? "";
   const canvas = useRef<HTMLCanvasElement>(null);
+  const cursorCanvas = useRef<HTMLCanvasElement>(null);
   const socket = useRef<WebSocket | undefined>(undefined);
   const [clientId] = useState(() => crypto.randomUUID().replaceAll("-", ""));
   const [connected, setConnected] = useState(false);
@@ -65,6 +78,24 @@ export function Video() {
     let configured = false;
     let keyframeNeeded = true;
     let buffer: Uint8Array<ArrayBuffer> = new Uint8Array(new ArrayBuffer(0));
+    let cursor: CursorRecord | undefined;
+    const drawCursor = () => {
+      const overlay = cursorCanvas.current;
+      if (!overlay) return;
+      const context = overlay.getContext("2d");
+      if (!context) return;
+      context.clearRect(0, 0, overlay.width, overlay.height);
+      if (!cursor?.visible || !validCursor(cursor) || !cursor.width || !cursor.height) return;
+      const pixels = new Uint8ClampedArray(cursor.data);
+      for (let offset = 0; offset < pixels.length; offset += 4) {
+        [pixels[offset], pixels[offset + 2]] = [pixels[offset + 2], pixels[offset]];
+      }
+      const bitmap = new ImageData(pixels, cursor.width, cursor.height);
+      const shape = document.createElement("canvas");
+      shape.width = cursor.width; shape.height = cursor.height;
+      shape.getContext("2d")?.putImageData(bitmap, 0, 0);
+      context.drawImage(shape, cursor.x - cursor.hot_x, cursor.y - cursor.hot_y);
+    };
     const next = new WebSocket(socketUrl(instance, id, clientId));
     next.binaryType = "arraybuffer";
     socket.current = next;
@@ -73,7 +104,15 @@ export function Video() {
       decoder = new VideoDecoder({
         output: (frame) => {
           const target = canvas.current;
-          if (target) { target.width = frame.displayWidth; target.height = frame.displayHeight; target.getContext("2d")?.drawImage(frame, 0, 0); }
+          if (target) {
+            target.width = frame.displayWidth; target.height = frame.displayHeight;
+            target.getContext("2d")?.drawImage(frame, 0, 0);
+            const overlay = cursorCanvas.current;
+            if (overlay && (overlay.width !== frame.displayWidth || overlay.height !== frame.displayHeight)) {
+              overlay.width = frame.displayWidth; overlay.height = frame.displayHeight;
+              drawCursor();
+            }
+          }
           frame.close();
         },
         error: (reason) => { configured = false; keyframeNeeded = true; fail(reason); },
@@ -103,6 +142,9 @@ export function Video() {
             avc.set(converted);
             decoder?.decode(new EncodedVideoChunk({ type: type === 1 ? "key" : "delta", timestamp: Number(view.getBigUint64(8)), data: avc }));
             if (type === 1) keyframeNeeded = false;
+          } else if (type === 4) {
+            const value = JSON.parse(new TextDecoder().decode(payload)) as CursorRecord;
+            if (value.type === "cursor" && validCursor(value)) { cursor = value; drawCursor(); }
           }
         }
       } catch (reason) { fail(reason); next.close(); }
@@ -127,7 +169,7 @@ export function Video() {
     <p className="session-meta">{connected ? `Connected · ${inputOwned ? "input enabled" : "view only"}` : "Connecting…"}</p>
     <div className="actions"><button className="button" disabled={!connected} onClick={() => void claim()}>Take input</button><button className="button button-secondary" disabled={!connected} onClick={() => void claim(true)}>Take over</button><button className="button button-secondary" disabled={!inputOwned} onClick={() => void release()}>Release input</button></div>
     {error && <p className="notice notice-error" role="alert">{error}</p>}
-    <canvas className="video-canvas" ref={canvas} aria-label="QEMU H.264 display" />
+    <div className="video-canvas-wrap"><canvas className="video-canvas" ref={canvas} aria-label="QEMU H.264 display" /><canvas className="video-cursor-canvas" ref={cursorCanvas} aria-hidden="true" /></div>
     <div className="actions"><button className="button button-secondary" onClick={() => socket.current?.send(JSON.stringify({ type: "request_idr" }))}>Refresh frame</button><button className="button button-secondary" disabled={!inputOwned} onClick={() => send("key_down", { key: "Escape" })}>Send Escape</button></div>
   </main>;
 }

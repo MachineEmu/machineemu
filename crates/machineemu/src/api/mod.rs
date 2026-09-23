@@ -39,7 +39,7 @@ struct Args {
     /// JSON map of profile ID to a planner-produced launch specification.
     #[arg(long)]
     launch_plans: Option<PathBuf>,
-    /// Path to the QEMU project's display-stream encoder.
+    /// Path to the display-stream encoder.
     #[arg(long)]
     display_stream: Option<PathBuf>,
     /// Print the generated API v2 OpenAPI document and exit.
