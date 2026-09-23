@@ -23,7 +23,7 @@ asynchronous lifecycle and protocol I/O; its optional `api-schema` feature
 adds Utoipa schemas to the shared launch contract. Application
 binaries are thin entry points. Storage keeps its SQLite connection private;
 runtime uses workspace methods instead of accessing the database directly.
-Future catalog, analysis and protocol modules should be added when implemented,
+Future analysis and protocol modules should be added when implemented,
 rather than creating empty packages in advance.
 
 Build both binaries before using CLI daemon auto-start:

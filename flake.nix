@@ -1,5 +1,5 @@
 {
-  description = "MachineEmu planner, daemon and catalog: the Rust toolchain plus the host programs a run needs";
+  description = "MachineEmu planner and daemon: the Rust toolchain plus the host programs a run needs";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -36,7 +36,7 @@
         pkgs:
         pkgs.lib.makeOverridable (
           {
-            profile ? builtins.fromJSON (builtins.readFile ./catalog/profiles/malware-analysis-x64.json),
+            profile ? builtins.fromJSON (builtins.readFile ./profiles/malware-analysis-x64.json),
             bootLogo ? ./assets/analysis/neutral-boot-logo.bmp,
             fvShift ? 65536,
           }:

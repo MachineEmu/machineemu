@@ -59,10 +59,10 @@ struct ProfileSummary {
     path: PathBuf,
 }
 
-fn list_profiles(workspace: &Path, catalog: &Path) -> Result<Vec<ProfileSummary>, Error> {
+fn list_profiles(workspace: &Path, bundled: &Path) -> Result<Vec<ProfileSummary>, Error> {
     let mut paths = BTreeMap::new();
     for (directory, source) in [
-        (catalog.to_owned(), "catalog"),
+        (bundled.to_owned(), "bundled"),
         (workspace.join("profiles"), "workspace"),
     ] {
         let entries = match fs::read_dir(&directory) {
@@ -107,7 +107,7 @@ fn list_profiles(workspace: &Path, catalog: &Path) -> Result<Vec<ProfileSummary>
 }
 
 pub(super) fn profiles(workspace: &Path, json: bool) -> Result<(), Error> {
-    let profiles = list_profiles(workspace, Path::new("catalog/profiles"))?;
+    let profiles = list_profiles(workspace, Path::new("profiles"))?;
     if json {
         return print_json(&profiles);
     }
@@ -133,12 +133,12 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("machineemu-inventory-{}", std::process::id()));
         let workspace = root.join("workspace");
-        let catalog = root.join("catalog");
+        let bundled = root.join("bundled");
         fs::create_dir_all(workspace.join("profiles")).unwrap();
-        fs::create_dir_all(&catalog).unwrap();
-        fs::write(catalog.join("demo.json"), "invalid shadowed document").unwrap();
+        fs::create_dir_all(&bundled).unwrap();
+        fs::write(bundled.join("demo.json"), "invalid shadowed document").unwrap();
         fs::write(
-            catalog.join("zebra.json"),
+            bundled.join("zebra.json"),
             r#"{"target":"aarch64-softmmu"}"#,
         )
         .unwrap();
@@ -147,20 +147,20 @@ mod tests {
             r#"{"id":"different-id","name":"Demo","target":"x86_64-softmmu"}"#,
         )
         .unwrap();
-        let profiles = list_profiles(&workspace, &catalog).unwrap();
+        let profiles = list_profiles(&workspace, &bundled).unwrap();
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].id, "demo");
         assert_eq!(profiles[0].source, "workspace");
         assert_eq!(profiles[0].name, "Demo");
         assert_eq!(profiles[1].id, "zebra");
-        assert_eq!(profiles[1].source, "catalog");
+        assert_eq!(profiles[1].source, "bundled");
         assert!(
             list_profiles(&root.join("missing"), &root.join("absent"))
                 .unwrap()
                 .is_empty()
         );
-        fs::write(catalog.join("broken.json"), "invalid").unwrap();
-        assert!(list_profiles(&workspace, &catalog).is_err());
+        fs::write(bundled.join("broken.json"), "invalid").unwrap();
+        assert!(list_profiles(&workspace, &bundled).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

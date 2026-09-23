@@ -853,7 +853,7 @@ fn resolve_profile_path(profile_name: &str, workspace: &Path) -> PathBuf {
             .join("profiles")
             .join(format!("{profile_name}.json"))
     } else {
-        PathBuf::from("catalog/profiles").join(format!("{profile_name}.json"))
+        PathBuf::from("profiles").join(format!("{profile_name}.json"))
     }
 }
 
@@ -1119,7 +1119,7 @@ mod tests {
         );
         assert_eq!(
             resolve_profile_path("udm-pro", &root),
-            PathBuf::from("catalog/profiles/udm-pro.json")
+            PathBuf::from("profiles/udm-pro.json")
         );
         fs::remove_dir_all(root).unwrap();
     }

@@ -168,7 +168,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List named profiles, preferring workspace profiles over the catalog.
+    /// List named profiles, preferring workspace profiles over bundled profiles.
     Profiles {
         #[arg(long, default_value = "machineemu-workspace")]
         workspace: PathBuf,

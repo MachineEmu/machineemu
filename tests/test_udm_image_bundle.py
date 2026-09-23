@@ -15,7 +15,7 @@ def prepared(tmp_path):
     source.mkdir()
     for name in udm.COMPONENTS.values():
         (source / name).write_bytes(name.encode())
-    profile = json.loads((udm.REPO / 'catalog/profiles/udm-pro-lab.json').read_text())
+    profile = json.loads((udm.REPO / 'profiles/udm-pro-lab.json').read_text())
     profile['assets'] = {'boot': 'sha256:should-not-be-in-template'}
     return source, profile
 

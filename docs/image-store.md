@@ -166,6 +166,6 @@ python3 scripts/import-udm-pro.py images/udm-pro
 target/debug/machineemu run udm-pro-lab udmlab
 ```
 
-A named profile resolves from `<workspace>/profiles/` before the catalog.
+A named profile resolves from `<workspace>/profiles/` before the repository's `profiles/`.
 An explicit profile path takes precedence over both. Use the UDM importer
 for this bundle; the generic PC importer requires a `disk` component.

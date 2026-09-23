@@ -145,9 +145,9 @@ def test_profile_rejects_unsafe_or_incomplete_network_mode(tmp_path):
                               target="aarch64-softmmu")
 
 
-def test_catalog_analysis_profile_preserves_non_secret_descriptor_set(tmp_path):
-    catalog_path = Path(__file__).parents[1] / "catalog" / "profiles" / "malware-analysis-x64.json"
-    value = load_profile(catalog_path)
+def test_bundled_analysis_profile_preserves_non_secret_descriptor_set(tmp_path):
+    profile_path = Path(__file__).parents[1] / "profiles" / "malware-analysis-x64.json"
+    value = load_profile(profile_path)
     value["engine"] = {"track": "track"}
     # The pinned analysis firmware needs an asset store; this test is about the
     # analysis descriptors only.

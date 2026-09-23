@@ -34,7 +34,7 @@ python3 scripts/import-udm-pro.py images/udm-pro
 ```
 
 This verifies all four components and writes
-`machineemu-workspace/profiles/udm-pro-lab.json`. The catalog remains a source
+`machineemu-workspace/profiles/udm-pro-lab.json`. The repository remains a source
 of unbound templates; a named `run` selects an imported workspace profile first:
 
 ```sh
@@ -49,7 +49,7 @@ On the current host the existing wrapper can be selected with
 Edit `profile.json` to change defaults for subsequent imports, or edit the
 workspace profile for local changes. No component hashes need to be copied
 into either template by hand. Importing again regenerates the workspace
-profile; it does not change running guests. To choose the offline catalog
+profile; it does not change running guests. To choose the offline bundled
 template instead, import with `--profile udm-pro`.
 
 Copy the whole directory, including `components/`, to move this image to

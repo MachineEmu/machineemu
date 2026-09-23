@@ -1,7 +1,7 @@
 # MachineEmu
 
 MachineEmu is a local research lab for virtual machines and device firmware.
-This repository owns the runtime, API, CLI, browser client and catalog. It
+This repository owns the runtime, API, CLI, browser client, and bundled profiles. It
 consumes immutable engine bundles produced by `machineemu/qemu`.
 
 The repository is licensed under AGPL-3.0-or-later. Third-party and restricted
@@ -33,7 +33,7 @@ Images come from editable `images/<image-id>/manifest.json` files in the
 workspace. Existing SQLite image metadata can be migrated with
 `cargo run -p machineemu -- migrate-images` (also automatic when the updated
 daemon opens the workspace). Profiles combine its `profiles/*.json`
-with `./catalog/profiles/*.json`; workspace profiles take precedence for the
+with the repository's `./profiles/*.json`; workspace profiles take precedence for the
 same filename, as they do for `machineemu run`.
 
 Create a durable VM once, then start and stop its runs while retaining its disk

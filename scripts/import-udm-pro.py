@@ -133,7 +133,7 @@ def main():
         sources, manifest = bundle_sources(args.bundle)
         template = args.bundle / 'profile.json'
         if args.profile or not template.is_file():
-            template = REPO / 'catalog/profiles' / ((args.profile or 'udm-pro') + '.json')
+            template = REPO / 'profiles' / ((args.profile or 'udm-pro') + '.json')
         profile = read_json(template)
         if (profile.get('machine') != 'udm-pro' or profile.get('target') != 'aarch64-softmmu'
                 or profile.get('engine', {}).get('track') != 'unifi-10.2'

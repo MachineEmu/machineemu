@@ -568,7 +568,7 @@ fn udm_pro_uses_board_cpu_and_disposable_native_storage() {
     let root = test_root("udm-pro");
     let (_, release, bundle) = tpm_fixture(&root);
     let mut profile: Value =
-        serde_json::from_str(include_str!("../../../../catalog/profiles/udm-pro.json")).unwrap();
+        serde_json::from_str(include_str!("../../../../profiles/udm-pro.json")).unwrap();
     profile["engine"] = serde_json::json!({"track":"fixture"});
     let assets = root.join("assets");
     fs::create_dir_all(assets.join("sha256")).unwrap();
@@ -620,10 +620,8 @@ fn udm_pro_uses_board_cpu_and_disposable_native_storage() {
     );
     let mut lab = input.clone();
     let assets = lab.profile["assets"].clone();
-    lab.profile = serde_json::from_str(include_str!(
-        "../../../../catalog/profiles/udm-pro-lab.json"
-    ))
-    .unwrap();
+    lab.profile =
+        serde_json::from_str(include_str!("../../../../profiles/udm-pro-lab.json")).unwrap();
     lab.profile["engine"] = serde_json::json!({"track":"fixture"});
     lab.profile["assets"] = assets;
     lab.bridge_helper = Some(PathBuf::from("/run/wrappers/bin/qemu-bridge-helper"));

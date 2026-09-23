@@ -26,7 +26,7 @@ PCDs (`PcdAcpiDefaultOemId`, `PcdAcpiDefaultOemTableId`,
 creator. The profile's `analysis.acpi` block reaches every table QEMU builds,
 so a stock BGRT would be the one table that disagrees. The build appends a
 `[PcdsFixedAtBuild]` section to `OvmfPkg/OvmfPkgX64.dsc` with the values from
-`catalog/profiles/malware-analysis-x64.json`. The OEM ID is padded to six
+`profiles/malware-analysis-x64.json`. The OEM ID is padded to six
 bytes. The OEM table ID and creator ID are packed little-endian into eight and
 four bytes.
 

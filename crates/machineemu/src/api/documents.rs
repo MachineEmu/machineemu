@@ -266,14 +266,14 @@ pub(super) async fn put_instance_config(
 
 fn profile_path(root: &FsPath, id: &Id) -> (std::path::PathBuf, std::path::PathBuf) {
     let workspace = root.join("profiles").join(format!("{}.json", id.as_str()));
-    let catalog_root = FsPath::new("catalog/profiles");
-    let catalog_root = if catalog_root.is_dir() {
-        catalog_root.to_owned()
+    let bundled_root = FsPath::new("profiles");
+    let bundled_root = if bundled_root.is_dir() {
+        bundled_root.to_owned()
     } else {
-        FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/profiles")
+        FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles")
     };
-    let catalog = catalog_root.join(format!("{}.json", id.as_str()));
-    (workspace, catalog)
+    let bundled = bundled_root.join(format!("{}.json", id.as_str()));
+    (workspace, bundled)
 }
 
 pub(super) async fn get_profile(
@@ -290,11 +290,11 @@ pub(super) async fn get_profile(
             .workspace
             .lock()
             .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
-        let (workspace_path, catalog_path) = profile_path(workspace.root(), &profile_id);
+        let (workspace_path, bundled_path) = profile_path(workspace.root(), &profile_id);
         let (path, from_workspace) = if workspace_path.is_file() {
             (workspace_path, true)
         } else {
-            (catalog_path, false)
+            (bundled_path, false)
         };
         if !path.is_file() {
             return Err(RuntimeError::NotFound {

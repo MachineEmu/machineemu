@@ -22,7 +22,7 @@ The bundle must contain `Image`, `initramfs.cpio`, `boot.img`, and `spi.img`.
 Use the pristine bundle directory, not its previously booted `run/` directory.
 The importer hashes and copies these files into the workspace and writes a
 local profile with their asset references. Firmware and host paths stay out
-of the catalog. Configure the `unifi-10.2` engine as described in
+of bundled profiles. Configure the `unifi-10.2` engine as described in
 [configuration](configuration.md).
 
 This template boots offline, with four CPUs, 2 GiB RAM, and serial output in

@@ -1,4 +1,4 @@
-# MachineEmu catalog
+# Bundled profiles
 
 Profiles live in `profiles/` and are optional creation templates. They contain
 redistributable launch metadata only. Each created instance keeps its own
@@ -8,7 +8,7 @@ They refer to engine tracks, logical asset identifiers, resources, devices, and
 policy. Firmware, prepared disks, credentials, and host-specific paths remain
 external and must be imported through the asset boundary with content hashes.
 
-Named catalog and workspace profiles use JSON (`<id>.json`). An explicit
+Bundled and workspace profiles use JSON (`<id>.json`). An explicit
 profile path may point to a YAML (`.yaml` or `.yml`) file. The selected
 profile's `id` supplies template provenance in the instance document.
 

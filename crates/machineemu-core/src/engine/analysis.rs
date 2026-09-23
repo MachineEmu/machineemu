@@ -611,15 +611,15 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn catalog_profile() -> Value {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../catalog/profiles/malware-analysis-x64.json");
+    fn bundled_profile() -> Value {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles/malware-analysis-x64.json");
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
     }
 
     #[test]
-    fn catalog_analysis_matches_existing_identity_and_encodes_all_descriptors() {
-        let profile = catalog_profile();
+    fn bundled_analysis_matches_existing_identity_and_encodes_all_descriptors() {
+        let profile = bundled_profile();
         let analysis = plan(
             profile.as_object().unwrap(),
             "pc-q35-10.1",
