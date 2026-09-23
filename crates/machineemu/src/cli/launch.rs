@@ -186,6 +186,13 @@ pub(super) fn run_rust_owned(
         .unwrap_or("x86_64-softmmu")
         .to_owned();
     let saved_profile = profile.clone();
+    let sidecars = planned_helpers(
+        &saved_profile,
+        &workspace_root,
+        instance,
+        config_path.as_deref(),
+        config.helpers.as_ref(),
+    )?;
     let display = super::vnc::resolve(&profile, &profile_path, vnc, vnc_password_file)?;
     super::vnc::normalize_profile(&mut profile, display.is_some())?;
     let configured_engine = if qemu == Path::new("/run/current-system/sw/bin/qemu-system-x86_64") {
@@ -351,7 +358,8 @@ pub(super) fn run_rust_owned(
         "stdout": relative(&instance_dir.join("qemu.stdout"))?,
         "stderr": relative(&instance_dir.join("qemu.stderr"))?,
         "preparation": if plan.preparation.disk_overlay.is_some() { preparation } else { serde_json::Value::Null },
-        "helper_argv": plan.helper_argv
+        "helper_argv": plan.helper_argv,
+        "helpers": sidecars
     });
     if image.is_some()
         && !fresh
@@ -415,6 +423,132 @@ pub(super) fn run_rust_owned(
     }
     println!("QMP: {}", external_qmp_socket.display());
     Ok(())
+}
+
+fn planned_helpers(
+    profile: &serde_json::Value,
+    root: &Path,
+    instance: &str,
+    config_path: Option<&Path>,
+    configured: Option<&machineemu_core::config::HelperConfig>,
+) -> Result<Vec<serde_json::Value>, machineemu_core::engine::Error> {
+    use machineemu_core::engine::Error;
+    let runtime = root.join("instances").join(instance);
+    let relative = format!("instances/{instance}");
+    let script = |name: &str, override_path: Option<&PathBuf>| -> Result<String, Error> {
+        let path = override_path
+            .map(|path| machineemu_core::config::resolve_config_path(config_path, path.clone()))
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../scripts/compat")
+                    .join(name)
+            });
+        path.canonicalize()
+            .ok()
+            .filter(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                Error::Invalid(format!(
+                    "helper script {name} is unavailable at {}",
+                    path.display()
+                ))
+            })
+    };
+    let mut helpers = Vec::new();
+    if profile["machine"] == "udm-pro" || profile["machine"] == "us24pro" {
+        let hub = script(
+            "unifi_helper.py",
+            configured.and_then(|c| c.unifi_hub.as_ref()),
+        )?;
+        helpers.push(serde_json::json!({
+            "name":"frontpanel", "argv":["python3",hub,"frontpanel","--runtime",runtime,"--profile",runtime.join("profile.json")],
+            "after_qemu":true,"ready_socket":format!("{relative}/frontpanel.sock")
+        }));
+        if profile["machine"] == "udm-pro"
+            && profile.pointer("/devices/lcd") == Some(&serde_json::Value::Bool(true))
+        {
+            let hub = script(
+                "unifi_helper.py",
+                configured.and_then(|c| c.unifi_hub.as_ref()),
+            )?;
+            helpers.push(serde_json::json!({
+                "name":"lcm", "argv":["python3",hub,"lcm","--runtime",runtime],
+                "after_qemu":true,"ready_socket":format!("{relative}/display-input.sock")
+            }));
+        }
+        if profile["machine"] == "udm-pro"
+            && profile.pointer("/devices/bluetooth") == Some(&serde_json::Value::Bool(true))
+        {
+            let bluetooth = script(
+                "hci_simulator.py",
+                configured.and_then(|c| c.bluetooth_simulator.as_ref()),
+            )?;
+            helpers.push(serde_json::json!({
+                "name":"bluetooth", "argv":["python3",bluetooth,"--socket",runtime.join("bluetooth.sock"),"--control",runtime.join("bluetooth-control.sock")],
+                "after_qemu":true,"ready_socket":format!("{relative}/bluetooth-control.sock")
+            }));
+        }
+    }
+    if profile.pointer("/wifi/enabled") == Some(&serde_json::Value::Bool(true)) {
+        if profile["machine"] != "mt7981" {
+            return Err(Error::Invalid(
+                "Wi-Fi simulation requires the mt7981 machine".into(),
+            ));
+        }
+        let namespace = profile
+            .pointer("/wifi/namespace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                Error::Invalid("wifi.namespace is required for the isolated hwsim helper".into())
+            })?;
+        Id::new("namespace", namespace.to_owned()).map_err(|e| Error::Invalid(e.to_string()))?;
+        let radios = if let Some(radios) = profile
+            .pointer("/wifi/radios")
+            .and_then(serde_json::Value::as_array)
+        {
+            radios
+                .iter()
+                .map(|radio| radio.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        } else {
+            profile
+                .pointer("/wifi/radio")
+                .and_then(serde_json::Value::as_str)
+                .map(|radio| vec![radio.to_owned()])
+        }
+        .filter(|radios| !radios.is_empty())
+        .ok_or_else(|| {
+            Error::Invalid("wifi.radios must list NAME=HWSIM_RADIO_MAC entries".into())
+        })?;
+        let wifi = script(
+            "hwsim_adapter.py",
+            configured.and_then(|c| c.wifi_simulator.as_ref()),
+        )?;
+        let mut argv = vec![
+            "ip".into(),
+            "netns".into(),
+            "exec".into(),
+            namespace.into(),
+            "python3".into(),
+            wifi,
+            "--own-medium".into(),
+            "--socket".into(),
+            runtime.join("wifi.sock").to_string_lossy().into_owned(),
+            "--control".into(),
+            runtime
+                .join("wifi-control.sock")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        for radio in radios {
+            argv.extend(["--radio".into(), radio]);
+        }
+        helpers.push(serde_json::json!({
+            "name":"wifi", "argv":argv,
+            "after_qemu":false,"ready_socket":format!("{relative}/wifi.sock")
+        }));
+    }
+    Ok(helpers)
 }
 
 fn write_instance_profile(
@@ -645,6 +779,27 @@ fn resolve_profile_path(profile_name: &str, workspace: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udm_helpers_follow_qemu_and_wifi_requires_an_isolated_namespace() {
+        let root = std::env::temp_dir();
+        let udm = serde_json::json!({"machine":"udm-pro","devices":{"lcd":true,"bluetooth":true}});
+        let helpers = planned_helpers(&udm, &root, "lab", None, None).unwrap();
+        assert_eq!(
+            helpers
+                .iter()
+                .map(|item| item["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["frontpanel", "lcm", "bluetooth"]
+        );
+        assert!(helpers.iter().all(|item| item["after_qemu"] == true));
+        let wifi = serde_json::json!({"machine":"mt7981","wifi":{"enabled":true,"radio":"ap=02:00:00:00:00:01"}});
+        assert!(planned_helpers(&wifi, &root, "lab", None, None).is_err());
+        let wifi = serde_json::json!({"machine":"mt7981","wifi":{"enabled":true,"namespace":"lab-wifi","radio":"ap=02:00:00:00:00:01"}});
+        let helpers = planned_helpers(&wifi, &root, "lab", None, None).unwrap();
+        assert_eq!(helpers[0]["name"], "wifi");
+        assert_eq!(helpers[0]["after_qemu"], false);
+    }
 
     #[test]
     fn instance_profile_preserves_user_edits() {

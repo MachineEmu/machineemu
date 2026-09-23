@@ -51,7 +51,7 @@ struct AppState {
     launch_plans: Arc<BTreeMap<String, LaunchSpec>>,
     running: Arc<Mutex<BTreeMap<String, Arc<Mutex<machineemu_core::runtime::RunningInstance>>>>>,
     instance_locks: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
-    helpers: Arc<Mutex<BTreeMap<String, ManagedProcess>>>,
+    helpers: Arc<Mutex<BTreeMap<String, Vec<ManagedProcess>>>>,
     display_streams: Arc<Mutex<BTreeMap<String, ManagedProcess>>>,
     display_stream: Arc<PathBuf>,
     stream_tickets: Arc<Mutex<BTreeMap<String, streams::StreamTicket>>>,
@@ -223,6 +223,10 @@ fn router(state: AppState) -> Router {
         )
         .route("/ws/v2/instances/:id/:kind", get(connect_stream))
         .route(
+            "/api/v2/instances/:id/helpers/:kind",
+            get(helper_control::status).post(helper_control::action),
+        )
+        .route(
             "/api/v2/instances/:id/devices/:kind",
             get(list_devices).post(attach_device),
         )
@@ -269,6 +273,8 @@ async fn shutdown() {
 mod auth;
 mod devices;
 mod dto;
+mod helper_control;
+mod helpers;
 mod images;
 mod instances;
 mod launch;

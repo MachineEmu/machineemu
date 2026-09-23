@@ -7,6 +7,17 @@ pub(super) struct LaunchSpec {
     pub(super) stderr: Option<PathBuf>,
     pub(super) preparation: Option<PreparationSpec>,
     pub(super) helper_argv: Option<Vec<String>>,
+    #[serde(default)]
+    pub(super) helpers: Vec<HelperSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(super) struct HelperSpec {
+    pub(super) name: String,
+    pub(super) argv: Vec<String>,
+    #[serde(default)]
+    pub(super) after_qemu: bool,
+    pub(super) ready_socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

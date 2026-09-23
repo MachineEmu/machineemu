@@ -284,7 +284,22 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
     )?;
     if machine == "udm-pro" {
         append_udm_devices(&mut argv, profile.get("devices"), &runtime)?;
+    } else if machine == "us24pro" {
+        argv.extend([
+            "-chardev".into(),
+            format!(
+                "socket,id=frontpanel-events,path={},server=on,wait=off",
+                runtime
+                    .join("frontpanel-events.sock")
+                    .display()
+                    .to_string()
+                    .replace(',', ",,")
+            ),
+            "-global".into(),
+            "unifi-board.frontpanel=frontpanel-events".into(),
+        ]);
     }
+    append_wifi(&mut argv, profile.get("wifi"), &machine, &runtime)?;
     if let Some(analysis) = &analysis {
         argv.extend(analysis.argv.clone());
     }
@@ -302,6 +317,65 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         helper_argv,
         manifest,
     })
+}
+
+fn append_wifi(
+    argv: &mut Vec<String>,
+    wifi: Option<&Value>,
+    machine: &str,
+    runtime: &Path,
+) -> Result<(), Error> {
+    let Some(wifi) = wifi else {
+        return Ok(());
+    };
+    let wifi = object(wifi, "profile.wifi")?;
+    if wifi.get("enabled") != Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    if machine != "mt7981" {
+        return Err(invalid("profile.wifi requires the mt7981 machine"));
+    }
+    argv.extend([
+        "-global".into(),
+        format!(
+            "unifi-board.wifi-socket={}",
+            runtime
+                .join("wifi.sock")
+                .display()
+                .to_string()
+                .replace(',', ",,")
+        ),
+    ]);
+    Ok(())
+}
+
+#[cfg(test)]
+mod wifi_plan_tests {
+    use super::*;
+    #[test]
+    fn mt7981_wifi_binds_an_instance_socket_only_when_enabled() {
+        let mut argv = Vec::new();
+        append_wifi(
+            &mut argv,
+            Some(&serde_json::json!({"enabled":true})),
+            "mt7981",
+            Path::new("/tmp/lab"),
+        )
+        .unwrap();
+        assert_eq!(
+            argv,
+            ["-global", "unifi-board.wifi-socket=/tmp/lab/wifi.sock"]
+        );
+        assert!(
+            append_wifi(
+                &mut Vec::new(),
+                Some(&serde_json::json!({"enabled":true})),
+                "udm-pro",
+                Path::new("/tmp/lab")
+            )
+            .is_err()
+        );
+    }
 }
 
 pub(super) fn invalid(s: &str) -> Error {

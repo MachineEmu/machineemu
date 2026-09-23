@@ -131,6 +131,29 @@ impl ManagedProcess {
             .map_err(|source| Error::Process(source.to_string()))
     }
 
+    #[cfg(unix)]
+    pub fn terminate_gracefully(&mut self) -> Result<()> {
+        use nix::{
+            sys::signal::{Signal, kill},
+            unistd::Pid,
+        };
+        if self.try_wait()?.is_some() {
+            return Ok(());
+        }
+        kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM)
+            .map_err(|error| Error::Process(error.to_string()))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if self.try_wait()?.is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        self.terminate()?;
+        self.wait()?;
+        Ok(())
+    }
+
     pub fn process_start(&self) -> Result<u64> {
         process_start_identity(self.pid).ok_or_else(|| {
             Error::Process(format!("cannot read process identity for pid {}", self.pid))

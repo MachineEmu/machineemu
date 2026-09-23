@@ -47,34 +47,73 @@ pub(super) async fn start_instance(
                 tpm.as_deref(),
             )?;
         }
-        let mut helper = if let Some(helper_argv) = &plan.helper_argv {
+        let mut helpers = Vec::new();
+        if let Some(helper_argv) = &plan.helper_argv {
             let helper_id = Id::new("run", format!("{}-helper", run_id.as_str()))?;
-            Some(ManagedProcess::spawn(helper_id, helper_argv, None, None)?)
-        } else {
-            None
-        };
+            helpers.push(ManagedProcess::spawn(helper_id, helper_argv, None, None)?);
+        }
+        for spec in plan.helpers.iter().filter(|spec| !spec.after_qemu) {
+            match super::helpers::spawn(workspace.root(), &instance_id, &run_id, spec) {
+                Ok(process) => helpers.push(process),
+                Err(error) => {
+                    super::helpers::stop_all(&mut helpers);
+                    return Err(error);
+                }
+            }
+        }
+        let mut argv = plan.argv.clone();
+        let post_helpers = plan.helpers.iter().any(|spec| spec.after_qemu);
+        if post_helpers && !argv.iter().any(|value| value == "-S") {
+            argv.push("-S".into());
+        }
         let running = workspace.start_instance(machineemu_core::runtime::StartRequest {
             operation_id,
             run_id: run_id.clone(),
             instance_id: instance_id.clone(),
             idempotency_key: &input.idempotency_key,
             input_json: &input_json,
-            argv: &plan.argv,
+            argv: &argv,
             qmp_socket: &qmp,
             stdout: stdout.as_deref(),
             stderr: stderr.as_deref(),
             qmp_timeout: std::time::Duration::from_secs(10),
         });
-        let running = match running {
+        let mut running = match running {
             Ok(running) => running,
             Err(error) => {
-                if let Some(helper) = helper.as_mut() {
-                    let _ = helper.terminate();
-                    let _ = helper.wait();
-                }
+                super::helpers::stop_all(&mut helpers);
                 return Err(error);
             }
         };
+        for spec in plan.helpers.iter().filter(|spec| spec.after_qemu) {
+            match super::helpers::spawn(workspace.root(), &instance_id, &run_id, spec) {
+                Ok(mut process) => {
+                    if spec.name == "bluetooth"
+                        && let Err(error) = super::helpers::wait_bluetooth_attached(
+                            &state,
+                            &instance_id,
+                            &mut process,
+                        )
+                    {
+                        let _ = process.terminate_gracefully();
+                        let _ = workspace.stop_instance(&instance_id, &mut running);
+                        super::helpers::stop_all(&mut helpers);
+                        return Err(error);
+                    }
+                    helpers.push(process);
+                }
+                Err(error) => {
+                    let _ = workspace.stop_instance(&instance_id, &mut running);
+                    super::helpers::stop_all(&mut helpers);
+                    return Err(error);
+                }
+            }
+        }
+        if post_helpers && let Err(error) = running.resume() {
+            let _ = workspace.stop_instance(&instance_id, &mut running);
+            super::helpers::stop_all(&mut helpers);
+            return Err(error);
+        }
         let result = workspace.instance(&instance_id)?;
         drop(workspace);
         state
@@ -82,12 +121,12 @@ pub(super) async fn start_instance(
             .lock()
             .map_err(|_| RuntimeError::Process("running map lock poisoned".into()))?
             .insert(instance_id.as_str().into(), Arc::new(Mutex::new(running)));
-        if let Some(helper) = helper {
+        if !helpers.is_empty() {
             state
                 .helpers
                 .lock()
                 .map_err(|_| RuntimeError::Process("helper map lock poisoned".into()))?
-                .insert(instance_id.as_str().into(), helper);
+                .insert(instance_id.as_str().into(), helpers);
         }
         Ok(result)
     })
@@ -214,14 +253,13 @@ pub(super) async fn lifecycle_action(
         }
         if action == "stop"
             && instance.is_ok()
-            && let Some(mut helper) = state
+            && let Some(mut helpers) = state
                 .helpers
                 .lock()
                 .map_err(|_| RuntimeError::Process("helper map lock poisoned".into()))?
                 .remove(&id)
         {
-            let _ = helper.terminate();
-            let _ = helper.wait();
+            super::helpers::stop_all(&mut helpers);
         }
         if action == "stop" && instance.is_ok() {
             state

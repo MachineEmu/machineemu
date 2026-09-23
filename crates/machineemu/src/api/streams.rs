@@ -14,6 +14,7 @@ use std::{
     os::unix::net::UnixStream as StdUnixStream,
     time::{Duration, Instant},
 };
+use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const MAX_MESSAGE: usize = 1_048_576;
@@ -250,18 +251,19 @@ pub(super) async fn issue_stream_ticket(
         let state = state.clone();
         move || {
             let id_value = Id::new("instance", id.clone())?;
-            if !matches!(kind.as_str(), "vnc" | "video" | "audio-dbus" | "usbredir") {
+            if !matches!(
+                kind.as_str(),
+                "vnc" | "video" | "audio-dbus" | "usbredir" | "lcm" | "frontpanel"
+            ) {
                 return Err(RuntimeError::Process("unknown stream kind".into()));
             }
-            if !matches!(kind.as_str(), "video" | "audio-dbus") && !request.control {
+            if matches!(kind.as_str(), "vnc" | "usbredir") && !request.control {
                 return Err(RuntimeError::Process(
                     "this stream requires control permission".into(),
                 ));
             }
-            if kind == "audio-dbus" && request.control {
-                return Err(RuntimeError::Process(
-                    "D-Bus audio is a playback-only stream".into(),
-                ));
+            if matches!(kind.as_str(), "audio-dbus" | "lcm" | "frontpanel") && request.control {
+                return Err(RuntimeError::Process("this stream is read only".into()));
             }
             let workspace = {
                 let owner = state
@@ -277,6 +279,8 @@ pub(super) async fn issue_stream_ticket(
                 "vnc" => vnc_endpoint(workspace.root(), &id, &run.qmp_socket)?,
                 "video" | "audio-dbus" => video_endpoint(&state, workspace.root(), &id, &run)?,
                 "usbredir" => socket_endpoint(workspace.root(), &id, "usbredir.sock")?,
+                "lcm" => socket_endpoint(workspace.root(), &id, "display.sock")?,
+                "frontpanel" => socket_endpoint(workspace.root(), &id, "frontpanel.sock")?,
                 _ => unreachable!(),
             };
             let value = random_ticket()?;
@@ -649,6 +653,40 @@ async fn relay(socket: WebSocket, ticket: StreamTicket) -> std::io::Result<()> {
                         .map_err(std::io::Error::other)?;
                 }
             }
+        } else if matches!(ticket.kind.as_str(), "lcm" | "frontpanel") {
+            let mut reader = tokio::io::BufReader::new(reader);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let size = reader.read_until(b'\n', &mut line).await?;
+                if size == 0 {
+                    return Ok(());
+                }
+                if size > 64 * 1024 || !line.ends_with(b"\n") {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid panel record",
+                    ));
+                }
+                let value: Value = serde_json::from_slice(&line).map_err(std::io::Error::other)?;
+                let expected = if ticket.kind == "lcm" {
+                    "unifi.lcm.v1"
+                } else {
+                    "unifi.frontpanel.v1"
+                };
+                if value.get("schema").and_then(Value::as_str) != Some(expected) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unexpected panel record schema",
+                    ));
+                }
+                sender
+                    .send(Message::Text(
+                        String::from_utf8(line.clone()).map_err(std::io::Error::other)?,
+                    ))
+                    .await
+                    .map_err(std::io::Error::other)?;
+            }
         } else {
             let mut buffer = [0u8; 64 * 1024];
             loop {
@@ -667,8 +705,10 @@ async fn relay(socket: WebSocket, ticket: StreamTicket) -> std::io::Result<()> {
         while let Some(message) = receiver.next().await {
             match message.map_err(std::io::Error::other)? {
                 Message::Binary(bytes)
-                    if !matches!(ticket.kind.as_str(), "video" | "audio-dbus")
-                        && bytes.len() <= MAX_MESSAGE =>
+                    if !matches!(
+                        ticket.kind.as_str(),
+                        "video" | "audio-dbus" | "lcm" | "frontpanel"
+                    ) && bytes.len() <= MAX_MESSAGE =>
                 {
                     writer.write_all(&bytes).await?
                 }

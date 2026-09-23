@@ -19,6 +19,9 @@ pub struct MachineEmuConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HelperConfig {
     pub swtpm: Option<PathBuf>,
+    pub bluetooth_simulator: Option<PathBuf>,
+    pub unifi_hub: Option<PathBuf>,
+    pub wifi_simulator: Option<PathBuf>,
     /// The privileged bridge helper, usually a setuid or capability wrapper
     /// outside the QEMU build it serves.
     pub qemu_bridge_helper: Option<PathBuf>,

@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import selectors
+import signal
 import socket
 import struct
 import sys
@@ -1022,6 +1023,10 @@ def _pump_central(instance, mask):
 
 
 def main():
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--socket", type=Path,
                         help="QEMU chardev socket backing the guest's ttyS1")
