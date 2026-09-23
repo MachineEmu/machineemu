@@ -1,3 +1,4 @@
-fn main() {
-    machineemu::cli::main();
+#[tokio::main]
+async fn main() {
+    machineemu::cli::main().await;
 }

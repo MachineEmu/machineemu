@@ -36,11 +36,37 @@ pub(super) async fn reconcile(
         return response.into_response();
     }
     let result = blocking(move || {
+        let instances = state
+            .workspace
+            .lock()
+            .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?
+            .instances()?;
+        let locks = instances
+            .iter()
+            .map(|instance| instance_lock(&state, instance.instance_id.as_str()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let _guards = locks
+            .iter()
+            .map(|lock| lock.blocking_lock())
+            .collect::<Vec<_>>();
         let workspace = state
             .workspace
             .lock()
             .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
-        workspace.reconcile_active_runs()
+        let runs = workspace.reconcile_active_runs()?;
+        for operation in workspace.reconcile_operations()? {
+            events::publish_operation(&state, &operation, None);
+        }
+        for before in instances {
+            let after = workspace.instance(&before.instance_id)?;
+            if after.revision != before.revision {
+                let run = runs
+                    .iter()
+                    .find(|run| run.instance_id == before.instance_id);
+                events::publish_state(&state, &after, run, "reconciliation");
+            }
+        }
+        Ok::<_, RuntimeError>(runs)
     })
     .await;
     match result {

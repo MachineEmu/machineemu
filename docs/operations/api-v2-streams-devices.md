@@ -2,13 +2,19 @@
 
 These routes belong to `machineemu-daemon`. HTTP requests use the daemon's bearer token (or its protected Unix socket). The instance must have a live run. Device changes are sent to QEMU over QMP and can fail when the VM or guest does not support hotplug.
 
+The daemon uses async QMP for live device changes, VM start/stop/pause/resume/reset,
+VNC and SPICE discovery, and the D-Bus display socket handoff. Per-instance
+locks serialize lifecycle changes, device changes, and display setup. The CLI uses async QMP for live inspection
+and async Unix or TCP connections for daemon requests. Workspace SQLite work
+remains synchronous and is kept outside socket waits.
+
 ## Display and USB streams
 
-Create a single-use ticket with `POST /api/v2/instances/{id}/streams/{kind}/ticket` and body `{"control":true}`. The response contains `ticket` and `expires_in_seconds` (30). Open `ws(s)://{host}/ws/v2/instances/{id}/{kind}?ticket={ticket}` from a page whose `Origin` matches the WebSocket `Host`. Ticket creation uses the normal bearer token; the WebSocket uses the ticket. A ticket belongs to one instance, run, and stream type. Only one control connection per run and kind is accepted.
+Create a single-use ticket with `POST /api/v2/instances/{id}/streams/{kind}/ticket` and body `{"control":true}` for input or `{"control":false}` for viewing. The response contains `ticket` and `expires_in_seconds` (30). Open `ws(s)://{host}/ws/v2/instances/{id}/{kind}?ticket={ticket}` from a page whose `Origin` matches the WebSocket `Host`. Ticket creation uses the normal bearer token; the WebSocket uses the ticket. A ticket belongs to one instance, run, and stream type. VNC and video share one input owner per run. A new control ticket with `{"control":true,"takeover":true}` revokes the previous display controller when redeemed; closing a controller releases its input ownership. View-only VNC filters guest-directed RFB keyboard, pointer, and clipboard messages on the server.
 
 | `kind` | Upstream | WebSocket data |
 | --- | --- | --- |
-| `vnc` | The local TCP or `instances/{id}/vnc.sock` endpoint reported by QMP `query-vnc` | Raw RFB bytes in binary frames, both directions. Use `control:true`. |
+| `vnc` | The local TCP or `instances/{id}/vnc.sock` endpoint reported by QMP `query-vnc` | Raw RFB bytes in binary frames, both directions. `control:false` permits display and protocol negotiation while filtering keyboard, pointer, and clipboard input. |
 | `video` | QEMU D-Bus display through the sibling QEMU project's `display-stream`, exposed at `instances/{id}/video.sock` | One framed display-stream record per binary frame, including H.264 video and D-Bus audio when enabled. Viewers may use `control:false`; JSON `request_idr` is allowed. `control:true` also permits keyboard, pointer, resize, and clipboard control messages. |
 | `audio-dbus` | The same QEMU D-Bus display and `display-stream` socket | Playback only: framed audio configuration records (type 5) and PCM data records (type 6). Request with `control:false`; browser messages other than WebSocket control frames are rejected. |
 | `usbredir` | `instances/{id}/usbredir.sock` | Raw usbredir protocol bytes in binary frames, both directions. Use `control:true`. |
@@ -16,6 +22,19 @@ Create a single-use ticket with `POST /api/v2/instances/{id}/streams/{kind}/tick
 | `frontpanel` | Supervised UDM Pro panel hub at `instances/{id}/frontpanel.sock` | Read-only `unifi.frontpanel.v1` JSON text frames. Use `control:false`. UDM Pro port link state is derived from configuration and host carrier, rather than a modeled LED register. |
 
 For H.264, set `devices.h264: true` and `devices.video.type: virtio-vga-gl` in a Rust-planned profile, or start QEMU with `-display dbus,p2p=on,gl=on` and a GL-capable virtual GPU in a custom launch plan. A profile with both `devices.h264` and `devices.vnc` keeps raw VNC on a Unix socket alongside D-Bus display. Build the sibling QEMU project's `display-stream` binary (`cargo build -p display-stream --release` from that project, with its GStreamer/VA-API development dependencies), then configure the daemon's `--display-stream` path or put the binary on `PATH`. The first video ticket starts the streamer, passes a private D-Bus socket to QEMU through QMP, and records to `instances/{id}/screen.mp4`. The streamer captures QEMU DMABUF scanout and uses VA-API H.264 hardware encoding when available; its own software fallback reports its encoder and `hardware` status in the video configuration record. The daemon stops the streamer with the VM. Records use the streamer's 16-byte display header: bytes 4–7 are the big-endian payload length, followed by that many payload bytes. Records over 16 MiB are rejected. The USB redirection stream requires a usbredir-capable client, and the `usbredir` device must first be attached below. Browser WebUSB does not itself speak usbredir.
+
+## Screenshot and key chords
+
+`POST /api/v2/instances/{id}/screenshot` returns the primary display as
+`image/png` with `Cache-Control: no-store`. The daemon captures through QMP,
+reads at most 16 MiB, and removes its temporary image. It requires a live VM
+and a QEMU build that supports PNG `screendump`.
+
+`POST /api/v2/instances/{id}/send-key` accepts a QEMU qcode chord, for example
+`{"keys":["ctrl","alt","delete"],"hold_time_ms":100}`, and returns 204.
+The chord supports 1–16 qcodes and a hold time up to 5000 ms. These HTTP
+actions use the daemon bearer token; continuous keyboard and pointer input
+belongs on the ticketed display WebSocket.
 
 ## Guest audio
 

@@ -4,14 +4,15 @@ use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use futures_util::{SinkExt, StreamExt};
-use machineemu_core::protocols::qmp::QmpClient;
+use machineemu_core::protocols::async_qmp::AsyncQmp;
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     io::Read,
     os::fd::AsRawFd,
     os::unix::fs::FileTypeExt,
     os::unix::net::UnixStream as StdUnixStream,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tokio::io::AsyncBufReadExt;
@@ -32,6 +33,7 @@ pub(super) struct StreamTicket {
     pub(super) run_id: String,
     pub(super) kind: String,
     pub(super) control: bool,
+    pub(super) takeover: bool,
     pub(super) endpoint: Endpoint,
     pub(super) expires: Instant,
     pub(super) audio_group: Option<String>,
@@ -46,17 +48,19 @@ pub(super) struct AudioSession {
     pub(super) expires: Instant,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SpiceTicketRequest {
     #[serde(default)]
     microphone: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct TicketRequest {
     #[serde(default)]
     control: bool,
+    #[serde(default)]
+    takeover: bool,
 }
 
 #[derive(Deserialize)]
@@ -79,13 +83,13 @@ fn socket_endpoint(root: &std::path::Path, id: &str, name: &str) -> Result<Endpo
     Ok(Endpoint::Unix(path))
 }
 
-fn vnc_endpoint(
+async fn vnc_endpoint(
     root: &std::path::Path,
     id: &str,
     qmp_socket: &std::path::Path,
 ) -> Result<Endpoint, RuntimeError> {
-    let mut qmp = QmpClient::connect(qmp_socket, Duration::from_secs(2))?;
-    let info = qmp.execute("query-vnc", Value::Null)?;
+    let mut qmp = AsyncQmp::connect(qmp_socket).await?;
+    let info = qmp.execute("query-vnc", Value::Null).await?;
     if info.get("enabled") != Some(&Value::Bool(true)) {
         return Err(RuntimeError::Process("VNC is disabled for this run".into()));
     }
@@ -142,25 +146,25 @@ fn vnc_endpoint(
     }
 }
 
-fn video_endpoint(
+async fn video_endpoint(
     state: &AppState,
     root: &std::path::Path,
     id: &str,
     run: &machineemu_core::domain::Run,
 ) -> Result<Endpoint, RuntimeError> {
     let lock = instance_lock(state, id)?;
-    let _guard = lock
-        .lock()
-        .map_err(|_| RuntimeError::Process("instance lock poisoned".into()))?;
-    let mut processes = state
-        .display_streams
-        .lock()
-        .map_err(|_| RuntimeError::Process("display stream map lock poisoned".into()))?;
-    if let Some(process) = processes.get_mut(id) {
-        if process.run_id == run.run_id && process.try_wait()?.is_none() {
-            return socket_endpoint(root, id, "video.sock");
+    let _guard = lock.lock_owned().await;
+    {
+        let mut processes = state
+            .display_streams
+            .lock()
+            .map_err(|_| RuntimeError::Process("display stream map lock poisoned".into()))?;
+        if let Some(process) = processes.get_mut(id) {
+            if process.run_id == run.run_id && process.try_wait()?.is_none() {
+                return socket_endpoint(root, id, "video.sock");
+            }
+            processes.remove(id);
         }
-        processes.remove(id);
     }
     let directory = root.join("instances").join(id);
     std::fs::create_dir_all(&directory).map_err(|source| RuntimeError::Io {
@@ -197,8 +201,19 @@ fn video_endpoint(
         Some(&directory.join("video.log")),
         client,
     )?;
-    let mut qmp = QmpClient::connect(&run.qmp_socket, Duration::from_secs(2))?;
-    qmp.attach_dbus_display(qemu_end.as_raw_fd())?;
+    let mut qmp = match AsyncQmp::connect(&run.qmp_socket).await {
+        Ok(qmp) => qmp,
+        Err(error) => {
+            let _ = process.terminate();
+            let _ = process.wait();
+            return Err(error);
+        }
+    };
+    if let Err(error) = qmp.attach_dbus_display(qemu_end.as_raw_fd()).await {
+        let _ = process.terminate();
+        let _ = process.wait();
+        return Err(error);
+    }
     drop(qemu_end);
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -211,22 +226,28 @@ fn video_endpoint(
         if let Ok(endpoint) = socket_endpoint(root, id, "video.sock") {
             // The streamer binds before registering its QEMU D-Bus listener.
             // Give an immediate registration failure time to reach the child.
-            std::thread::sleep(Duration::from_millis(250));
+            tokio::time::sleep(Duration::from_millis(250)).await;
             if process.try_wait()?.is_some() {
                 return Err(RuntimeError::Process(format!(
                     "display-stream could not attach to QEMU; inspect {}",
                     directory.join("video.log").display()
                 )));
             }
-            processes.insert(id.to_owned(), process);
+            state
+                .display_streams
+                .lock()
+                .map_err(|_| RuntimeError::Process("display stream map lock poisoned".into()))?
+                .insert(id.to_owned(), process);
             return Ok(endpoint);
         }
         if Instant::now() >= deadline {
+            let _ = process.terminate();
+            let _ = process.wait();
             return Err(RuntimeError::Process(
                 "display-stream did not create video.sock".into(),
             ));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -247,9 +268,9 @@ pub(super) async fn issue_stream_ticket(
     if let Err(response) = authorized(&headers, &state) {
         return response.into_response();
     }
-    let result = blocking({
+    let result = tokio::spawn({
         let state = state.clone();
-        move || {
+        async move {
             let id_value = Id::new("instance", id.clone())?;
             if !matches!(
                 kind.as_str(),
@@ -257,9 +278,14 @@ pub(super) async fn issue_stream_ticket(
             ) {
                 return Err(RuntimeError::Process("unknown stream kind".into()));
             }
-            if matches!(kind.as_str(), "vnc" | "usbredir") && !request.control {
+            if kind == "usbredir" && !request.control {
                 return Err(RuntimeError::Process(
                     "this stream requires control permission".into(),
+                ));
+            }
+            if request.takeover && (!request.control || !matches!(kind.as_str(), "vnc" | "video")) {
+                return Err(RuntimeError::Process(
+                    "takeover requires display control".into(),
                 ));
             }
             if matches!(kind.as_str(), "audio-dbus" | "lcm" | "frontpanel") && request.control {
@@ -275,9 +301,10 @@ pub(super) async fn issue_stream_ticket(
             let run = workspace
                 .live_run(&id_value)?
                 .ok_or_else(|| RuntimeError::Process("instance has no live run".into()))?;
+            let root = workspace.root().to_owned();
             let endpoint = match kind.as_str() {
-                "vnc" => vnc_endpoint(workspace.root(), &id, &run.qmp_socket)?,
-                "video" | "audio-dbus" => video_endpoint(&state, workspace.root(), &id, &run)?,
+                "vnc" => vnc_endpoint(&root, &id, &run.qmp_socket).await?,
+                "video" | "audio-dbus" => video_endpoint(&state, &root, &id, &run).await?,
                 "usbredir" => socket_endpoint(workspace.root(), &id, "usbredir.sock")?,
                 "lcm" => socket_endpoint(workspace.root(), &id, "display.sock")?,
                 "frontpanel" => socket_endpoint(workspace.root(), &id, "frontpanel.sock")?,
@@ -301,6 +328,7 @@ pub(super) async fn issue_stream_ticket(
                     run_id: run.run_id.as_str().into(),
                     kind: kind.clone(),
                     control: request.control,
+                    takeover: request.takeover,
                     endpoint,
                     expires: Instant::now() + Duration::from_secs(30),
                     audio_group: None,
@@ -309,7 +337,9 @@ pub(super) async fn issue_stream_ticket(
             Ok(serde_json::json!({"ticket": value, "expires_in_seconds": 30, "kind": kind}))
         }
     })
-    .await;
+    .await
+    .map_err(|error| RuntimeError::Process(format!("stream ticket task failed: {error}")))
+    .and_then(|result| result);
     match result {
         Ok(value) => axum::Json(value).into_response(),
         Err(error) => (
@@ -322,13 +352,13 @@ pub(super) async fn issue_stream_ticket(
     }
 }
 
-fn spice_endpoint(
+async fn spice_endpoint(
     root: &std::path::Path,
     id: &str,
     qmp_socket: &std::path::Path,
 ) -> Result<Endpoint, RuntimeError> {
-    let mut qmp = QmpClient::connect(qmp_socket, Duration::from_secs(2))?;
-    let info = qmp.execute("query-spice", Value::Null)?;
+    let mut qmp = AsyncQmp::connect(qmp_socket).await?;
+    let info = qmp.execute("query-spice", Value::Null).await?;
     if info.get("enabled") != Some(&Value::Bool(true))
         || info.get("auth").and_then(Value::as_str) != Some("none")
     {
@@ -380,7 +410,7 @@ pub(super) async fn issue_spice_tickets(
     if let Err(response) = authorized(&headers, &state) {
         return response.into_response();
     }
-    let result = blocking(move || {
+    let result = async move {
         let instance_id = Id::new("instance", id.clone())?;
         let workspace = state
             .workspace
@@ -390,7 +420,8 @@ pub(super) async fn issue_spice_tickets(
         let run = workspace
             .live_run(&instance_id)?
             .ok_or_else(|| RuntimeError::Process("instance has no live run".into()))?;
-        let endpoint = spice_endpoint(workspace.root(), &id, &run.qmp_socket)?;
+        let root = workspace.root().to_owned();
+        let endpoint = spice_endpoint(&root, &id, &run.qmp_socket).await?;
         let group = random_ticket()?;
         let channels = if request.microphone {
             vec!["main", "playback", "record"]
@@ -438,6 +469,7 @@ pub(super) async fn issue_spice_tickets(
                     run_id: run.run_id.as_str().into(),
                     kind,
                     control: channel == "record",
+                    takeover: false,
                     endpoint: endpoint.clone(),
                     expires: Instant::now() + Duration::from_secs(30),
                     audio_group: Some(group.clone()),
@@ -446,7 +478,7 @@ pub(super) async fn issue_spice_tickets(
             tokens.insert(channel.into(), Value::String(token));
         }
         Ok(serde_json::json!({"client_token":group,"tickets":tokens,"expires_in_seconds":30}))
-    })
+    }
     .await;
     match result {
         Ok(value) => axum::Json(value).into_response(),
@@ -469,7 +501,8 @@ fn same_origin(headers: &HeaderMap) -> bool {
 
 struct ControlLease {
     key: String,
-    owners: Arc<Mutex<BTreeSet<String>>>,
+    revoked: Arc<AtomicBool>,
+    owners: Arc<Mutex<BTreeMap<String, Arc<AtomicBool>>>>,
 }
 
 struct AudioLease {
@@ -490,10 +523,55 @@ impl Drop for AudioLease {
 }
 impl Drop for ControlLease {
     fn drop(&mut self) {
-        if let Ok(mut owners) = self.owners.lock() {
+        if let Ok(mut owners) = self.owners.lock()
+            && owners
+                .get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.revoked))
+        {
             owners.remove(&self.key);
         }
     }
+}
+
+pub(super) fn revoke_display(state: &AppState, instance_id: &str, run_id: &str) {
+    if let Ok(mut owners) = state.control_streams.lock()
+        && let Some(flag) = owners.remove(&format!("{instance_id}:{run_id}:display"))
+    {
+        flag.store(true, Ordering::Release);
+    }
+}
+
+fn claim_control(
+    ticket: &StreamTicket,
+    owners: Arc<Mutex<BTreeMap<String, Arc<AtomicBool>>>>,
+) -> Result<Option<ControlLease>, StatusCode> {
+    if !ticket.control {
+        return Ok(None);
+    }
+    let group = if matches!(ticket.kind.as_str(), "vnc" | "video") {
+        "display"
+    } else {
+        ticket.kind.as_str()
+    };
+    let key = format!("{}:{}:{group}", ticket.instance_id, ticket.run_id);
+    let revoked = Arc::new(AtomicBool::new(false));
+    {
+        let mut current = owners
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(previous) = current.get(&key) {
+            if !ticket.takeover {
+                return Err(StatusCode::CONFLICT);
+            }
+            previous.store(true, Ordering::Release);
+        }
+        current.insert(key.clone(), revoked.clone());
+    }
+    Ok(Some(ControlLease {
+        key,
+        revoked,
+        owners,
+    }))
 }
 
 pub(super) async fn connect_stream(
@@ -516,37 +594,35 @@ pub(super) async fn connect_stream(
     if ticket.expires <= Instant::now() || ticket.instance_id != id || ticket.kind != kind {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let live = {
+    let lease = {
         let state = state.clone();
         let id = id.clone();
+        let ticket = ticket.clone();
         blocking(move || {
             let instance_id = Id::new("instance", id)?;
-            let workspace = state
-                .workspace
-                .lock()
-                .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
-            workspace.live_run(&instance_id)
+            let lock = instance_lock(&state, instance_id.as_str())?;
+            let _guard = lock.blocking_lock();
+            let live = {
+                let workspace = state
+                    .workspace
+                    .lock()
+                    .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
+                workspace.live_run(&instance_id)?
+            };
+            if !matches!(live, Some(ref run) if run.run_id.as_str() == ticket.run_id) {
+                return Err(RuntimeError::Process(
+                    "stream ticket belongs to an inactive run".into(),
+                ));
+            }
+            claim_control(&ticket, state.control_streams.clone()).map_err(|status| {
+                RuntimeError::Process(format!("display input claim rejected: {status}"))
+            })
         })
         .await
     };
-    if !matches!(live, Ok(Some(ref run)) if run.run_id.as_str() == ticket.run_id) {
-        return StatusCode::CONFLICT.into_response();
-    }
-    let lease = if ticket.control {
-        let key = format!("{}:{}:{}", ticket.instance_id, ticket.run_id, ticket.kind);
-        let mut owners = match state.control_streams.lock() {
-            Ok(owners) => owners,
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        };
-        if !owners.insert(key.clone()) {
-            return StatusCode::CONFLICT.into_response();
-        }
-        Some(ControlLease {
-            key,
-            owners: state.control_streams.clone(),
-        })
-    } else {
-        None
+    let lease = match lease {
+        Ok(lease) => lease,
+        Err(_) => return StatusCode::CONFLICT.into_response(),
     };
     let audio = if let Some(group) = ticket.audio_group.as_ref() {
         let channel = ticket.kind.strip_prefix("spice-").unwrap_or_default();
@@ -594,6 +670,7 @@ pub(super) async fn connect_stream(
     upgrade
         .max_message_size(MAX_MESSAGE)
         .on_upgrade(move |socket| async move {
+            let revoked = lease.as_ref().map(|lease| lease.revoked.clone());
             let _lease = lease;
             if let Some((audio_lease, expected_id)) = audio {
                 let _audio_lease = audio_lease;
@@ -605,7 +682,7 @@ pub(super) async fn connect_stream(
                 )
                 .await;
             } else {
-                let _ = relay(socket, ticket).await;
+                let _ = relay(socket, ticket, revoked).await;
             }
         })
         .into_response()
@@ -614,7 +691,126 @@ pub(super) async fn connect_stream(
 trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Transport for T {}
 
-async fn relay(socket: WebSocket, ticket: StreamTicket) -> std::io::Result<()> {
+struct RfbInputGate {
+    handshake: VecDeque<usize>,
+    security_selected: bool,
+    buffer: Vec<u8>,
+}
+
+impl Default for RfbInputGate {
+    fn default() -> Self {
+        Self {
+            handshake: VecDeque::from([12, 1, 1]),
+            security_selected: false,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+impl RfbInputGate {
+    fn feed(&mut self, data: &[u8], allow_input: bool) -> std::io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        let mut offset = 0;
+        while let Some(needed) = self.handshake.front_mut() {
+            if offset == data.len() {
+                break;
+            }
+            let take = (*needed).min(data.len() - offset);
+            output.extend_from_slice(&data[offset..offset + take]);
+            offset += take;
+            *needed -= take;
+            if *needed == 0 {
+                let security_selection = self.handshake.len() == 2 && !self.security_selected;
+                self.handshake.pop_front();
+                if security_selection {
+                    self.security_selected = true;
+                    match data[offset - 1] {
+                        1 => {}
+                        2 => self.handshake.push_front(16),
+                        _ => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "unsupported view-only RFB security type",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        self.buffer.extend_from_slice(&data[offset..]);
+        if !self.handshake.is_empty() {
+            return Ok(output);
+        }
+        let mut consumed = 0;
+        while consumed < self.buffer.len() {
+            let kind = self.buffer[consumed];
+            let Some(size) = Self::message_size(&self.buffer[consumed..])? else {
+                break;
+            };
+            if size > self.buffer.len() - consumed {
+                break;
+            }
+            if allow_input || !matches!(kind, 4 | 5 | 6 | 251 | 255) {
+                output.extend_from_slice(&self.buffer[consumed..consumed + size]);
+            }
+            consumed += size;
+        }
+        self.buffer.drain(..consumed);
+        if self.buffer.len() > MAX_MESSAGE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RFB message too large",
+            ));
+        }
+        Ok(output)
+    }
+
+    fn message_size(data: &[u8]) -> std::io::Result<Option<usize>> {
+        let size = match data[0] {
+            0 => 20,
+            2 if data.len() >= 4 => 4 + 4 * u16::from_be_bytes([data[2], data[3]]) as usize,
+            2 => return Ok(None),
+            3 | 150 => 10,
+            4 => 8,
+            5 if data.len() >= 2 => {
+                if data[1] & 0x80 != 0 {
+                    7
+                } else {
+                    6
+                }
+            }
+            5 => return Ok(None),
+            6 if data.len() >= 8 => {
+                8 + i32::from_be_bytes(data[4..8].try_into().unwrap()).unsigned_abs() as usize
+            }
+            6 => return Ok(None),
+            248 if data.len() >= 9 => 9 + data[8] as usize,
+            248 => return Ok(None),
+            251 if data.len() >= 8 => 8 + 16 * data[6] as usize,
+            251 => return Ok(None),
+            255 => 12,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unsupported RFB message",
+                ));
+            }
+        };
+        if size > MAX_MESSAGE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RFB message too large",
+            ));
+        }
+        Ok(Some(size))
+    }
+}
+
+async fn relay(
+    socket: WebSocket,
+    ticket: StreamTicket,
+    revoked: Option<Arc<AtomicBool>>,
+) -> std::io::Result<()> {
     let stream: Box<dyn Transport> = match ticket.endpoint {
         Endpoint::Unix(path) => Box::new(
             tokio::time::timeout(
@@ -630,6 +826,7 @@ async fn relay(socket: WebSocket, ticket: StreamTicket) -> std::io::Result<()> {
     };
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (mut sender, mut receiver) = socket.split();
+    let revoked_for_input = revoked.clone();
     let to_browser = async {
         if matches!(ticket.kind.as_str(), "video" | "audio-dbus") {
             loop {
@@ -702,7 +899,17 @@ async fn relay(socket: WebSocket, ticket: StreamTicket) -> std::io::Result<()> {
         }
     };
     let from_browser = async {
+        let mut gate = RfbInputGate::default();
         while let Some(message) = receiver.next().await {
+            if revoked_for_input
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "display input ownership revoked",
+                ));
+            }
             match message.map_err(std::io::Error::other)? {
                 Message::Binary(bytes)
                     if !matches!(
@@ -710,7 +917,18 @@ async fn relay(socket: WebSocket, ticket: StreamTicket) -> std::io::Result<()> {
                         "video" | "audio-dbus" | "lcm" | "frontpanel"
                     ) && bytes.len() <= MAX_MESSAGE =>
                 {
-                    writer.write_all(&bytes).await?
+                    if ticket.kind == "vnc" {
+                        if ticket.control {
+                            writer.write_all(&bytes).await?;
+                        } else {
+                            let allowed = gate.feed(&bytes, false)?;
+                            if !allowed.is_empty() {
+                                writer.write_all(&allowed).await?;
+                            }
+                        }
+                    } else {
+                        writer.write_all(&bytes).await?;
+                    }
                 }
                 Message::Text(text) if ticket.kind == "video" && text.len() <= 64 * 1024 => {
                     let value: Value =
@@ -755,5 +973,102 @@ async fn relay(socket: WebSocket, ticket: StreamTicket) -> std::io::Result<()> {
         }
         Ok::<(), std::io::Error>(())
     };
-    tokio::select! { result = to_browser => result, result = from_browser => result }
+    let revoked_wait = async {
+        if let Some(flag) = revoked {
+            while !flag.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        } else {
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    };
+    tokio::select! { result = to_browser => result, result = from_browser => result, result = revoked_wait => result }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_only_rfb_filters_fragmented_keyboard_mouse_and_clipboard() {
+        let mut gate = RfbInputGate::default();
+        assert_eq!(
+            gate.feed(b"RFB 003.008\n", false).unwrap(),
+            b"RFB 003.008\n"
+        );
+        assert_eq!(gate.feed(&[1, 1], false).unwrap(), [1, 1]);
+        let keyboard = [4, 1, 0, 0, 0, 0, 0, 0];
+        assert!(gate.feed(&keyboard[..3], false).unwrap().is_empty());
+        assert!(gate.feed(&keyboard[3..], false).unwrap().is_empty());
+        assert!(gate.feed(&[5, 1, 0, 0, 0, 0], false).unwrap().is_empty());
+        assert!(
+            gate.feed(&[6, 0, 0, 0, 0, 0, 0, 1, b'x'], false)
+                .unwrap()
+                .is_empty()
+        );
+        let request = [3, 0, 0, 0, 0, 0, 0, 0, 1, 1];
+        assert_eq!(gate.feed(&request, false).unwrap(), request);
+    }
+
+    #[test]
+    fn controlling_rfb_passes_input_and_rejects_oversized_frames() {
+        let mut gate = RfbInputGate::default();
+        gate.feed(b"RFB 003.008\n\x01\x01", true).unwrap();
+        let keyboard = [4, 1, 0, 0, 0, 0, 0, 0];
+        assert_eq!(gate.feed(&keyboard, true).unwrap(), keyboard);
+        assert!(
+            gate.feed(&[6, 0, 0, 0, 0x7f, 0xff, 0xff, 0xff], true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn view_only_rfb_passes_vnc_auth_response_before_filtering_input() {
+        let mut gate = RfbInputGate::default();
+        let mut handshake = b"RFB 003.008\n\x02".to_vec();
+        handshake.extend_from_slice(&[0x55; 16]);
+        handshake.push(1);
+        assert_eq!(gate.feed(&handshake, false).unwrap(), handshake);
+        assert!(
+            gate.feed(&[4, 1, 0, 0, 0, 0, 0, 0], false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn vnc_and_video_share_a_revocable_run_input_owner() {
+        let owners = Arc::new(Mutex::new(BTreeMap::new()));
+        let ticket = |kind: &str, control: bool, takeover: bool| StreamTicket {
+            instance_id: "lab01".into(),
+            run_id: "run01".into(),
+            kind: kind.into(),
+            control,
+            takeover,
+            endpoint: Endpoint::Unix(PathBuf::from("unused")),
+            expires: Instant::now() + Duration::from_secs(30),
+            audio_group: None,
+        };
+        let old = claim_control(&ticket("vnc", true, false), owners.clone())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            claim_control(&ticket("video", true, false), owners.clone()),
+            Err(StatusCode::CONFLICT)
+        ));
+        assert!(
+            claim_control(&ticket("video", false, false), owners.clone())
+                .unwrap()
+                .is_none()
+        );
+        let new = claim_control(&ticket("video", true, true), owners.clone())
+            .unwrap()
+            .unwrap();
+        assert!(old.revoked.load(Ordering::Acquire));
+        drop(old);
+        assert!(owners.lock().unwrap().contains_key("lab01:run01:display"));
+        drop(new);
+        assert!(!owners.lock().unwrap().contains_key("lab01:run01:display"));
+    }
 }

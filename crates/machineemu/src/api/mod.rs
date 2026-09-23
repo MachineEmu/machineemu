@@ -42,6 +42,9 @@ struct Args {
     /// Path to the QEMU project's display-stream encoder.
     #[arg(long)]
     display_stream: Option<PathBuf>,
+    /// Print the generated API v2 OpenAPI document and exit.
+    #[arg(long)]
+    print_openapi: bool,
 }
 
 #[derive(Clone)]
@@ -49,14 +52,24 @@ struct AppState {
     workspace: Arc<Mutex<Workspace>>,
     bearer_token: Arc<str>,
     launch_plans: Arc<BTreeMap<String, LaunchSpec>>,
-    running: Arc<Mutex<BTreeMap<String, Arc<Mutex<machineemu_core::runtime::RunningInstance>>>>>,
-    instance_locks: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
+    running: Arc<
+        Mutex<
+            BTreeMap<
+                String,
+                Arc<tokio::sync::Mutex<machineemu_core::runtime::AsyncRunningInstance>>,
+            >,
+        >,
+    >,
+    instance_locks: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     helpers: Arc<Mutex<BTreeMap<String, Vec<ManagedProcess>>>>,
     display_streams: Arc<Mutex<BTreeMap<String, ManagedProcess>>>,
     display_stream: Arc<PathBuf>,
     stream_tickets: Arc<Mutex<BTreeMap<String, streams::StreamTicket>>>,
     audio_sessions: Arc<Mutex<BTreeMap<String, streams::AudioSession>>>,
-    control_streams: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    control_streams: Arc<Mutex<BTreeMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    events: Arc<Mutex<events::EventHub>>,
+    run_watchers: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    guest_executions: Arc<Mutex<BTreeMap<String, Arc<guest_exec::ExecutionJob>>>>,
     local_unix: bool,
 }
 
@@ -73,18 +86,22 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| RuntimeError::Process(format!("blocking task failed: {error}")))?
 }
 
-fn instance_lock(state: &AppState, id: &str) -> Result<Arc<Mutex<()>>, RuntimeError> {
+fn instance_lock(state: &AppState, id: &str) -> Result<Arc<tokio::sync::Mutex<()>>, RuntimeError> {
     Ok(state
         .instance_locks
         .lock()
         .map_err(|_| RuntimeError::Process("instance lock map poisoned".into()))?
         .entry(id.to_owned())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone())
 }
 
 pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if args.print_openapi {
+        println!("{}", openapi::document().to_pretty_json()?);
+        return Ok(());
+    }
     let (config, config_path) = load_config(args.config.as_deref())?;
     let server = config.server.unwrap_or_default();
     let workspace_path = args
@@ -115,7 +132,8 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         .or(server.launch_plans)
         .map(|path| resolve_config_path(config_path.as_deref(), path));
     let workspace = Workspace::open(&workspace_path)?;
-    workspace.reconcile_active_runs()?;
+    let recovered_runs = workspace.reconcile_active_runs()?;
+    workspace.reconcile_operations()?;
     let launch_plans = match launch_plans_path {
         Some(path) => serde_json::from_str(&fs::read_to_string(path)?)?,
         None => BTreeMap::new(),
@@ -134,9 +152,18 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         ),
         stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
-        control_streams: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        control_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        events: Arc::new(Mutex::new(events::EventHub::new()?)),
+        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: unix_socket.is_some(),
     };
+    for run in recovered_runs
+        .into_iter()
+        .filter(|run| run.status == "running")
+    {
+        run_events::spawn(&state, run);
+    }
     let app = router(state);
     if let Some(socket) = unix_socket {
         if let Some(parent) = socket.parent() {
@@ -193,6 +220,7 @@ async fn serve_unix(
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v2/health", get(health))
+        .route("/api/v2/openapi.json", get(openapi_document))
         .route("/api/v2/images", post(register_image))
         .route("/api/v2/images/:id", get(get_image))
         .route(
@@ -204,10 +232,36 @@ fn router(state: AppState) -> Router {
             get(get_instance).delete(remove_instance),
         )
         .route("/api/v2/instances/:id/start", post(start_instance))
+        .route(
+            "/api/v2/instances/:id/tombstone",
+            get(instances::get_instance_tombstone),
+        )
         .route("/api/v2/instances/:id/stop", post(stop_instance))
+        .route("/api/v2/instances/:id/restart", post(restart_instance))
+        .route(
+            "/api/v2/instances/:id/send-key",
+            post(display_control::send_key),
+        )
+        .route(
+            "/api/v2/instances/:id/screenshot",
+            post(display_control::screenshot),
+        )
         .route("/api/v2/instances/:id/pause", post(pause_instance))
         .route("/api/v2/instances/:id/resume", post(resume_instance))
         .route("/api/v2/instances/:id/reset", post(reset_instance))
+        .route("/api/v2/instances/:id/events", get(events::stream_events))
+        .route(
+            "/api/v2/instances/:id/guest-agent",
+            get(guest_agent::get_guest_agent_information),
+        )
+        .route(
+            "/api/v2/instances/:id/guest-executions",
+            post(guest_exec::start_execution),
+        )
+        .route(
+            "/api/v2/guest-executions/:id/events",
+            get(guest_exec::stream_execution),
+        )
         .route("/api/v2/instances/:id/snapshots", post(create_snapshot))
         .route("/api/v2/snapshots/:id", get(get_snapshot))
         .route("/api/v2/snapshots/:id/clone", post(clone_snapshot))
@@ -272,14 +326,20 @@ async fn shutdown() {
 
 mod auth;
 mod devices;
+mod display_control;
 mod dto;
+mod events;
+mod guest_agent;
+mod guest_exec;
 mod helper_control;
 mod helpers;
 mod images;
 mod instances;
 mod launch;
 mod lifecycle;
+mod openapi;
 mod operations;
+mod run_events;
 mod snapshots;
 mod spice_audio;
 mod streams;
@@ -300,4 +360,11 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
         return response.into_response();
     }
     axum::Json(serde_json::json!({"ok": true, "api": "v2"})).into_response()
+}
+
+async fn openapi_document(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = authorized(&headers, &state) {
+        return response.into_response();
+    }
+    axum::Json(openapi::document()).into_response()
 }

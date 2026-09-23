@@ -1,6 +1,7 @@
 use super::*;
 use axum::body::Body;
 use axum::http::Request;
+use futures_util::StreamExt;
 use tower::ServiceExt;
 
 #[test]
@@ -18,7 +19,10 @@ fn bearer_auth_requires_exact_token() {
         display_stream: Arc::new(PathBuf::from("display-stream")),
         stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
-        control_streams: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        control_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: false,
     };
     let missing = HeaderMap::new();
@@ -45,7 +49,10 @@ async fn api_routes_require_bearer_authentication() {
         display_stream: Arc::new(PathBuf::from("display-stream")),
         stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
-        control_streams: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        control_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: false,
     };
     let response = router(state.clone())
@@ -69,6 +76,26 @@ async fn api_routes_require_bearer_authentication() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/openapi.json")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(document["paths"]["/ws/v2/instances/{id}/{kind}"]["get"].is_object());
+    assert_eq!(
+        document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
+        "bearer"
+    );
     let image = serde_json::json!({
         "image_id": "debian13-cloud",
         "engine_track": "unifi-10-2",
@@ -119,6 +146,171 @@ async fn api_routes_require_bearer_authentication() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/lab01/guest-agent")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let guest_agent: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(guest_agent["available"], false);
+    assert_eq!(guest_agent["reason"], "not_running");
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/instances/lab01/guest-executions")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"command":"uname -a"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/lab01/events")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut stream = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame = String::from_utf8(first.to_vec()).unwrap();
+    assert!(frame.contains("event: snapshot"));
+    assert!(frame.contains("\"instance_id\":\"lab01\""));
+    let cursor = frame
+        .lines()
+        .find_map(|line| line.strip_prefix("id: "))
+        .unwrap()
+        .to_owned();
+    drop(stream);
+    let instance_id = Id::new("instance", "lab01").unwrap();
+    let instance_record = state
+        .workspace
+        .lock()
+        .unwrap()
+        .instance(&instance_id)
+        .unwrap();
+    events::publish_state(&state, &instance_record, None, "test");
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/lab01/events")
+                .header("authorization", "Bearer secret")
+                .header("last-event-id", &cursor)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut replay = response.into_body().into_data_stream();
+    let replayed = tokio::time::timeout(std::time::Duration::from_secs(2), replay.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        String::from_utf8(replayed.to_vec())
+            .unwrap()
+            .contains("event: state")
+    );
+    drop(replay);
+    for _ in 0..257 {
+        events::publish_state(&state, &instance_record, None, "test");
+    }
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/lab01/events")
+                .header("authorization", "Bearer secret")
+                .header("last-event-id", &cursor)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut expired = response.into_body().into_data_stream();
+    let resync = tokio::time::timeout(std::time::Duration::from_secs(2), expired.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        String::from_utf8(resync.to_vec())
+            .unwrap()
+            .contains("event: snapshot")
+    );
+    drop(expired);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/lab01/events")
+                .header("authorization", "Bearer secret")
+                .header("last-event-id", "bad-cursor")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/lab01/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let mut local = state.clone();
+    local.local_unix = true;
+    let response = router(local)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/lab01/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for (path, status) in [
+        ("/api/v2/instances/missing/events", StatusCode::NOT_FOUND),
+        ("/api/v2/instances/lab01/events", StatusCode::OK),
+        ("/api/v2/instances/INVALID/events", StatusCode::BAD_REQUEST),
+    ] {
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
     let snapshot = serde_json::json!({"snapshot_id": "snap01"});
     let response = router(state.clone())
         .oneshot(
@@ -183,6 +375,324 @@ async fn api_routes_require_bearer_authentication() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn checked_in_rust_openapi_matches_generated_document() {
+    let generated = serde_json::to_value(super::openapi::document()).unwrap();
+    let checked_in: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/openapi-v2.json"
+    )))
+    .unwrap();
+    assert_eq!(checked_in, generated);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn saved_plan_supports_restart_and_disposable_cleanup() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let root = std::env::temp_dir().join(format!("machineemu-disposable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let workspace = Workspace::open(&root).unwrap();
+    let image = ImageManifest {
+        image_id: Id::new("image", "image01").unwrap(),
+        engine_track: Id::new("track", "track01").unwrap(),
+        supported_engine_tracks: vec![],
+        target: "x86_64-softmmu".into(),
+        disk_sha256: "a".repeat(64),
+        firmware_sha256: None,
+        tpm_state_sha256: None,
+    };
+    workspace.register_image(&image).unwrap();
+    let state = AppState {
+        workspace: Arc::new(Mutex::new(workspace)),
+        bearer_token: Arc::from("secret"),
+        launch_plans: Arc::new(BTreeMap::new()),
+        running: Arc::new(Mutex::new(BTreeMap::new())),
+        instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(Mutex::new(BTreeMap::new())),
+        display_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        display_stream: Arc::new(PathBuf::from("display-stream")),
+        stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
+        audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+        control_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        local_unix: false,
+    };
+    let socket = root.join("qmp.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut stream = tokio::io::BufReader::new(stream);
+                stream
+                    .get_mut()
+                    .write_all(b"{\"QMP\":{}}\r\n")
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                while stream.read_line(&mut line).await.unwrap() != 0 {
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if request["execute"] == "screendump" {
+                        tokio::fs::write(
+                            request["arguments"]["filename"].as_str().unwrap(),
+                            b"\x89PNG\r\n\x1a\n",
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    let result = if request["execute"] == "query-status" {
+                        serde_json::json!({"status":"running"})
+                    } else {
+                        serde_json::json!({})
+                    };
+                    stream
+                        .get_mut()
+                        .write_all(
+                            format!(
+                                "{}\r\n",
+                                serde_json::json!({"return":result,"id":request["id"]})
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    if request["execute"] == "quit" {
+                        break;
+                    }
+                    line.clear();
+                }
+            });
+        }
+    });
+    let request = |path: &str, body: serde_json::Value| {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", "Bearer secret")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let stale = root.join("staging/instances/temp01/old");
+    let sibling = root.join("staging/instances/temp01-other/old");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+    let created = router(state.clone()).oneshot(request("/api/v2/instances", serde_json::json!({"instance_id":"temp01","image_id":"image01","profile_id":"profile01","auto_remove":true,"launch_plan":{"argv":["/bin/sh","-c","sleep 2"],"qmp_socket":"qmp.sock"}}))).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert!(!stale.exists());
+    assert!(sibling.exists());
+    let details = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/temp01")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let details: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(details.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(details["configured"], true);
+    assert_eq!(details["auto_remove"], true);
+    let snapshot = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/temp01/snapshots",
+            serde_json::json!({"snapshot_id":"snap01"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.status(), StatusCode::CONFLICT);
+    let restart = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/temp01/restart",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(restart.status(), StatusCode::CONFLICT);
+    let started = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/temp01/start",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let stopped = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/temp01/stop",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let id = Id::new("instance", "temp01").unwrap();
+    assert!(state.workspace.lock().unwrap().instance(&id).is_err());
+    assert_eq!(
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .instance_tombstone(&id)
+            .unwrap()
+            .unwrap()
+            .1,
+        "operator_stop"
+    );
+    let tombstone = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v2/instances/temp01/tombstone")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tombstone.status(), StatusCode::OK);
+    let created = router(state.clone()).oneshot(request("/api/v2/instances", serde_json::json!({"instance_id":"failed01","image_id":"image01","profile_id":"profile01","auto_remove":true,"launch_plan":{"argv":["/this-program-does-not-exist"],"qmp_socket":"qmp.sock"}}))).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let failed_start = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/failed01/start",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(failed_start.status(), StatusCode::CONFLICT);
+    let failed_id = Id::new("instance", "failed01").unwrap();
+    assert!(
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .instance(&failed_id)
+            .is_err()
+    );
+    assert_eq!(
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .instance_tombstone(&failed_id)
+            .unwrap()
+            .unwrap()
+            .1,
+        "start_failed"
+    );
+    let created = router(state.clone()).oneshot(request("/api/v2/instances", serde_json::json!({"instance_id":"persist01","image_id":"image01","profile_id":"profile01","profile":{"id":"profile01","resources":{"memory":"1G"}},"launch_plan":{"argv":["/bin/sh","-c","sleep 2"],"qmp_socket":"qmp.sock"}}))).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let stored_profile: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("instances/persist01/profile.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored_profile["id"], "profile01");
+    let started = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/start",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let persistent_id = Id::new("instance", "persist01").unwrap();
+    let sent = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/send-key",
+            serde_json::json!({"keys":["ctrl","alt","delete"]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sent.status(), StatusCode::NO_CONTENT);
+    let screenshot = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/screenshot",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(screenshot.status(), StatusCode::OK);
+    assert_eq!(screenshot.headers()["content-type"], "image/png");
+    assert_eq!(
+        axum::body::to_bytes(screenshot.into_body(), 1024)
+            .await
+            .unwrap(),
+        b"\x89PNG\r\n\x1a\n".as_slice()
+    );
+    let first_run = state
+        .workspace
+        .lock()
+        .unwrap()
+        .active_run(&persistent_id)
+        .unwrap()
+        .unwrap()
+        .run_id;
+    let started_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(started.into_body(), 64 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(started_body["run_id"], first_run.as_str());
+    assert!(started_body["operation_id"].as_str().is_some());
+    let restarted = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/restart",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(restarted.status(), StatusCode::OK);
+    let second_run = state
+        .workspace
+        .lock()
+        .unwrap()
+        .active_run(&persistent_id)
+        .unwrap()
+        .unwrap()
+        .run_id;
+    assert_ne!(first_run, second_run);
+    assert_eq!(
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .run(&first_run)
+            .unwrap()
+            .status,
+        "exited"
+    );
+    let stopped = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/stop",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .instance(&persistent_id)
+            .unwrap()
+            .state,
+        "stopped"
+    );
+    server.abort();
+    drop(state);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn failed_stop_keeps_owned_process_in_running_map() {
@@ -191,7 +701,7 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
 
     let root = std::env::temp_dir().join(format!("machineemu-daemon-stop-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let workspace = Workspace::open(&root).unwrap();
+    let mut workspace = Workspace::open(&root).unwrap();
     let image = ImageManifest {
         image_id: Id::new("image", "image01").unwrap(),
         engine_track: Id::new("track", "track01").unwrap(),
@@ -224,9 +734,22 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
         stream
             .write_all(format!("{{\"return\":{{}},\"id\":{}}}\r\n", request["id"]).as_bytes())
             .unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(request["execute"], "query-status");
+        stream
+            .write_all(
+                format!(
+                    "{{\"return\":{{\"status\":\"running\"}},\"id\":{}}}\r\n",
+                    request["id"]
+                )
+                .as_bytes(),
+            )
+            .unwrap();
     });
     let running = workspace
-        .start_instance(machineemu_core::runtime::StartRequest {
+        .start_instance_async(machineemu_core::runtime::StartRequest {
             operation_id: Id::new("operation", "op01").unwrap(),
             run_id: Id::new("run", "run01").unwrap(),
             instance_id: instance_id.clone(),
@@ -237,13 +760,17 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
             stdout: None,
             stderr: None,
             qmp_timeout: std::time::Duration::from_secs(1),
+            on_operation: None,
+            on_state: None,
+            complete_operation: true,
         })
+        .await
         .unwrap();
     workspace
         .transition_instance(&instance_id, "error")
         .unwrap();
     let mut running_map = BTreeMap::new();
-    running_map.insert("lab01".into(), Arc::new(Mutex::new(running)));
+    running_map.insert("lab01".into(), Arc::new(tokio::sync::Mutex::new(running)));
     let state = AppState {
         workspace: Arc::new(Mutex::new(workspace)),
         bearer_token: Arc::from("secret"),
@@ -255,7 +782,10 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
         display_stream: Arc::new(PathBuf::from("display-stream")),
         stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
-        control_streams: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        control_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        run_watchers: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
         local_unix: false,
     };
     let mut headers = HeaderMap::new();

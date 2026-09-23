@@ -109,6 +109,17 @@ impl Workspace {
                revision INTEGER NOT NULL DEFAULT 1,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
+             CREATE TABLE IF NOT EXISTS instance_launch (
+               instance_id TEXT PRIMARY KEY REFERENCES instances(instance_id),
+               plan_json TEXT NOT NULL,
+               auto_remove INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS instance_tombstones (
+               instance_id TEXT PRIMARY KEY,
+               last_run_id TEXT,
+               reason TEXT NOT NULL,
+               removed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
              CREATE INDEX IF NOT EXISTS instances_image_id ON instances(image_id);
              CREATE TABLE IF NOT EXISTS operations (
                operation_id TEXT PRIMARY KEY,

@@ -1,10 +1,13 @@
 use super::*;
-pub(super) fn ensure_daemon(
+pub(super) async fn ensure_daemon(
     endpoint: &str,
     token: &str,
     workspace: &Path,
 ) -> Result<(), machineemu_core::engine::Error> {
-    if daemon_request(endpoint, token, "GET", "/api/v2/health", None).is_ok() {
+    if daemon_request(endpoint, token, "GET", "/api/v2/health", None)
+        .await
+        .is_ok()
+    {
         return Ok(());
     }
     let launch_plans = workspace.join("staging/launch-plans.json");
@@ -47,8 +50,11 @@ pub(super) fn ensure_daemon(
             machineemu_core::engine::Error::Invalid(format!("cannot start daemon: {error}"))
         })?;
     for _ in 0..50 {
-        thread::sleep(Duration::from_millis(100));
-        if daemon_request(endpoint, token, "GET", "/api/v2/health", None).is_ok() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if daemon_request(endpoint, token, "GET", "/api/v2/health", None)
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
     }
@@ -83,13 +89,16 @@ pub(super) fn effective_client(
     Ok((endpoint, client.token.unwrap_or_else(|| token.to_owned())))
 }
 
-trait ReadWrite: Read + Write {}
-impl<T: Read + Write> ReadWrite for T {}
+trait ReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ReadWrite for T {}
 
-fn connect_daemon(endpoint: &str) -> Result<Box<dyn ReadWrite>, machineemu_core::engine::Error> {
+async fn connect_daemon(
+    endpoint: &str,
+) -> Result<Box<dyn ReadWrite>, machineemu_core::engine::Error> {
     if let Some(path) = endpoint.strip_prefix("unix:") {
         #[cfg(unix)]
-        return UnixStream::connect(path)
+        return tokio::net::UnixStream::connect(path)
+            .await
             .map(|stream| Box::new(stream) as Box<dyn ReadWrite>)
             .map_err(|error| {
                 machineemu_core::engine::Error::Invalid(format!(
@@ -101,14 +110,15 @@ fn connect_daemon(endpoint: &str) -> Result<Box<dyn ReadWrite>, machineemu_core:
             "Unix daemon sockets are unavailable on this platform".into(),
         ));
     }
-    TcpStream::connect(endpoint)
+    tokio::net::TcpStream::connect(endpoint)
+        .await
         .map(|stream| Box::new(stream) as Box<dyn ReadWrite>)
         .map_err(|error| {
             machineemu_core::engine::Error::Invalid(format!("cannot connect to daemon: {error}"))
         })
 }
 
-pub(super) fn daemon_request(
+pub(super) async fn daemon_request(
     endpoint: &str,
     token: &str,
     method: &str,
@@ -116,7 +126,7 @@ pub(super) fn daemon_request(
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, machineemu_core::engine::Error> {
     let (endpoint, token) = effective_client(endpoint, token)?;
-    let mut stream = connect_daemon(&endpoint)?;
+    let mut stream = connect_daemon(&endpoint).await?;
     let bytes = body
         .map(|value| serde_json::to_vec(&value).expect("JSON value serializes"))
         .unwrap_or_default();
@@ -124,14 +134,18 @@ pub(super) fn daemon_request(
         "{method} {path} HTTP/1.1\r\nHost: {endpoint}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         bytes.len()
     );
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     stream
         .write_all(request.as_bytes())
-        .and_then(|_| stream.write_all(&bytes))
+        .await
         .map_err(|error| {
             machineemu_core::engine::Error::Invalid(format!("cannot write daemon request: {error}"))
         })?;
+    stream.write_all(&bytes).await.map_err(|error| {
+        machineemu_core::engine::Error::Invalid(format!("cannot write daemon request: {error}"))
+    })?;
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).map_err(|error| {
+    stream.read_to_end(&mut response).await.map_err(|error| {
         machineemu_core::engine::Error::Invalid(format!("cannot read daemon response: {error}"))
     })?;
     let split = response
@@ -160,4 +174,30 @@ pub(super) fn daemon_request(
         )));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sends_daemon_request_over_async_tcp() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0u8; 1024];
+            let count = socket.read(&mut bytes).await.unwrap();
+            let request = String::from_utf8_lossy(&bytes[..count]);
+            assert!(request.starts_with("GET /api/v2/health HTTP/1.1\r\n"));
+            assert!(request.contains("Authorization: Bearer secret\r\n"));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").await.unwrap();
+        });
+        let response = daemon_request(&endpoint, "secret", "GET", "/api/v2/health", None)
+            .await
+            .unwrap();
+        assert_eq!(response, serde_json::json!({"ok":true}));
+        server.await.unwrap();
+    }
 }

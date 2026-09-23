@@ -15,6 +15,84 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 #[test]
+fn saved_launch_and_removal_tombstone_survive_reopen() {
+    let root = temp_root("instance-launch");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let id = Id::new("instance", "temporary01").unwrap();
+    workspace
+        .create_instance(
+            id.clone(),
+            image.image_id,
+            Id::new("profile", "profile01").unwrap(),
+        )
+        .unwrap();
+    workspace
+        .save_instance_launch(&id, r#"{"argv":["qemu"],"qmp_socket":"qmp.sock"}"#, true)
+        .unwrap();
+    let attached = workspace.attach().unwrap();
+    assert!(attached.instance_launch(&id).unwrap().unwrap().1);
+    attached.remove_instance(&id).unwrap();
+    attached
+        .record_instance_tombstone(&id, None, "operator_stop")
+        .unwrap();
+    assert_eq!(
+        attached.instance_tombstone(&id).unwrap().unwrap().1,
+        "operator_stop"
+    );
+    drop(attached);
+    drop(workspace);
+    let reopened = Workspace::open(&root).unwrap();
+    assert!(reopened.instance_launch(&id).unwrap().is_none());
+    assert_eq!(
+        reopened.instance_tombstone(&id).unwrap().unwrap().1,
+        "operator_stop"
+    );
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn prepared_instance_publishes_files_and_database_together() {
+    let root = temp_root("prepared-instance");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let id = Id::new("instance", "prepared01").unwrap();
+    let orphan = root.join("instances/prepared01");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join(".machineemu-create"), b"staged\n").unwrap();
+    fs::write(orphan.join("partial"), b"old").unwrap();
+    let staged = root.join("staging/prepared01-new");
+    fs::create_dir(&staged).unwrap();
+    fs::write(staged.join("profile.json"), b"{\"id\":\"profile01\"}").unwrap();
+    workspace
+        .publish_prepared_instance(
+            id.clone(),
+            image.image_id,
+            Id::new("profile", "profile01").unwrap(),
+            &staged,
+            "{\"argv\":[]}",
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(root.join("instances/prepared01/profile.json")).unwrap(),
+        b"{\"id\":\"profile01\"}"
+    );
+    assert!(!orphan.join("partial").exists());
+    assert!(!orphan.join(".machineemu-create").exists());
+    assert!(!staged.exists());
+    assert!(workspace.instance_launch(&id).unwrap().is_some());
+    drop(workspace);
+    let reopened = Workspace::open(&root).unwrap();
+    assert_eq!(reopened.instance(&id).unwrap().state, "created");
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn yaml_config_supports_server_only_and_relative_paths() {
     let root = temp_root("config");
     fs::create_dir_all(&root).unwrap();
@@ -223,6 +301,56 @@ fn operation_retries_are_idempotent_and_transitions_are_guarded() {
         .complete_operation(&accepted.operation_id, r#"{"ok":true}"#)
         .unwrap();
     assert_eq!(completed.status, "completed");
+    drop(workspace);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn interrupted_start_and_snapshot_operations_reconcile_from_committed_state() {
+    let root = temp_root("operation-recovery");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let instance = workspace
+        .create_instance(
+            Id::new("instance", "lab01").unwrap(),
+            image.image_id,
+            Id::new("profile", "profile01").unwrap(),
+        )
+        .unwrap();
+    let start = workspace
+        .begin_operation(
+            Id::new("operation", "start01").unwrap(),
+            instance.instance_id.clone(),
+            "start",
+            "start01",
+            "{}",
+        )
+        .unwrap();
+    let snapshot_id = Id::new("snapshot", "snap01").unwrap();
+    let snapshot = workspace
+        .begin_operation(
+            Id::new("operation", "snapshot01").unwrap(),
+            instance.instance_id.clone(),
+            "snapshot",
+            "snapshot:snap01",
+            "{\"snapshot_id\":\"snap01\"}",
+        )
+        .unwrap();
+    workspace
+        .create_instance_snapshot(snapshot_id, instance.instance_id)
+        .unwrap();
+    let reconciled = workspace.reconcile_operations().unwrap();
+    assert_eq!(reconciled.len(), 2);
+    assert_eq!(
+        workspace.operation(&start.operation_id).unwrap().status,
+        "failed"
+    );
+    assert_eq!(
+        workspace.operation(&snapshot.operation_id).unwrap().status,
+        "completed"
+    );
+    assert!(workspace.reconcile_operations().unwrap().is_empty());
     drop(workspace);
     let _ = fs::remove_dir_all(root);
 }
@@ -593,14 +721,14 @@ fn run_reconciliation_rejects_a_dead_or_reused_process_identity() {
 }
 
 #[cfg(unix)]
-#[test]
-fn start_orchestrates_operation_process_run_and_qmp() {
+#[tokio::test]
+async fn start_orchestrates_operation_process_run_and_qmp() {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
     use std::thread;
 
     let root = temp_root("start");
-    let workspace = Workspace::open(&root).unwrap();
+    let mut workspace = Workspace::open(&root).unwrap();
     let image = manifest();
     workspace.register_image(&image).unwrap();
     let instance = workspace
@@ -613,24 +741,44 @@ fn start_orchestrates_operation_process_run_and_qmp() {
     let socket = root.join("qmp.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .write_all(b"{\"QMP\":{\"version\":{},\"capabilities\":[]}}\r\n")
-            .unwrap();
-        let reader_stream = stream.try_clone().unwrap();
-        let mut reader = BufReader::new(reader_stream);
-        for _ in 0..5 {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        for commands in [6, 3] {
+            let (mut stream, _) = listener.accept().unwrap();
             stream
-                .write_all(format!("{{\"return\":{{}},\"id\":{}}}\r\n", request["id"]).as_bytes())
+                .write_all(b"{\"QMP\":{\"version\":{},\"capabilities\":[]}}\r\n")
                 .unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            for _ in 0..commands {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                let result = if request["execute"] == "query-status" {
+                    serde_json::json!({"status":"running"})
+                } else {
+                    serde_json::json!({})
+                };
+                stream
+                    .write_all(
+                        format!("{{\"return\":{result},\"id\":{}}}\r\n", request["id"]).as_bytes(),
+                    )
+                    .unwrap();
+            }
         }
     });
     let argv = vec!["/bin/sh".into(), "-c".into(), "sleep 2".into()];
+    let observed_operations = std::sync::Mutex::new(Vec::new());
+    let observed_states = std::sync::Mutex::new(Vec::new());
+    let on_operation = |operation: &machineemu_core::domain::Operation| {
+        observed_operations
+            .lock()
+            .unwrap()
+            .push(operation.status.clone());
+    };
+    let on_state = |instance: &machineemu_core::domain::Instance| {
+        observed_states.lock().unwrap().push(instance.state.clone());
+    };
     let mut running = workspace
-        .start_instance(StartRequest {
+        .start_instance_async(StartRequest {
             operation_id: Id::new("operation", "op01").unwrap(),
             run_id: Id::new("run", "run01").unwrap(),
             instance_id: instance.instance_id.clone(),
@@ -641,8 +789,17 @@ fn start_orchestrates_operation_process_run_and_qmp() {
             stdout: None,
             stderr: None,
             qmp_timeout: Duration::from_secs(1),
+            on_operation: Some(&on_operation),
+            on_state: Some(&on_state),
+            complete_operation: true,
         })
+        .await
         .unwrap();
+    assert_eq!(
+        *observed_operations.lock().unwrap(),
+        ["accepted", "completed"]
+    );
+    assert_eq!(*observed_states.lock().unwrap(), ["starting", "running"]);
     assert_eq!(
         workspace.instance(&instance.instance_id).unwrap().state,
         "running"
@@ -650,29 +807,65 @@ fn start_orchestrates_operation_process_run_and_qmp() {
     assert_eq!(workspace.run(&running.run_id).unwrap().status, "running");
     assert_eq!(
         workspace
-            .pause_instance(&instance.instance_id, &mut running)
+            .pause_instance_async(&instance.instance_id, &mut running)
+            .await
             .unwrap()
             .state,
         "paused"
     );
     assert_eq!(
         workspace
-            .resume_instance(&instance.instance_id, &mut running)
+            .resume_instance_async(&instance.instance_id, &mut running)
+            .await
             .unwrap()
             .state,
         "running"
     );
     workspace
-        .reset_instance(&instance.instance_id, &mut running)
+        .reset_instance_async(&instance.instance_id, &mut running)
+        .await
         .unwrap();
     assert_eq!(
         workspace
-            .stop_instance(&instance.instance_id, &mut running)
+            .stop_instance_async(&instance.instance_id, &mut running)
+            .await
             .unwrap()
             .state,
         "stopped"
     );
     assert_eq!(workspace.run(&running.run_id).unwrap().status, "exited");
+    let mut restarted = workspace
+        .start_instance_async(StartRequest {
+            operation_id: Id::new("operation", "op02").unwrap(),
+            run_id: Id::new("run", "run02").unwrap(),
+            instance_id: instance.instance_id.clone(),
+            idempotency_key: "start-02",
+            input_json: r#"{"profile":"debian13-cloud"}"#,
+            argv: &argv,
+            qmp_socket: &socket,
+            stdout: None,
+            stderr: None,
+            qmp_timeout: Duration::from_secs(1),
+            on_operation: None,
+            on_state: None,
+            complete_operation: true,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        workspace.instance(&instance.instance_id).unwrap().state,
+        "running"
+    );
+    assert_ne!(running.run_id, restarted.run_id);
+    assert_eq!(workspace.run(&running.run_id).unwrap().status, "exited");
+    assert_eq!(
+        workspace
+            .stop_instance_async(&instance.instance_id, &mut restarted)
+            .await
+            .unwrap()
+            .state,
+        "stopped"
+    );
     server.join().unwrap();
     let _ = fs::remove_dir_all(root);
 }
@@ -704,6 +897,9 @@ fn failed_start_reaps_child_and_finishes_operation() {
         stdout: None,
         stderr: None,
         qmp_timeout: Duration::from_millis(50),
+        on_operation: None,
+        on_state: None,
+        complete_operation: true,
     });
     assert!(result.is_err());
     let run = workspace.run(&run_id).unwrap();

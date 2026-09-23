@@ -9,6 +9,58 @@ use std::{
 };
 
 impl Workspace {
+    pub fn save_instance_launch(
+        &self,
+        instance_id: &Id,
+        plan_json: &str,
+        auto_remove: bool,
+    ) -> Result<()> {
+        self.instance(instance_id)?;
+        self.db.execute(
+            "INSERT INTO instance_launch(instance_id, plan_json, auto_remove) VALUES (?1, ?2, ?3)
+             ON CONFLICT(instance_id) DO UPDATE SET plan_json = excluded.plan_json, auto_remove = excluded.auto_remove",
+            params![instance_id.as_str(), plan_json, auto_remove],
+        )?;
+        Ok(())
+    }
+
+    pub fn instance_launch(&self, instance_id: &Id) -> Result<Option<(String, bool)>> {
+        self.db
+            .query_row(
+                "SELECT plan_json, auto_remove FROM instance_launch WHERE instance_id = ?1",
+                params![instance_id.as_str()],
+                |row| Ok((row.get(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()
+            .map_err(Error::from)
+    }
+
+    pub fn record_instance_tombstone(
+        &self,
+        instance_id: &Id,
+        run_id: Option<&Id>,
+        reason: &str,
+    ) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO instance_tombstones(instance_id, last_run_id, reason) VALUES (?1, ?2, ?3)
+             ON CONFLICT(instance_id) DO UPDATE SET last_run_id = excluded.last_run_id, reason = excluded.reason, removed_at = CURRENT_TIMESTAMP",
+            params![instance_id.as_str(), run_id.map(Id::as_str), reason],
+        )?;
+        self.db.execute("DELETE FROM instance_tombstones WHERE instance_id NOT IN (SELECT instance_id FROM instance_tombstones ORDER BY removed_at DESC, rowid DESC LIMIT 1000)", [])?;
+        Ok(())
+    }
+
+    pub fn instance_tombstone(
+        &self,
+        instance_id: &Id,
+    ) -> Result<Option<(Option<String>, String, String)>> {
+        self.db.query_row(
+            "SELECT last_run_id, reason, removed_at FROM instance_tombstones WHERE instance_id = ?1",
+            params![instance_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional().map_err(Error::from)
+    }
+
     pub fn create_instance(
         &self,
         instance_id: Id,
@@ -25,6 +77,10 @@ impl Workspace {
         self.db.execute(
             "INSERT INTO instances(instance_id, image_id, profile_id, lifecycle) VALUES (?1, ?2, ?3, 'created')",
             params![instance_id.as_str(), image_id.as_str(), profile_id.as_str()],
+        )?;
+        self.db.execute(
+            "DELETE FROM instance_tombstones WHERE instance_id = ?1",
+            params![instance_id.as_str()],
         )?;
         fs::create_dir_all(self.root.join("instances").join(instance_id.as_str())).map_err(
             |source| Error::Io {
@@ -65,8 +121,30 @@ impl Workspace {
         tpm_seed: Option<&Path>,
     ) -> Result<PathBuf> {
         let directory = self.root.join("instances").join(instance_id.as_str());
-        fs::create_dir_all(&directory).map_err(|source| Error::Io {
-            path: directory.clone(),
+        self.prepare_instance_files_at(
+            &directory,
+            disk_backing,
+            backing_format,
+            disk_size,
+            nvram_seed,
+            tpm_seed,
+        )
+    }
+
+    /// Prepare writable files in a private staging directory before publishing
+    /// a new instance. The paths stored in the launch plan still name the final
+    /// instance directory.
+    pub fn prepare_instance_files_at(
+        &self,
+        directory: &Path,
+        disk_backing: &Path,
+        backing_format: &str,
+        disk_size: Option<&str>,
+        nvram_seed: Option<&Path>,
+        tpm_seed: Option<&Path>,
+    ) -> Result<PathBuf> {
+        fs::create_dir_all(directory).map_err(|source| Error::Io {
+            path: directory.to_owned(),
             source,
         })?;
         let overlay = directory.join("overlay.qcow2");
@@ -143,6 +221,72 @@ impl Workspace {
             }
         }
         Ok(overlay)
+    }
+
+    pub fn publish_prepared_instance(
+        &self,
+        instance_id: Id,
+        image_id: Id,
+        profile_id: Id,
+        staged: &Path,
+        plan_json: &str,
+        auto_remove: bool,
+    ) -> Result<Instance> {
+        self.image(&image_id)?;
+        let destination = self.root.join("instances").join(instance_id.as_str());
+        if destination.exists() {
+            // A crash after the rename but before SQLite publication leaves a
+            // marked directory. Only that incomplete directory is recoverable.
+            if matches!(self.instance(&instance_id), Err(Error::NotFound { .. }))
+                && destination.join(".machineemu-create").is_file()
+            {
+                fs::remove_dir_all(&destination).map_err(|source| Error::Io {
+                    path: destination.clone(),
+                    source,
+                })?;
+            } else {
+                return Err(Error::Process(format!(
+                    "instance directory already exists: {}",
+                    destination.display()
+                )));
+            }
+        }
+        fs::write(staged.join(".machineemu-create"), b"staged\n").map_err(|source| Error::Io {
+            path: staged.join(".machineemu-create"),
+            source,
+        })?;
+        fs::rename(staged, &destination).map_err(|source| Error::Io {
+            path: destination.clone(),
+            source,
+        })?;
+        let result = (|| -> Result<()> {
+            let transaction = self.db.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO images(image_id) VALUES (?1)",
+                params![image_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO instances(instance_id, image_id, profile_id, lifecycle) VALUES (?1, ?2, ?3, 'created')",
+                params![instance_id.as_str(), image_id.as_str(), profile_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO instance_launch(instance_id, plan_json, auto_remove) VALUES (?1, ?2, ?3)",
+                params![instance_id.as_str(), plan_json, auto_remove],
+            )?;
+            transaction.execute(
+                "DELETE FROM instance_tombstones WHERE instance_id = ?1",
+                params![instance_id.as_str()],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&destination);
+        } else {
+            let _ = fs::remove_file(destination.join(".machineemu-create"));
+        }
+        result?;
+        self.instance(&instance_id)
     }
 
     pub fn instance(&self, instance_id: &Id) -> Result<Instance> {
@@ -222,6 +366,10 @@ impl Workspace {
                 instance_id.as_str()
             )));
         }
+        self.db.execute(
+            "DELETE FROM instance_launch WHERE instance_id = ?1",
+            params![instance_id.as_str()],
+        )?;
         self.db.execute(
             "DELETE FROM operations WHERE instance_id = ?1",
             params![instance_id.as_str()],

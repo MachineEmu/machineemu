@@ -12,6 +12,7 @@ serde_yaml.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 nix.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

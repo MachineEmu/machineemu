@@ -10,7 +10,7 @@
 use super::client::daemon_request;
 use super::console::instance_dir;
 use machineemu_core::engine::Error;
-use machineemu_core::protocols::qmp::QmpClient;
+use machineemu_core::protocols::async_qmp::AsyncQmp;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -18,7 +18,6 @@ use std::{
     fs,
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 #[derive(Serialize)]
@@ -115,7 +114,7 @@ struct FileEntry {
     size: u64,
 }
 
-pub(super) fn inspect(
+pub(super) async fn inspect(
     instance: &str,
     workspace: Option<&Path>,
     daemon: &str,
@@ -131,6 +130,7 @@ pub(super) fn inspect(
         &format!("/api/v2/instances/{instance}"),
         None,
     )
+    .await
     .ok();
 
     let pid = fs::read_to_string(directory.join("control/qemu.pid"))
@@ -151,7 +151,7 @@ pub(super) fn inspect(
 
     let (mut hardware, mut hardware_error) = (None, None);
     if running {
-        match query_hardware(&argv) {
+        match query_hardware(&argv).await {
             Ok(value) => hardware = Some(value),
             Err(error) => hardware_error = Some(error),
         }
@@ -469,11 +469,11 @@ fn qmp_sockets(argv: &[String]) -> Vec<PathBuf> {
     sockets
 }
 
-fn query_hardware(argv: &[String]) -> Result<Hardware, String> {
+async fn query_hardware(argv: &[String]) -> Result<Hardware, String> {
     let mut last_error = "the QEMU command line has no Unix QMP socket".to_owned();
     for path in qmp_sockets(argv) {
-        match QmpClient::connect(&path, Duration::from_secs(2)) {
-            Ok(mut client) => return Ok(collect_hardware(&mut client, argv)),
+        match AsyncQmp::connect(&path).await {
+            Ok(mut client) => return Ok(collect_hardware(&mut client, argv).await),
             Err(error) => {
                 last_error = format!(
                     "QMP {} unavailable ({error}); another client may hold it",
@@ -485,8 +485,7 @@ fn query_hardware(argv: &[String]) -> Result<Hardware, String> {
     Err(last_error)
 }
 
-fn collect_hardware(client: &mut QmpClient, argv: &[String]) -> Hardware {
-    let mut query = |command: &str| client.execute(command, Value::Null).ok();
+async fn collect_hardware(client: &mut AsyncQmp, argv: &[String]) -> Hardware {
     let mut hardware = Hardware {
         machine: option_value(argv, "-machine")
             .or_else(|| option_value(argv, "-M"))
@@ -502,25 +501,33 @@ fn collect_hardware(client: &mut QmpClient, argv: &[String]) -> Hardware {
         topology: option_value(argv, "-smp").map(str::to_owned),
         ..Default::default()
     };
-    hardware.accelerator = query("query-kvm").map(|kvm| {
-        if kvm["enabled"].as_bool() == Some(true) {
-            "kvm"
-        } else {
-            "tcg"
-        }
-        .to_owned()
-    });
-    if let Some(Value::Array(cpus)) = query("query-cpus-fast") {
+    hardware.accelerator = client
+        .execute("query-kvm", Value::Null)
+        .await
+        .ok()
+        .map(|kvm| {
+            if kvm["enabled"].as_bool() == Some(true) {
+                "kvm"
+            } else {
+                "tcg"
+            }
+            .to_owned()
+        });
+    if let Ok(Value::Array(cpus)) = client.execute("query-cpus-fast", Value::Null).await {
         hardware.cpu_count = cpus.len();
         hardware.cpu_type = cpus
             .first()
             .and_then(|cpu| cpu["qom-type"].as_str())
             .map(str::to_owned);
     }
-    hardware.memory_bytes = query("query-memory-size-summary").and_then(|summary| {
-        Some(summary["base-memory"].as_u64()? + summary["plugged-memory"].as_u64().unwrap_or(0))
-    });
-    if let Some(Value::Array(buses)) = query("query-pci") {
+    hardware.memory_bytes = client
+        .execute("query-memory-size-summary", Value::Null)
+        .await
+        .ok()
+        .and_then(|summary| {
+            Some(summary["base-memory"].as_u64()? + summary["plugged-memory"].as_u64().unwrap_or(0))
+        });
+    if let Ok(Value::Array(buses)) = client.execute("query-pci", Value::Null).await {
         for bus in &buses {
             collect_pci(
                 bus["bus"].as_u64().unwrap_or(0),
@@ -529,7 +536,7 @@ fn collect_hardware(client: &mut QmpClient, argv: &[String]) -> Hardware {
             );
         }
     }
-    if let Some(Value::Array(blocks)) = query("query-block") {
+    if let Ok(Value::Array(blocks)) = client.execute("query-block", Value::Null).await {
         hardware.block = blocks
             .iter()
             .map(|block| BlockDevice {
@@ -542,7 +549,7 @@ fn collect_hardware(client: &mut QmpClient, argv: &[String]) -> Hardware {
             })
             .collect();
     }
-    if let Some(Value::Array(chardevs)) = query("query-chardev") {
+    if let Ok(Value::Array(chardevs)) = client.execute("query-chardev", Value::Null).await {
         hardware.chardevs = chardevs
             .iter()
             .map(|chardev| Chardev {
@@ -552,7 +559,7 @@ fn collect_hardware(client: &mut QmpClient, argv: &[String]) -> Hardware {
             })
             .collect();
     }
-    if let Some(Value::Array(filters)) = query("query-rx-filter") {
+    if let Ok(Value::Array(filters)) = client.execute("query-rx-filter", Value::Null).await {
         hardware.nics = filters
             .iter()
             .map(|nic| Nic {
@@ -561,14 +568,21 @@ fn collect_hardware(client: &mut QmpClient, argv: &[String]) -> Hardware {
             })
             .collect();
     }
-    if let Some(Value::Array(tpm)) = query("query-tpm") {
+    if let Ok(Value::Array(tpm)) = client.execute("query-tpm", Value::Null).await {
         hardware.tpm = tpm;
     }
-    hardware.vnc = query("query-vnc").filter(|vnc| vnc["enabled"].as_bool() == Some(true));
-    if let Ok(Value::String(text)) = client.execute(
-        "human-monitor-command",
-        serde_json::json!({"command-line": "info usb"}),
-    ) {
+    hardware.vnc = client
+        .execute("query-vnc", Value::Null)
+        .await
+        .ok()
+        .filter(|vnc| vnc["enabled"].as_bool() == Some(true));
+    if let Ok(Value::String(text)) = client
+        .execute(
+            "human-monitor-command",
+            serde_json::json!({"command-line": "info usb"}),
+        )
+        .await
+    {
         hardware.usb = text
             .lines()
             .map(str::trim)

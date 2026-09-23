@@ -2,6 +2,11 @@ use super::client::ensure_daemon;
 use super::*;
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LaunchMode {
+    Create,
+    Run,
+}
 pub(super) struct RunOptions<'a> {
     pub profile_name: &'a str,
     pub instance: &'a str,
@@ -13,6 +18,8 @@ pub(super) struct RunOptions<'a> {
     pub vnc_password_file: Option<&'a Path>,
     pub external_qmp_socket: Option<&'a Path>,
     pub fresh: bool,
+    pub auto_remove: bool,
+    pub mode: LaunchMode,
     pub workspace_root: &'a Path,
     pub qemu: &'a Path,
     pub swtpm: Option<&'a Path>,
@@ -22,7 +29,7 @@ pub(super) struct RunOptions<'a> {
     pub token: &'a str,
 }
 
-pub(super) fn run_rust_owned(
+pub(super) async fn run_rust_owned(
     options: RunOptions<'_>,
 ) -> Result<(), machineemu_core::engine::Error> {
     let RunOptions {
@@ -36,6 +43,8 @@ pub(super) fn run_rust_owned(
         vnc_password_file,
         external_qmp_socket,
         fresh,
+        auto_remove,
+        mode,
         workspace_root,
         qemu,
         swtpm,
@@ -69,7 +78,7 @@ pub(super) fn run_rust_owned(
         machineemu_core::engine::Error::Invalid(format!("cannot open workspace: {error}"))
     })?;
     let (daemon, token) = effective_client(daemon, token)?;
-    ensure_daemon(&daemon, &token, &workspace_root)?;
+    ensure_daemon(&daemon, &token, &workspace_root).await?;
     let existing = daemon_request(
         &daemon,
         &token,
@@ -77,8 +86,24 @@ pub(super) fn run_rust_owned(
         &format!("/api/v2/instances/{instance}"),
         None,
     )
+    .await
     .ok();
     let exists = existing.is_some();
+    if mode == LaunchMode::Create && fresh {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "create does not accept --fresh".into(),
+        ));
+    }
+    if mode == LaunchMode::Create && auto_remove {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--rm is only valid with run".into(),
+        ));
+    }
+    if exists && (mode == LaunchMode::Create || auto_remove) {
+        return Err(machineemu_core::engine::Error::Invalid(format!(
+            "instance {instance} already exists"
+        )));
+    }
     // The flag wins, then helpers.swtpm from the configuration; a relative
     // configured path is read against the file that declared it, as engine
     // paths are. Without either, the plan names `swtpm` and PATH decides.
@@ -275,8 +300,6 @@ pub(super) fn run_rust_owned(
         "schema_version": 1,
         "engines": {track.clone(): {"manifest": format!("{track}/engine-build.json"), "build_digest": build_digest}}
     });
-    fs::create_dir_all(&instance_dir)
-        .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
     let mut plan = build_plan(PlanInput {
         profile: profile.clone(),
         release_set,
@@ -354,6 +377,7 @@ pub(super) fn run_rust_owned(
     });
     let launch_plan = serde_json::json!({
         "argv": plan.argv,
+        "vnc_auto": display.as_ref().is_some_and(|display| display.auto),
         "qmp_socket": relative(&qmp_socket)?,
         "stdout": relative(&instance_dir.join("qemu.stdout"))?,
         "stderr": relative(&instance_dir.join("qemu.stderr"))?,
@@ -374,14 +398,16 @@ pub(super) fn run_rust_owned(
             "POST",
             &format!("/api/v2/instances/{instance}/stop"),
             None,
-        );
+        )
+        .await;
         daemon_request(
             &daemon,
             &token,
             "DELETE",
             &format!("/api/v2/instances/{instance}"),
             None,
-        )?;
+        )
+        .await?;
     }
     if fresh || !exists {
         daemon_request(
@@ -389,12 +415,10 @@ pub(super) fn run_rust_owned(
             &token,
             "POST",
             "/api/v2/instances",
-            Some(
-                serde_json::json!({"instance_id":instance,"image_id":image_id,"profile_id":profile_id}),
-            ),
-        )?;
+            Some(serde_json::json!({"instance_id":instance,"image_id":image_id,"profile_id":profile_id,"launch_plan":launch_plan.clone(),"auto_remove":auto_remove,"profile":saved_profile})),
+        ).await?;
     }
-    if !instance_profile.exists() {
+    if exists && !fresh && !instance_profile.exists() {
         write_instance_profile(&instance_profile, &saved_profile)?;
     }
     let suffix = format!(
@@ -405,7 +429,14 @@ pub(super) fn run_rust_owned(
             .map(|value| value.as_nanos())
             .unwrap_or_default()
     );
-    daemon_request(
+    if mode == LaunchMode::Create {
+        println!("created {instance} using profile {profile_id}");
+        return Ok(());
+    }
+    if exists && !fresh {
+        eprintln!("machineemu: run on an existing instance is deprecated; use start {instance}");
+    }
+    let started = daemon_request(
         &daemon,
         &token,
         "POST",
@@ -414,12 +445,27 @@ pub(super) fn run_rust_owned(
             "operation_id": format!("start-{suffix}"),
             "run_id": format!("run-{suffix}"),
             "idempotency_key": format!("run-{suffix}"),
-            "launch_plan": launch_plan
+            "launch_plan": if exists && !fresh { Some(launch_plan) } else { None }
         })),
-    )?;
+    )
+    .await;
+    if started.is_err() && auto_remove {
+        let _ = daemon_request(
+            &daemon,
+            &token,
+            "DELETE",
+            &format!("/api/v2/instances/{instance}"),
+            None,
+        )
+        .await;
+    }
+    let started = started?;
     println!("started {instance} using profile {profile_id}");
     if let Some(display) = display {
-        println!("VNC: 127.0.0.1:{}", display.port);
+        let port = started["vnc_port"]
+            .as_u64()
+            .unwrap_or(u64::from(display.port));
+        println!("VNC: 127.0.0.1:{port}");
     }
     println!("QMP: {}", external_qmp_socket.display());
     Ok(())
@@ -989,7 +1035,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(cli.command, Command::Run { image: Some(image), .. } if image == "win11-dev")
+            matches!(cli.command, Command::Run(RunArgs { launch: LaunchArgs { image: Some(image), .. }, .. }) if image == "win11-dev")
         );
         let forced = Cli::try_parse_from([
             "machineemu",
@@ -1001,10 +1047,42 @@ mod tests {
             "--force",
         ])
         .unwrap();
-        assert!(matches!(forced.command, Command::Run { force: true, .. }));
+        assert!(matches!(
+            forced.command,
+            Command::Run(RunArgs {
+                launch: LaunchArgs { force: true, .. },
+                ..
+            })
+        ));
         assert!(Cli::try_parse_from(["machineemu", "run", "analysis", "lab", "--force"]).is_err());
         let cli = Cli::try_parse_from(["machineemu", "run", "win11-dev", "dev01"]).unwrap();
-        assert!(matches!(cli.command, Command::Run { image: None, .. }));
+        assert!(matches!(
+            cli.command,
+            Command::Run(RunArgs {
+                launch: LaunchArgs { image: None, .. },
+                ..
+            })
+        ));
+        let create = Cli::try_parse_from(["machineemu", "create", "win11-dev", "dev02"]).unwrap();
+        assert!(matches!(create.command, Command::Create(_)));
+        let disposable =
+            Cli::try_parse_from(["machineemu", "run", "win11-dev", "temp01", "--rm"]).unwrap();
+        assert!(matches!(
+            disposable.command,
+            Command::Run(RunArgs { rm: true, .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["machineemu", "start", "dev02"])
+                .unwrap()
+                .command,
+            Command::Start { .. }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["machineemu", "restart", "dev02"])
+                .unwrap()
+                .command,
+            Command::Restart { .. }
+        ));
     }
 
     #[test]

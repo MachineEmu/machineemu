@@ -3,7 +3,6 @@ use std::os::unix::net::UnixStream;
 use std::{
     fs,
     io::{Read, Write},
-    net::TcpStream,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     thread,
@@ -16,6 +15,99 @@ use machineemu_core::engine::{
     validate_profile_against_qemu,
 };
 use machineemu_core::{domain::Id, storage::Workspace};
+
+#[derive(Debug, clap::Args)]
+struct LaunchArgs {
+    /// Named profile or profile file.
+    profile: String,
+    /// Instance ID.
+    instance: String,
+    /// Registered image to use for disk and firmware state.
+    #[arg(long)]
+    image: Option<String>,
+    /// Allow an image whose engine track differs from the profile.
+    #[arg(long, requires = "image")]
+    force: bool,
+    /// Per-instance cloud-init seed ISO.
+    #[arg(long)]
+    seed: Option<PathBuf>,
+    /// profile, user, bridge[:BRIDGE], or none.
+    #[arg(long, default_value = "profile")]
+    net: String,
+    /// profile, auto, none, or TCP port 5900-5999.
+    #[arg(long, default_value = "profile")]
+    vnc: String,
+    /// File containing a VNC password.
+    #[arg(long)]
+    vnc_password_file: Option<PathBuf>,
+    /// External QMP relay socket path.
+    #[arg(long)]
+    qmp_socket: Option<PathBuf>,
+    /// MachineEmu workspace root.
+    #[arg(long, default_value = "machineemu-workspace")]
+    workspace: PathBuf,
+    /// QEMU executable.
+    #[arg(long, default_value = "/run/current-system/sw/bin/qemu-system-x86_64")]
+    qemu: PathBuf,
+    /// swtpm executable.
+    #[arg(long, env = "MACHINEEMU_SWTPM")]
+    swtpm: Option<PathBuf>,
+    /// Privileged QEMU bridge helper.
+    #[arg(long, env = "MACHINEEMU_BRIDGE_HELPER")]
+    bridge_helper: Option<PathBuf>,
+    /// Guest NIC MAC address.
+    #[arg(long)]
+    mac: Option<String>,
+    /// Daemon endpoint.
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    daemon: String,
+    /// Daemon bearer token.
+    #[arg(long, default_value = "machineemu-dev-token")]
+    token: String,
+}
+
+#[derive(Debug, clap::Args)]
+struct RunArgs {
+    #[command(flatten)]
+    launch: LaunchArgs,
+    /// Delete and recreate an existing instance.
+    #[arg(long)]
+    fresh: bool,
+    /// Automatically remove a new instance after its run ends.
+    #[arg(long)]
+    rm: bool,
+}
+
+impl LaunchArgs {
+    fn options(
+        &self,
+        mode: launch::LaunchMode,
+        fresh: bool,
+        auto_remove: bool,
+    ) -> launch::RunOptions<'_> {
+        launch::RunOptions {
+            profile_name: &self.profile,
+            instance: &self.instance,
+            image: self.image.as_deref(),
+            force: self.force,
+            seed: self.seed.as_deref(),
+            net: &self.net,
+            vnc: &self.vnc,
+            vnc_password_file: self.vnc_password_file.as_deref(),
+            external_qmp_socket: self.qmp_socket.as_deref(),
+            fresh,
+            auto_remove,
+            mode,
+            workspace_root: &self.workspace,
+            qemu: &self.qemu,
+            swtpm: self.swtpm.as_deref(),
+            bridge_helper: self.bridge_helper.as_deref(),
+            mac: self.mac.as_deref(),
+            daemon: &self.daemon,
+            token: &self.token,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "machineemu", about = "MachineEmu Rust planning tools")]
@@ -64,7 +156,7 @@ enum Command {
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
-    /// Stop an instance through its QMP socket.
+    /// Stop an instance through the daemon, retaining its writable state.
     Stop {
         instance: String,
         #[arg(long)]
@@ -78,7 +170,7 @@ enum Command {
         #[arg(long, default_value = "machineemu-dev-token")]
         token: String,
     },
-    /// Remove a stopped instance state directory.
+    /// Remove a stopped instance and its owned writable state.
     Rm {
         instance: String,
         /// Force QEMU to quit before removing the state directory.
@@ -129,55 +221,21 @@ enum Command {
         #[arg(long, default_value = "machineemu-dev-token")]
         token: String,
     },
-    /// Start a named profile with the concise operator interface.
-    Run {
-        /// Profile/base ID, for example debian13-cloud.
-        profile: String,
-        /// Instance ID, for example lab01.
+    /// Create a persistent VM without starting it.
+    Create(LaunchArgs),
+    /// Create and start a VM. --rm removes a new instance after it exits.
+    Run(RunArgs),
+    /// Start a created or stopped VM from its saved configuration.
+    Start {
         instance: String,
-        /// Registered image to use for disk, NVRAM and TPM seed state.
-        #[arg(long)]
-        image: Option<String>,
-        /// Allow --image with a profile engine track not declared by the image.
-        #[arg(long, requires = "image")]
-        force: bool,
-        /// Optional per-instance NoCloud/cloud-init seed ISO.
-        #[arg(long)]
-        seed: Option<PathBuf>,
-        /// Networking mode: profile, user, bridge[:BRIDGE], or none.
-        #[arg(long, default_value = "profile")]
-        net: String,
-        /// VNC port: profile, auto, none, or TCP port 5900-5999.
-        #[arg(long, default_value = "profile")]
-        vnc: String,
-        /// File containing a VNC password (1-8 bytes, with no newline).
-        #[arg(long)]
-        vnc_password_file: Option<PathBuf>,
-        /// Override the default Unix QMP relay socket for external controllers.
-        #[arg(long)]
-        qmp_socket: Option<PathBuf>,
-        /// Rebuild the instance state from its base.
-        #[arg(long)]
-        fresh: bool,
-        /// MachineEmu workspace root.
-        #[arg(long, default_value = "machineemu-workspace")]
-        workspace: PathBuf,
-        /// Exact QEMU executable to use for this run.
-        #[arg(long, default_value = "/run/current-system/sw/bin/qemu-system-x86_64")]
-        qemu: PathBuf,
-        /// swtpm executable for profiles with an emulated TPM. Defaults to
-        /// helpers.swtpm from the configuration, then `swtpm` on PATH.
-        #[arg(long, env = "MACHINEEMU_SWTPM")]
-        swtpm: Option<PathBuf>,
-        /// Privileged qemu-bridge-helper for bridge networking. Defaults to
-        /// helpers.qemu_bridge_helper from the configuration.
-        #[arg(long, env = "MACHINEEMU_BRIDGE_HELPER")]
-        bridge_helper: Option<PathBuf>,
-        /// NIC address for this run. Defaults to the profile's devices.mac,
-        /// then an address derived from the instance name.
-        #[arg(long)]
-        mac: Option<String>,
-        /// Daemon HTTP endpoint.
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
+    },
+    /// Stop a live VM and start it with a new run ID.
+    Restart {
+        instance: String,
         #[arg(long, default_value = "127.0.0.1:8787")]
         daemon: String,
         #[arg(long, default_value = "machineemu-dev-token")]
@@ -294,14 +352,14 @@ enum Command {
     },
 }
 
-pub fn main() {
-    if let Err(error) = run() {
+pub async fn main() {
+    if let Err(error) = run().await {
         eprintln!("machineemu: {error}");
         std::process::exit(2);
     }
 }
 
-fn run() -> Result<(), machineemu_core::engine::Error> {
+async fn run() -> Result<(), machineemu_core::engine::Error> {
     let cli = Cli::parse();
     match cli.command {
         Command::MigrateImages { workspace } => {
@@ -344,7 +402,8 @@ fn run() -> Result<(), machineemu_core::engine::Error> {
                 "POST",
                 &format!("/api/v2/instances/{instance}/stop"),
                 None,
-            )?;
+            )
+            .await?;
         }
         Command::Rm {
             instance,
@@ -356,21 +415,28 @@ fn run() -> Result<(), machineemu_core::engine::Error> {
         } => {
             let _ = state_dir;
             if force {
-                let _ = daemon_request(
+                daemon_request(
                     &daemon,
                     &token,
                     "POST",
                     &format!("/api/v2/instances/{instance}/stop"),
                     None,
-                );
+                )
+                .await?;
             }
-            daemon_request(
+            let removed = daemon_request(
                 &daemon,
                 &token,
                 "DELETE",
                 &format!("/api/v2/instances/{instance}"),
                 None,
-            )?;
+            )
+            .await;
+            if let Err(error) = removed
+                && (!force || !error.to_string().contains("HTTP 404"))
+            {
+                return Err(error);
+            }
             println!("removed {instance}");
         }
         Command::Inspect {
@@ -379,7 +445,7 @@ fn run() -> Result<(), machineemu_core::engine::Error> {
             json,
             daemon,
             token,
-        } => inspect::inspect(&instance, workspace.as_deref(), &daemon, &token, json)?,
+        } => inspect::inspect(&instance, workspace.as_deref(), &daemon, &token, json).await?,
         Command::AnalysisTarget {
             instances,
             workspace,
@@ -391,7 +457,8 @@ fn run() -> Result<(), machineemu_core::engine::Error> {
             daemon,
             token,
         } => {
-            let response = daemon_request(&daemon, &token, "GET", "/api/v2/instances", None)?;
+            let response =
+                daemon_request(&daemon, &token, "GET", "/api/v2/instances", None).await?;
             println!("NAME\tPROFILE\tSTATE\tIP");
             for item in response.as_array().into_iter().flatten() {
                 let instance = item.get("instance").unwrap_or(item);
@@ -411,44 +478,51 @@ fn run() -> Result<(), machineemu_core::engine::Error> {
                 println!("{name}\t{profile}\t{state}\t{ip}");
             }
         }
-        Command::Run {
-            profile,
+        Command::Create(args) => {
+            run_rust_owned(args.options(launch::LaunchMode::Create, false, false)).await?
+        }
+        Command::Run(args) => {
+            run_rust_owned(
+                args.launch
+                    .options(launch::LaunchMode::Run, args.fresh, args.rm),
+            )
+            .await?
+        }
+        Command::Start {
             instance,
-            image,
-            force,
-            seed,
-            net,
-            vnc,
-            vnc_password_file,
-            qmp_socket,
-            fresh,
-            workspace,
-            qemu,
-            swtpm,
-            bridge_helper,
-            mac,
             daemon,
             token,
         } => {
-            run_rust_owned(launch::RunOptions {
-                profile_name: &profile,
-                instance: &instance,
-                image: image.as_deref(),
-                force,
-                seed: seed.as_deref(),
-                net: &net,
-                vnc: &vnc,
-                vnc_password_file: vnc_password_file.as_deref(),
-                external_qmp_socket: qmp_socket.as_deref(),
-                fresh,
-                workspace_root: &workspace,
-                qemu: &qemu,
-                swtpm: swtpm.as_deref(),
-                bridge_helper: bridge_helper.as_deref(),
-                mac: mac.as_deref(),
-                daemon: &daemon,
-                token: &token,
-            })?;
+            let started = daemon_request(
+                &daemon,
+                &token,
+                "POST",
+                &format!("/api/v2/instances/{instance}/start"),
+                Some(serde_json::json!({})),
+            )
+            .await?;
+            println!("started {instance}");
+            if let Some(port) = started["vnc_port"].as_u64() {
+                println!("VNC: 127.0.0.1:{port}");
+            }
+        }
+        Command::Restart {
+            instance,
+            daemon,
+            token,
+        } => {
+            let started = daemon_request(
+                &daemon,
+                &token,
+                "POST",
+                &format!("/api/v2/instances/{instance}/restart"),
+                Some(serde_json::json!({})),
+            )
+            .await?;
+            println!("restarted {instance}");
+            if let Some(port) = started["vnc_port"].as_u64() {
+                println!("VNC: 127.0.0.1:{port}");
+            }
         }
         Command::Plan {
             profile,

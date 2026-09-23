@@ -101,7 +101,7 @@ impl Workspace {
         Ok(runs)
     }
 
-    pub(crate) fn active_run(&self, instance_id: &Id) -> Result<Option<Run>> {
+    pub fn active_run(&self, instance_id: &Id) -> Result<Option<Run>> {
         self.db
             .query_row(
                 "SELECT run_id, instance_id, pid, process_start, qmp_socket, status

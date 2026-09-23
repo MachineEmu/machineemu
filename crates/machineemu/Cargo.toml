@@ -6,6 +6,7 @@ license.workspace = true
 default-run = "machineemu"
 
 [dependencies]
+base64 = "0.22"
 axum.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -16,6 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+utoipa.workspace = true
+time = { version = "0.3.47", features = ["formatting"] }
 
 [dev-dependencies]
 tower.workspace = true

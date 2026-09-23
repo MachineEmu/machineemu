@@ -1,29 +1,26 @@
-use super::ManagedProcess;
-use super::process_identity_matches;
-use crate::domain::{Instance, Operation, Run};
-#[cfg(unix)]
-use crate::protocols::qmp::QmpClient;
-use crate::{Error, Result, domain::Id, storage::Workspace};
-#[cfg(unix)]
-use std::{path::Path, time::Duration};
-use std::{thread, time::Instant};
+use super::{ManagedProcess, StartRequest, process_identity_matches};
+use crate::{
+    Error, Result,
+    domain::{Id, Instance, Run},
+    protocols::async_qmp::AsyncQmp,
+    storage::Workspace,
+};
+use serde_json::Value;
+use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-pub struct RunningInstance {
+/// A live VM controlled through an asynchronous QMP connection.
+pub struct AsyncRunningInstance {
     process: Option<ManagedProcess>,
-    pub qmp: QmpClient,
+    pub qmp: AsyncQmp,
     pub run_id: Id,
     recovered: Option<(u32, u64)>,
 }
 
-#[cfg(unix)]
-impl RunningInstance {
+impl AsyncRunningInstance {
     pub fn abort_owned_child(&mut self) -> Result<()> {
-        let Some(process) = self.process.as_mut() else {
-            return Err(Error::Process(
-                "cannot abort an adopted process without verified signaling".into(),
-            ));
-        };
+        let process = self.process.as_mut().ok_or_else(|| {
+            Error::Process("cannot abort an adopted process without verified signaling".into())
+        })?;
         if process.try_wait()?.is_none() {
             process.terminate()?;
             process.wait()?;
@@ -50,56 +47,37 @@ impl RunningInstance {
         self.recovered.is_some()
     }
 
-    pub fn recover(run: &Run) -> Result<Self> {
+    pub async fn recover(run: &Run) -> Result<Self> {
         if !process_identity_matches(run.pid, run.process_start) {
             return Err(Error::Process("recorded process is no longer alive".into()));
         }
-        let qmp = QmpClient::connect(&run.qmp_socket, Duration::from_secs(2))?;
         Ok(Self {
             process: None,
-            qmp,
+            qmp: AsyncQmp::connect(&run.qmp_socket).await?,
             run_id: run.run_id.clone(),
             recovered: Some((run.pid, run.process_start)),
         })
     }
 
-    pub fn pause(&mut self) -> Result<()> {
-        self.qmp.execute("stop", serde_json::Value::Null)?;
-        Ok(())
+    pub async fn pause(&mut self) -> Result<()> {
+        self.qmp.execute("stop", Value::Null).await.map(|_| ())
     }
-
-    pub fn resume(&mut self) -> Result<()> {
-        self.qmp.execute("cont", serde_json::Value::Null)?;
-        Ok(())
+    pub async fn resume(&mut self) -> Result<()> {
+        self.qmp.execute("cont", Value::Null).await.map(|_| ())
     }
-
-    pub fn reset(&mut self) -> Result<()> {
-        self.qmp.execute("system_reset", serde_json::Value::Null)?;
-        Ok(())
+    pub async fn reset(&mut self) -> Result<()> {
+        self.qmp
+            .execute("system_reset", Value::Null)
+            .await
+            .map(|_| ())
     }
-}
-
-/// Validated launch inputs supplied by an instance owner.
-#[cfg(unix)]
-pub struct StartRequest<'a> {
-    pub operation_id: Id,
-    pub run_id: Id,
-    pub instance_id: Id,
-    pub idempotency_key: &'a str,
-    pub input_json: &'a str,
-    pub argv: &'a [String],
-    pub qmp_socket: &'a Path,
-    pub stdout: Option<&'a Path>,
-    pub stderr: Option<&'a Path>,
-    pub qmp_timeout: Duration,
-    pub on_operation: Option<&'a (dyn Fn(&Operation) + Send + Sync)>,
-    pub on_state: Option<&'a (dyn Fn(&Instance) + Send + Sync)>,
-    pub complete_operation: bool,
 }
 
 impl Workspace {
-    #[cfg(unix)]
-    pub fn recover_instance_run(&self, instance_id: &Id) -> Result<Option<RunningInstance>> {
+    pub async fn recover_instance_run_async(
+        &mut self,
+        instance_id: &Id,
+    ) -> Result<Option<AsyncRunningInstance>> {
         let Some(run) = self.active_run(instance_id)? else {
             return Ok(None);
         };
@@ -115,11 +93,13 @@ impl Workspace {
             }
             return Ok(None);
         }
-        RunningInstance::recover(&run).map(Some)
+        AsyncRunningInstance::recover(&run).await.map(Some)
     }
 
-    #[cfg(unix)]
-    pub fn start_instance(&self, request: StartRequest<'_>) -> Result<RunningInstance> {
+    pub async fn start_instance_async(
+        &mut self,
+        request: StartRequest<'_>,
+    ) -> Result<AsyncRunningInstance> {
         let StartRequest {
             operation_id,
             run_id,
@@ -151,16 +131,13 @@ impl Workspace {
         }
         let existing_operation = self.operation(&operation_id).is_ok();
         let operation = self.begin_operation(
-            operation_id.clone(),
+            operation_id,
             instance_id.clone(),
             "start",
             idempotency_key,
             input_json,
         )?;
-        if !existing_operation
-            && operation.operation_id == operation_id
-            && let Some(notify) = on_operation
-        {
+        if !existing_operation && let Some(notify) = on_operation {
             notify(&operation);
         }
         if operation.status != "accepted" {
@@ -170,17 +147,21 @@ impl Workspace {
                 operation.status
             )));
         }
+        let cleanup_operation_id = operation.operation_id.clone();
         let cleanup_run_id = run_id.clone();
+        let cleanup_instance_id = instance_id.clone();
         let mut recorded = false;
-        let started = (|| -> Result<RunningInstance> {
-            let starting = self.transition_instance(&instance_id, "starting")?;
+        let recorded_ref = &mut recorded;
+        let workspace = &mut *self;
+        let started = async move {
+            let starting = workspace.transition_instance(&instance_id, "starting")?;
             if let Some(notify) = on_state {
                 notify(&starting);
             }
             let mut process = match ManagedProcess::spawn(run_id.clone(), argv, stdout, stderr) {
                 Ok(process) => process,
                 Err(error) => {
-                    let _ = self.transition_instance(&instance_id, "error");
+                    let _ = workspace.transition_instance(&instance_id, "error");
                     return Err(error);
                 }
             };
@@ -189,45 +170,42 @@ impl Workspace {
                 Err(error) => {
                     let _ = process.terminate();
                     let _ = process.wait();
-                    let _ = self.transition_instance(&instance_id, "error");
+                    let _ = workspace.transition_instance(&instance_id, "error");
                     return Err(error);
                 }
             };
-            self.record_run(
+            workspace.record_run(
                 run_id.clone(),
                 instance_id.clone(),
                 process.pid,
                 process_start,
                 qmp_socket.to_owned(),
             )?;
-            recorded = true;
+            *recorded_ref = true;
             let deadline = Instant::now() + qmp_timeout;
             let mut qmp = loop {
-                match QmpClient::connect(qmp_socket, qmp_timeout.min(Duration::from_millis(250))) {
+                match AsyncQmp::connect(qmp_socket).await {
                     Ok(client) => break client,
                     Err(error) if Instant::now() < deadline => {
                         if process.try_wait()?.is_some() {
-                            let _ = self.finish_run(&run_id, "failed");
-                            let _ = self.transition_instance(&instance_id, "error");
                             return Err(error);
                         }
-                        thread::sleep(Duration::from_millis(10));
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     Err(error) => {
                         let _ = process.terminate();
                         let _ = process.wait();
-                        let _ = self.finish_run(&run_id, "failed");
-                        let _ = self.transition_instance(&instance_id, "error");
                         return Err(error);
                     }
                 }
             };
             let observed = qmp
-                .execute("query-status", serde_json::Value::Null)
+                .execute("query-status", Value::Null)
+                .await
                 .and_then(|value| {
                     value
                         .get("status")
-                        .and_then(|status| status.as_str())
+                        .and_then(Value::as_str)
                         .map(str::to_owned)
                         .ok_or_else(|| Error::Qmp("query-status response has no status".into()))
                 });
@@ -237,7 +215,6 @@ impl Workspace {
                 Ok(value) => {
                     let _ = process.terminate();
                     let _ = process.wait();
-                    let _ = self.finish_run(&run_id, "failed");
                     return Err(Error::Qmp(format!(
                         "unsupported initial QEMU status {value}"
                     )));
@@ -245,21 +222,18 @@ impl Workspace {
                 Err(error) => {
                     let _ = process.terminate();
                     let _ = process.wait();
-                    let _ = self.finish_run(&run_id, "failed");
                     return Err(error);
                 }
             };
             if process.try_wait()?.is_some() {
-                let _ = self.finish_run(&run_id, "failed");
                 return Err(Error::Process("QEMU exited during QMP negotiation".into()));
             }
-            let final_state = match self.transition_instance(&instance_id, target) {
+            let final_state = match workspace.transition_instance(&instance_id, target) {
                 Ok(instance) => instance,
                 Err(error) => {
-                    let _ = qmp.execute("quit", serde_json::Value::Null);
+                    let _ = qmp.execute("quit", Value::Null).await;
                     let _ = process.terminate();
                     let _ = process.wait();
-                    let _ = self.finish_run(&run_id, "failed");
                     return Err(error);
                 }
             };
@@ -267,23 +241,24 @@ impl Workspace {
                 notify(&final_state);
             }
             if complete_operation {
-                let completed = self.complete_operation(
+                let completed = workspace.complete_operation(
                     &operation.operation_id,
-                    &serde_json::json!({"state": target}).to_string(),
+                    &serde_json::json!({"state":target}).to_string(),
                 )?;
                 if let Some(notify) = on_operation {
                     notify(&completed);
                 }
             }
-            Ok(RunningInstance {
+            Ok(AsyncRunningInstance {
                 process: Some(process),
                 qmp,
-                run_id,
+                run_id: run_id.clone(),
                 recovered: None,
             })
-        })();
+        }
+        .await;
         if let Err(error) = &started {
-            if let Ok(failed) = self.fail_operation(&operation.operation_id, &error.to_string())
+            if let Ok(failed) = self.fail_operation(&cleanup_operation_id, &error.to_string())
                 && let Some(notify) = on_operation
             {
                 notify(&failed);
@@ -291,9 +266,10 @@ impl Workspace {
             if recorded {
                 let _ = self.finish_run(&cleanup_run_id, "failed");
             }
-            if let Ok(instance) = self.instance(&instance_id) {
+            if let Ok(instance) = self.instance(&cleanup_instance_id) {
                 if matches!(instance.state.as_str(), "starting" | "running") {
-                    if let Ok(failed_state) = self.transition_instance(&instance_id, "error")
+                    if let Ok(failed_state) =
+                        self.transition_instance(&cleanup_instance_id, "error")
                         && let Some(notify) = on_state
                     {
                         notify(&failed_state);
@@ -308,11 +284,10 @@ impl Workspace {
         started
     }
 
-    #[cfg(unix)]
-    pub fn pause_instance(
-        &self,
+    pub async fn pause_instance_async(
+        &mut self,
         instance_id: &Id,
-        running: &mut RunningInstance,
+        running: &mut AsyncRunningInstance,
     ) -> Result<Instance> {
         let current = self.instance(instance_id)?;
         if current.state != "running" {
@@ -321,15 +296,14 @@ impl Workspace {
                 to: "paused".into(),
             });
         }
-        running.pause()?;
+        running.pause().await?;
         self.transition_instance(instance_id, "paused")
     }
 
-    #[cfg(unix)]
-    pub fn resume_instance(
-        &self,
+    pub async fn resume_instance_async(
+        &mut self,
         instance_id: &Id,
-        running: &mut RunningInstance,
+        running: &mut AsyncRunningInstance,
     ) -> Result<Instance> {
         let current = self.instance(instance_id)?;
         if current.state != "paused" {
@@ -338,12 +312,15 @@ impl Workspace {
                 to: "running".into(),
             });
         }
-        running.resume()?;
+        running.resume().await?;
         self.transition_instance(instance_id, "running")
     }
 
-    #[cfg(unix)]
-    pub fn reset_instance(&self, instance_id: &Id, running: &mut RunningInstance) -> Result<()> {
+    pub async fn reset_instance_async(
+        &mut self,
+        instance_id: &Id,
+        running: &mut AsyncRunningInstance,
+    ) -> Result<()> {
         let current = self.instance(instance_id)?;
         if current.state != "running" && current.state != "paused" {
             return Err(Error::InvalidTransition {
@@ -351,17 +328,16 @@ impl Workspace {
                 to: "running".into(),
             });
         }
-        running.reset()
+        running.reset().await
     }
 
-    #[cfg(unix)]
-    pub fn stop_instance(
-        &self,
+    pub async fn stop_instance_async(
+        &mut self,
         instance_id: &Id,
-        running: &mut RunningInstance,
+        running: &mut AsyncRunningInstance,
     ) -> Result<Instance> {
         let current = self.instance(instance_id)?;
-        if current.state != "running" && current.state != "paused" && current.state != "stopping" {
+        if !matches!(current.state.as_str(), "running" | "paused" | "stopping") {
             return Err(Error::InvalidTransition {
                 from: current.state,
                 to: "stopped".into(),
@@ -370,7 +346,7 @@ impl Workspace {
         if current.state != "stopping" {
             self.transition_instance(instance_id, "stopping")?;
         }
-        let result = running.qmp.execute("quit", serde_json::Value::Null);
+        let result = running.qmp.execute("quit", Value::Null).await;
         let status = if let Some(process) = running.process.as_mut() {
             if result.is_err() {
                 let _ = process.terminate();
@@ -384,7 +360,7 @@ impl Workspace {
                     let _ = process.terminate();
                     break process.wait()?;
                 }
-                thread::sleep(Duration::from_millis(20));
+                tokio::time::sleep(Duration::from_millis(20)).await;
             };
             if exit.success { "exited" } else { "failed" }
         } else if let Some((pid, start)) = running.recovered {
@@ -396,7 +372,7 @@ impl Workspace {
                         "recovered process did not exit after QMP quit".into(),
                     ));
                 }
-                thread::sleep(Duration::from_millis(20));
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
             "exited"
         } else {

@@ -4,6 +4,59 @@ use crate::{Error, Result};
 use rusqlite::{OptionalExtension, params};
 
 impl Workspace {
+    /// Resolve operations interrupted by a daemon restart after run and snapshot
+    /// records have been reconciled. This is safe to repeat.
+    pub fn reconcile_operations(&self) -> Result<Vec<Operation>> {
+        let mut statement = self.db.prepare(
+            "SELECT operation_id FROM operations WHERE status = 'accepted' ORDER BY created_at, operation_id",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut changed = Vec::new();
+        for id in ids {
+            let operation = self.operation(&Id::from_stored(id))?;
+            let completed = match operation.kind.as_str() {
+                "start" => {
+                    let instance = self.instance(&operation.instance_id)?;
+                    if matches!(instance.state.as_str(), "running" | "paused")
+                        && self
+                            .active_run(&operation.instance_id)?
+                            .is_some_and(|run| run.status == "running")
+                    {
+                        Some(serde_json::json!({"state": instance.state}).to_string())
+                    } else {
+                        None
+                    }
+                }
+                "snapshot" => operation
+                    .idempotency_key
+                    .strip_prefix("snapshot:")
+                    .and_then(|id| Id::new("snapshot", id).ok())
+                    .filter(|id| self.snapshot(id).is_ok())
+                    .map(|id| serde_json::json!({"snapshot_id": id.as_str()}).to_string()),
+                _ => None,
+            };
+            changed.push(match completed {
+                Some(result) => self.complete_operation(&operation.operation_id, &result)?,
+                None => self.fail_operation(&operation.operation_id, "interrupted_by_recovery")?,
+            });
+        }
+        Ok(changed)
+    }
+
+    pub fn active_operations(&self, instance_id: &Id) -> Result<Vec<Operation>> {
+        let mut statement = self.db.prepare(
+            "SELECT operation_id FROM operations WHERE instance_id = ?1 AND status IN ('accepted', 'queued', 'running') ORDER BY operation_id LIMIT 64",
+        )?;
+        let ids = statement
+            .query_map(params![instance_id.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| self.operation(&Id::from_stored(id)))
+            .collect()
+    }
+
     pub fn begin_operation(
         &self,
         operation_id: Id,

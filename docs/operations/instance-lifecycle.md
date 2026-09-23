@@ -1,0 +1,55 @@
+# VM instance lifecycle
+
+An instance keeps its disk, firmware variables, TPM state, guest identity, and
+resolved launch plan across runs. `create` validates and saves that plan and
+prepares the writable state in staging before publishing the instance, without
+launching QEMU. An interrupted staging directory is cleared on retry; a
+marked directory left between filesystem publication and database commit is
+replaced on retry. `start` uses the saved
+plan, creates a new run ID and operation ID, and preserves writable state.
+
+```sh
+machineemu create PROFILE INSTANCE --image IMAGE
+machineemu start INSTANCE
+machineemu stop INSTANCE
+machineemu restart INSTANCE
+machineemu rm INSTANCE
+```
+
+`machineemu run PROFILE INSTANCE` combines create and start. Existing stopped
+instances can still be passed to `run` during the CLI transition; the CLI warns
+and explicitly replans them. Prefer `start INSTANCE` for normal restarts.
+`--fresh` on `run` explicitly deletes and recreates an existing instance.
+
+`machineemu run --rm PROFILE INSTANCE` requires a new instance. The daemon
+records `auto_remove` with its saved plan and deletes the instance after an
+operator stop, guest shutdown, or QEMU exit once QEMU and helper cleanup has
+completed. A failed start also removes the disposable instance when no run
+remains active. If cleanup fails, the instance is retained for investigation.
+Disposable instances cannot take snapshots or use `restart`. The immutable
+image and other instances' state are never removed. A successful removal
+leaves a small tombstone at `GET /api/v2/instances/{id}/tombstone` containing
+the last run ID, removal reason, and timestamp.
+
+The API equivalents are `POST /api/v2/instances` with `instance_id`,
+`image_id`, `profile_id`, and `launch_plan`, optionally `auto_remove:true` and
+the resolved `profile` JSON;
+`POST /api/v2/instances/{id}/start` with `{}`; and the `stop`, `restart`, and
+`DELETE /api/v2/instances/{id}` routes. Old clients can create a metadata-only
+instance and send an inline plan at start. A bare start needs a saved plan or
+a daemon configured profile plan. Caller-supplied run and operation IDs remain
+accepted for compatibility. Start and restart responses include the generated
+`run_id` and `operation_id` alongside the instance fields. A local VNC port is
+checked again at each start. For an automatically selected port, Start chooses
+a currently free port and returns it as `vnc_port`.
+
+The restart route holds the instance lock across stop and start. If the start
+phase fails, the instance remains stopped with its writable state preserved. Run
+history and operation records are removed with an auto-removed instance; the
+tombstone is the durable removal record.
+
+An extra digest for every source file is not required for normal restart.
+Imported disk, firmware, and TPM assets already use SHA-256 blob identities;
+the resolved launch plan and profile are saved with the instance. A future
+provenance feature could fingerprint mutable host executables or helper files
+when exact replay and audit are required.

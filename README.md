@@ -36,6 +36,23 @@ daemon opens the workspace). Profiles combine its `profiles/*.json`
 with `./catalog/profiles/*.json`; workspace profiles take precedence for the
 same filename, as they do for `machineemu run`.
 
+Create a durable VM once, then start and stop its runs while retaining its disk
+and guest identity:
+
+```sh
+machineemu create PROFILE INSTANCE --image IMAGE
+machineemu start INSTANCE
+machineemu stop INSTANCE
+machineemu restart INSTANCE
+machineemu rm INSTANCE
+```
+
+`machineemu run PROFILE INSTANCE` combines create and start. For a disposable
+VM, `machineemu run --rm PROFILE INSTANCE` removes the new instance after its
+terminal run and helper cleanup; it refuses an existing instance. `run` on an
+existing stopped instance remains available temporarily and prints a
+deprecation message. See [instance lifecycle](docs/operations/instance-lifecycle.md).
+
 For a VNC-enabled profile, set `devices.vnc` to `{"port":"auto"}` or
 `{"port":5901}`. `machineemu run PROFILE INSTANCE --vnc auto` overrides the
 profile port; `--vnc 5901` selects a fixed port, and `--vnc none` disables VNC
@@ -86,10 +103,11 @@ is created on launch, so existing runs need a restart to get one.
 Each instance has an editable profile at `<workspace>/instances/<instance>/profile.json`.
 For example, change `machineemu-workspace/instances/analysis01/profile.json` to adjust
 `analysis01`'s memory, CPU, network, audio, or analysis hardware settings.
-`machineemu run malware-analysis-x64 analysis01` reads that file on subsequent starts;
-the selected image is bound automatically. Stop the instance before changing
-hardware settings. The shared catalog profile is copied only when an instance
-has no profile file, so later catalog edits do not change existing instances.
+`machineemu start analysis01` uses the saved resolved launch configuration;
+editing `profile.json` does not change it. Use `machineemu run` during the
+compatibility period to replan an existing stopped instance explicitly. The
+shared catalog profile is copied only when an instance has no profile file, so
+later catalog edits do not change existing instances.
 `--fresh --image IMAGE` removes the instance and creates a new profile file from
 the selected shared profile.
 

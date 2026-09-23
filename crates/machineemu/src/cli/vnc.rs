@@ -8,6 +8,7 @@ use std::{
 
 pub(super) struct Display {
     pub port: u16,
+    pub auto: bool,
     pub password_file: Option<PathBuf>,
 }
 
@@ -80,6 +81,7 @@ pub(super) fn resolve(
         }
         return Ok(None);
     };
+    let auto = selected == "auto";
     let port = port(&selected)?;
     let password_file = password_override.map(Path::to_owned).or_else(|| {
         settings
@@ -128,6 +130,7 @@ pub(super) fn resolve(
     }
     Ok(Some(Display {
         port,
+        auto,
         password_file,
     }))
 }
