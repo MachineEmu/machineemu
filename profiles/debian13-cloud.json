@@ -4,7 +4,7 @@
   "name": "Debian 13 Cloud",
   "domain": "general-purpose-linux",
   "engine": {
-    "track": "unifi-10.2",
+    "track": "qemu-system",
     "version": "10.2.4"
   },
   "machine": "q35",

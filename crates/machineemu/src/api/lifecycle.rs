@@ -160,12 +160,14 @@ async fn start_instance_with_lock(
         };
         let document = workspace.instance_document(&instance_id)?;
         workspace.materialize_document_profile(&document)?;
-        let plan: LaunchSpec = serde_json::from_value(document.launch_plan.ok_or_else(|| {
-            RuntimeError::Process(format!(
-                "instance {} has no launch plan in its document",
-                instance_id.as_str()
-            ))
-        })?)?;
+        let mut plan: LaunchSpec =
+            serde_json::from_value(document.launch_plan.ok_or_else(|| {
+                RuntimeError::Process(format!(
+                    "instance {} has no launch plan in its document",
+                    instance_id.as_str()
+                ))
+            })?)?;
+        super::launch::apply_daemon_helpers(&mut plan, &state.helpers);
         let (qmp, stdout, stderr) = plan_paths(workspace.root(), &plan)?;
         let workspace_root = workspace.root().to_owned();
         if let Some(preparation) = &plan.preparation {
@@ -184,7 +186,12 @@ async fn start_instance_with_lock(
         let mut helpers = Vec::new();
         if let Some(helper_argv) = &plan.helper_argv {
             let helper_id = Id::new("run", format!("{}-helper", run_id.as_str()))?;
-            helpers.push(ManagedProcess::spawn(helper_id, helper_argv, None, None)?);
+            helpers.push(ManagedProcess::spawn_systemd_scope(
+                helper_id,
+                helper_argv,
+                None,
+                None,
+            )?);
         }
         for spec in plan.helpers.iter().filter(|spec| !spec.after_qemu) {
             match super::helpers::spawn(&workspace_root, &instance_id, &run_id, spec).await {

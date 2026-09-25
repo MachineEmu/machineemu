@@ -4,7 +4,7 @@
   "name": "UDM Pro",
   "domain": "device-research",
   "engine": {
-    "track": "unifi-10.2",
+    "track": "qemu-10.2-unifi",
     "version": "10.2.4"
   },
   "machine": "udm-pro",

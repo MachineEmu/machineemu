@@ -48,6 +48,14 @@ pub(super) struct RegisterImage {
     pub(super) tpm_state_sha256: Option<String>,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub(super) struct ImportVmmanagerBase {
+    pub(super) source: String,
+    pub(super) image_id: String,
+    pub(super) engine_track: String,
+    pub(super) target: String,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(super) struct ErrorBody {
     pub(super) error: String,

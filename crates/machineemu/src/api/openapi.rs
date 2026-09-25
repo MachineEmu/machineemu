@@ -83,6 +83,36 @@ body_endpoint!(
     201,
     dto::RegisterImage
 );
+body_endpoint!(
+    start_vmmanager_base_import,
+    post,
+    "/api/v2/image-imports/vmmanager-base",
+    "Start a vmmanager-sh base image import job",
+    202,
+    dto::ImportVmmanagerBase
+);
+endpoint!(
+    get_image_import,
+    get,
+    "/api/v2/image-imports/{id}",
+    "Get an image import job",
+    200,
+    ("id" = String, Path)
+);
+#[utoipa::path(
+    get,
+    path = "/api/v2/image-imports/{id}/events",
+    summary = "Stream image import progress",
+    description = "SSE progress events use event, id, and JSON data fields. Reconnect with Last-Event-ID to replay retained progress.",
+    params(("id" = String, Path), ("Last-Event-ID" = Option<String>, Header)),
+    responses(
+        (status = 200, description = "Image import event stream", content_type = "text/event-stream", body = String),
+        (status = 401, description = "Authentication required", body = dto::ErrorBody),
+        (status = 404, description = "Image import not found", body = dto::ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+fn stream_image_import_events() {}
 endpoint!(
     get_image,
     get,
@@ -432,7 +462,7 @@ fn connect_stream() {}
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        health, openapi_document, register_image, get_image, put_image, get_profile, put_profile, list_instances, create_instance,
+        health, openapi_document, register_image, start_vmmanager_base_import, get_image_import, stream_image_import_events, get_image, put_image, get_profile, put_profile, list_instances, create_instance,
         get_instance, get_instance_config, put_instance_config, stream_events, guest_agent_information, start_guest_execution, stream_guest_execution,
         remove_instance, get_instance_tombstone, start_instance, stop_instance, restart_instance, send_key, screenshot, pause_instance,
         resume_instance, reset_instance, create_snapshot, get_snapshot, clone_snapshot,
@@ -441,7 +471,7 @@ fn connect_stream() {}
         change_iso, eject_iso, connect_stream
     ),
     components(schemas(
-        dto::RegisterImage, dto::CreateInstance, documents::InstanceConfig, dto::CreateSnapshot,
+        dto::RegisterImage, dto::ImportVmmanagerBase, dto::CreateInstance, documents::InstanceConfig, dto::CreateSnapshot,
         dto::CloneSnapshot, dto::ErrorBody, dto::StartInstance,
         dto::LaunchSpec, dto::HelperSpec, dto::PreparationSpec, StreamTicket,
         streams::TicketRequest, streams::SpiceTicketRequest,

@@ -2,9 +2,9 @@
 
 MachineEmu uses two representations for images:
 
-* The workspace store is an internal content-addressed cache. It is efficient
-  for deduplication and integrity checks, but its digest filenames are not a
-  good hand-editing or copy format.
+* The workspace image package is the live, editable local representation. It
+  keeps named files under `images/<image-id>/components/` and records their
+  digests in `manifest.json`.
 * A portable image bundle is the human-readable interchange format. It keeps
   the image identity and component names in `manifest.json`, with the actual
   files beside it.
@@ -46,18 +46,21 @@ win11-dev/
 ```
 
 The digest is verification metadata, not the filename. Import verifies every
-component before publishing it into the workspace store, and export recreates
-the stable component names. Bundle paths are relative to the bundle directory;
-absolute paths and parent-directory traversal are rejected.
+component before publishing it into the workspace image package, and export
+recreates the stable component names. Bundle paths are relative to the bundle
+directory; absolute paths and parent-directory traversal are rejected.
 
-The workspace uses editable image manifests alongside its content-addressed
-blob store:
+The workspace keeps image manifests and named components together:
 
 ```text
 <workspace>/
 ├── metadata.sqlite3
-├── blobs/sha256/<digest>
-├── images/<image-id>/manifest.json
+├── images/<image-id>/
+│   ├── manifest.json
+│   └── components/
+│       ├── disk.qcow2
+│       ├── firmware.fd       # optional
+│       └── tpm-state          # optional
 ├── instances/<instance-id>/instance.json
 ├── snapshots/<snapshot-id>/
 └── staging/
@@ -71,8 +74,7 @@ each lookup, so no re-registration or restart is required after an edit.
 `disk_sha256`, optional `firmware_sha256` and `tpm_state_sha256`, `target`,
 `engine_track`, and optional `supported_engine_tracks`. The `image_id` must
 match the enclosing directory name. Keep the component digests intact when
-editing compatibility; portable bundles under `images/` are separate exports
-and are not the live workspace configuration.
+editing compatibility.
 
 To migrate an existing workspace:
 
@@ -106,11 +108,11 @@ target/debug/machineemu run malware-analysis-x64 analysis01 --image win11-dev --
 
 When `--image` is omitted, the profile's `image` field selects the registered
 base image. `--image` overrides that field for this invocation and binds
-the selected disk and NVRAM to the asset names referenced by the profile. It
-also supplies the image's TPM seed when the profile enables TPM. The profile
-still selects the engine and hardware; image and profile targets must match.
-Firmware code is not part of the image record: import it and bind the profile's
-loader asset before launching.
+the selected disk and NVRAM component paths to the asset names referenced by
+the profile. It also supplies the image's TPM seed when the profile enables
+TPM. The profile still selects the engine and hardware; image and profile
+targets must match. Firmware code is not part of the image record: keep it as
+a normal profile asset and bind the profile's loader asset before launching.
 The analysis example requires its analysis-capable QEMU engine to be configured
 or selected with `--qemu`. The Rust planner encodes the analysis payload and
 SMBIOS identity for that engine. Bridge networking requires a privileged QEMU
@@ -121,8 +123,8 @@ accept an optional `supported_engine_tracks` array of additional compatible
 tracks, for example:
 
 ```json
-"engine_track": "unifi-10.2",
-"supported_engine_tracks": ["unifi-10.2-analysis"]
+"engine_track": "qemu-10.2-unifi",
+"supported_engine_tracks": ["qemu-10.2-analysis"]
 ```
 
 The original `engine_track` remains supported. Older manifests without the
@@ -137,21 +139,26 @@ use `run --fresh --image IMAGE`. Changing a template or image manifest does not
 change an existing instance's saved launch plan.
 
 To import a `vmmanager-sh` base, point the importer at the immutable base
-directory, not at an instance directory under `vm-state`:
+directory, not at an instance directory under `vm-state`. By default,
+MachineEmu reads `~/.vm-base/<image-id>`:
 
 ```sh
 cargo run -p machineemu -- import-vmmanager-base \
   --workspace ./machineemu-workspace \
-  --source "$HOME/.vm-base/win11-dev" \
   --image-id win11-dev \
-  --engine-track unifi-10.2 \
+  --engine-track qemu-10.2-unifi \
   --target x86_64-softmmu \
   --export-bundle ./images/win11-dev
 ```
 
+Use `--source /path/to/base` when the base lives somewhere else.
+
 The importer reads `disk.qcow2`, `OVMF_VARS.fd`, and
 `tpm/tpm2-00.permall`. It deliberately excludes TPM lock/PID files and does
 not import `vm-state/*/overlay.qcow2`, which is writable instance state.
+The CLI starts a daemon-side import job and follows its SSE progress stream.
+If the event stream disconnects, it reconnects with `Last-Event-ID` and falls
+back to the job status endpoint before continuing.
 
 ## UDM Pro firmware base
 

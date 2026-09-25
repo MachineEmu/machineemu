@@ -71,7 +71,7 @@ pub(super) fn resolve(
                 .cloned()
                 .unwrap_or(json!("auto")),
         ),
-        "profile" | "none" => None,
+        "profile" | "none" | "off" => None,
         "auto" => Some(json!("auto")),
         other => Some(json!(other)),
     };

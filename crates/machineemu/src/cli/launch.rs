@@ -8,23 +8,23 @@ pub(super) enum LaunchMode {
     Run,
 }
 pub(super) struct RunOptions<'a> {
-    pub profile_name: &'a str,
-    pub instance: &'a str,
+    pub profile_name: Option<&'a str>,
+    pub instance: Option<&'a str>,
     pub image: Option<&'a str>,
     pub force: bool,
     pub seed: Option<&'a Path>,
+    pub disk_size: Option<&'a str>,
     pub net: &'a str,
     pub vnc: &'a str,
     pub vnc_password_file: Option<&'a Path>,
     pub h264: bool,
+    pub hardware: &'a super::hardware::HardwareArgs,
     pub external_qmp_socket: Option<&'a Path>,
     pub fresh: bool,
     pub auto_remove: bool,
     pub mode: LaunchMode,
     pub workspace_root: &'a Path,
     pub qemu: &'a Path,
-    pub swtpm: Option<&'a Path>,
-    pub bridge_helper: Option<&'a Path>,
     pub mac: Option<&'a str>,
     pub daemon: &'a str,
     pub token: &'a str,
@@ -32,6 +32,7 @@ pub(super) struct RunOptions<'a> {
 
 pub(super) async fn create_from_document(
     file: &Path,
+    hardware: &super::hardware::HardwareArgs,
     workspace_root: &Path,
     daemon: &str,
     token: &str,
@@ -71,6 +72,10 @@ pub(super) async fn create_from_document(
     };
     let (daemon, token) = effective_client(daemon, token)?;
     ensure_daemon(&daemon, &token, &workspace).await?;
+    let mut launch_plan: LaunchSpec = serde_json::from_value(document.launch_plan.take().unwrap())
+        .map_err(|e| machineemu_core::engine::Error::Invalid(e.to_string()))?;
+    hardware.apply(&mut launch_plan, &workspace, &id)?;
+    document.launch_plan = Some(serde_json::to_value(launch_plan).unwrap());
     let value = serde_json::to_value(document)
         .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
     daemon_request(&daemon, &token, "POST", "/api/v2/instances", Some(value)).await?;
@@ -90,6 +95,120 @@ pub(super) async fn create_from_document(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn update_existing_instance_config(
+    daemon: &str,
+    token: &str,
+    workspace_root: &Path,
+    instance: &str,
+    image: Option<&str>,
+    force: bool,
+    seed: Option<&Path>,
+    disk_size: Option<&str>,
+    net: &str,
+    external_qmp_socket: Option<&Path>,
+    qemu: &Path,
+    mac: Option<&str>,
+    auto_remove: bool,
+    hardware: &super::hardware::HardwareArgs,
+) -> Result<(), machineemu_core::engine::Error> {
+    if image.is_some() || force {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--image/--force require a profile; use --profile PROFILE INSTANCE or --fresh".into(),
+        ));
+    }
+    if seed.is_some() {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--seed requires a profile refresh; use --profile PROFILE INSTANCE or --fresh".into(),
+        ));
+    }
+    if disk_size.is_some() {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--disk-size cannot change on an existing instance; use --fresh".into(),
+        ));
+    }
+    if net != "profile" {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--net requires a profile refresh; use --network0/--network for existing instances"
+                .into(),
+        ));
+    }
+    if external_qmp_socket.is_some() {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--qmp-socket requires a profile refresh; use --profile PROFILE INSTANCE or --fresh"
+                .into(),
+        ));
+    }
+    if qemu != Path::new("/run/current-system/sw/bin/qemu-system-x86_64") {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--qemu requires a profile refresh; use --profile PROFILE INSTANCE or --fresh".into(),
+        ));
+    }
+    if mac.is_some() {
+        return Err(machineemu_core::engine::Error::Invalid(
+            "--mac requires a profile refresh; use --profile PROFILE INSTANCE or --fresh".into(),
+        ));
+    }
+    if !auto_remove && !hardware.has_updates() {
+        return Ok(());
+    }
+    let path = format!("/api/v2/instances/{instance}/config");
+    let mut document = daemon_request(daemon, token, "GET", &path, None).await?;
+    let mut launch_plan: LaunchSpec = serde_json::from_value(document["launch_plan"].clone())
+        .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
+    hardware.apply(&mut launch_plan, workspace_root, instance)?;
+    document["launch_plan"] = serde_json::to_value(launch_plan).unwrap();
+    if auto_remove {
+        document["auto_remove"] = serde_json::Value::Bool(true);
+    }
+    daemon_request(daemon, token, "PUT", &path, Some(document)).await?;
+    Ok(())
+}
+
+async fn start_configured_instance(
+    daemon: &str,
+    token: &str,
+    instance: &str,
+    auto_remove: bool,
+) -> Result<(), machineemu_core::engine::Error> {
+    let suffix = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default()
+    );
+    let started = daemon_request(
+        daemon,
+        token,
+        "POST",
+        &format!("/api/v2/instances/{instance}/start"),
+        Some(serde_json::json!({
+            "operation_id": format!("start-{suffix}"),
+            "run_id": format!("run-{suffix}"),
+            "idempotency_key": format!("run-{suffix}")
+        })),
+    )
+    .await;
+    if started.is_err() && auto_remove {
+        let _ = daemon_request(
+            daemon,
+            token,
+            "DELETE",
+            &format!("/api/v2/instances/{instance}"),
+            None,
+        )
+        .await;
+    }
+    let started = started?;
+    println!("started {instance}");
+    if let Some(port) = started["vnc_port"].as_u64() {
+        println!("VNC: 127.0.0.1:{port}");
+    }
+    Ok(())
+}
+
 pub(super) async fn run_rust_owned(
     options: RunOptions<'_>,
 ) -> Result<(), machineemu_core::engine::Error> {
@@ -99,22 +218,31 @@ pub(super) async fn run_rust_owned(
         image,
         force,
         seed,
+        disk_size,
         net,
         vnc,
         vnc_password_file,
         h264,
+        hardware,
         external_qmp_socket,
         fresh,
         auto_remove,
         mode,
         workspace_root,
         qemu,
-        swtpm,
-        bridge_helper,
         mac,
         daemon,
         token,
     } = options;
+    let instance = instance.ok_or_else(|| {
+        machineemu_core::engine::Error::Invalid(
+            match mode {
+                LaunchMode::Create => "create requires INSTANCE",
+                LaunchMode::Run => "run requires INSTANCE",
+            }
+            .into(),
+        )
+    })?;
     Id::new("instance", instance.to_owned())
         .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
     let (config, config_path) = machineemu_core::config::load_config(None)
@@ -166,35 +294,37 @@ pub(super) async fn run_rust_owned(
             "--rm is only valid with run".into(),
         ));
     }
-    if exists && (!fresh || mode == LaunchMode::Create || auto_remove) {
+    if exists && mode == LaunchMode::Create {
         return Err(machineemu_core::engine::Error::Invalid(format!(
             "instance {instance} already exists; use start {instance}"
         )));
     }
-    // The flag wins, then helpers.swtpm from the configuration; a relative
-    // configured path is read against the file that declared it, as engine
-    // paths are. Without either, the plan names `swtpm` and PATH decides.
-    let helper_path = |flag: Option<&Path>, configured: Option<PathBuf>| {
-        flag.map(Path::to_owned).or_else(|| {
-            configured.map(|path| {
-                machineemu_core::config::resolve_config_path(config_path.as_deref(), path)
-            })
-        })
-    };
-    let swtpm_path = helper_path(
-        swtpm,
-        config
-            .helpers
-            .as_ref()
-            .and_then(|helpers| helpers.swtpm.clone()),
-    );
-    let bridge_helper_path = helper_path(
-        bridge_helper,
-        config
-            .helpers
-            .as_ref()
-            .and_then(|helpers| helpers.qemu_bridge_helper.clone()),
-    );
+    if exists && !fresh && mode == LaunchMode::Run && profile_name.is_none() {
+        update_existing_instance_config(
+            &daemon,
+            &token,
+            &workspace_root,
+            instance,
+            image,
+            force,
+            seed,
+            disk_size,
+            net,
+            external_qmp_socket,
+            qemu,
+            mac,
+            auto_remove,
+            hardware,
+        )
+        .await?;
+        return start_configured_instance(&daemon, &token, instance, auto_remove).await;
+    }
+    let profile_name = profile_name.ok_or_else(|| {
+        machineemu_core::engine::Error::Invalid(
+            "profile is required to create or refresh an instance; use --profile PROFILE INSTANCE"
+                .into(),
+        )
+    })?;
     let instance_dir = workspace_root.join("instances").join(instance);
     let profile_path = resolve_profile_path(profile_name, &workspace_root);
     let mut profile = load_document(&profile_path)?;
@@ -221,6 +351,25 @@ pub(super) async fn run_rust_owned(
     let profile_object = profile.as_object_mut().ok_or_else(|| {
         machineemu_core::engine::Error::Invalid("profile must be a mapping".into())
     })?;
+    if let Some(size) = disk_size {
+        let storage = profile_object
+            .entry("storage")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                machineemu_core::engine::Error::Invalid("profile.storage must be a mapping".into())
+            })?;
+        let disk = storage
+            .entry("disk")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                machineemu_core::engine::Error::Invalid(
+                    "profile.storage.disk must be a mapping".into(),
+                )
+            })?;
+        disk.insert("size".into(), serde_json::Value::String(size.to_owned()));
+    }
     if net != "profile" {
         let network = match net.strip_prefix("bridge:") {
             Some(bridge) => serde_json::json!({"type":"bridge", "bridge":bridge}),
@@ -243,9 +392,26 @@ pub(super) async fn run_rust_owned(
             .ok_or_else(|| {
                 machineemu_core::engine::Error::Invalid("profile.devices must be a mapping".into())
             })?;
+        devices.insert("vnc".into(), serde_json::json!(false));
         devices.insert("h264".into(), serde_json::json!(true));
         devices.insert("video".into(), serde_json::json!({"type": "virtio-vga-gl"}));
         devices.insert("usb_tablet".into(), serde_json::json!(true));
+    }
+    if !h264
+        && !matches!(vnc, "profile" | "off" | "none")
+        && let Some(devices) = profile_object
+            .get_mut("devices")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        devices.insert("h264".into(), serde_json::json!(false));
+        if devices
+            .get("video")
+            .and_then(|v| v.get("type"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| matches!(v, "virtio-gpu-gl" | "virtio-vga-gl"))
+        {
+            devices.remove("video");
+        }
     }
     let profile_id = profile_object
         .get("id")
@@ -278,7 +444,12 @@ pub(super) async fn run_rust_owned(
         config_path.as_deref(),
         config.helpers.as_ref(),
     )?;
-    let display = super::vnc::resolve(&profile, &profile_path, vnc, vnc_password_file)?;
+    let display = super::vnc::resolve(
+        &profile,
+        &profile_path,
+        if h264 { "none" } else { vnc },
+        vnc_password_file,
+    )?;
     validate_h264_display(h264, display.is_some())?;
     super::vnc::normalize_profile(&mut profile, display.is_some())?;
     let configured_engine = if qemu == Path::new("/run/current-system/sw/bin/qemu-system-x86_64") {
@@ -291,7 +462,7 @@ pub(super) async fn run_rust_owned(
                     .as_deref()
                     .is_none_or(|target| target == profile_target)
             })
-            .or_else(|| config.engines.get("system"))
+            .or_else(|| config.engines.get("qemu-system"))
     } else {
         None
     };
@@ -365,13 +536,13 @@ pub(super) async fn run_rust_owned(
         profile: profile.clone(),
         release_set,
         bundle_root: workspace_root.join("generated-engines"),
-        asset_root: Some(workspace_root.join("blobs")),
+        asset_root: None,
         target: profile_target,
         runtime_dir: instance_dir.clone(),
         state_dir: Some(instance_dir.clone()),
         seed: seed.map(Path::to_owned),
-        swtpm: swtpm_path,
-        bridge_helper: bridge_helper_path,
+        swtpm: None,
+        bridge_helper: None,
         mac: mac.map(str::to_owned),
         instance: Some(instance.to_owned()),
     })?;
@@ -419,7 +590,7 @@ pub(super) async fn run_rust_owned(
         None,
     )?;
     validate_profile_against_qemu(&profile, &options)?;
-    let launch_plan = LaunchSpec::from_plan(
+    let mut launch_plan = LaunchSpec::from_plan(
         plan,
         LaunchContext {
             workspace: &workspace_root,
@@ -431,6 +602,7 @@ pub(super) async fn run_rust_owned(
             helpers: sidecars,
         },
     )?;
+    hardware.apply(&mut launch_plan, &workspace_root, instance)?;
     if fresh && exists {
         let _ = daemon_request(
             &daemon,
@@ -457,6 +629,28 @@ pub(super) async fn run_rust_owned(
             "/api/v2/instances",
             Some(serde_json::json!({"instance_id":instance,"image_id":image_id,"profile_id":profile_id,"launch_plan":launch_plan.clone(),"auto_remove":auto_remove,"profile":saved_profile})),
         ).await?;
+    } else {
+        let mut document = daemon_request(
+            &daemon,
+            &token,
+            "GET",
+            &format!("/api/v2/instances/{instance}/config"),
+            None,
+        )
+        .await?;
+        document["launch_plan"] = serde_json::to_value(launch_plan.clone()).unwrap();
+        document["profile"] = saved_profile;
+        if auto_remove {
+            document["auto_remove"] = serde_json::Value::Bool(true);
+        }
+        daemon_request(
+            &daemon,
+            &token,
+            "PUT",
+            &format!("/api/v2/instances/{instance}/config"),
+            Some(document),
+        )
+        .await?;
     }
     let suffix = format!(
         "{}-{}",
@@ -784,30 +978,34 @@ fn bind_image(
         .and_then(|v| v.as_str())
         .map(str::to_owned);
     let has_tpm = profile.get("tpm").is_some_and(|value| !value.is_null());
-    let blob = |digest: &str| -> Result<(String, PathBuf), Error> {
+    let component = |digest: &str, name: &str| -> Result<PathBuf, Error> {
         let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
         if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(invalid(
                 "selected image contains an invalid SHA-256 digest".into(),
             ));
         }
-        let path = workspace.join("blobs/sha256").join(digest);
+        let path = workspace
+            .join("images")
+            .join(image.image_id.as_str())
+            .join("components")
+            .join(name);
         if !path.is_file() {
             return Err(invalid(format!(
                 "selected image asset is unavailable: {}",
                 path.display()
             )));
         }
-        Ok((format!("sha256:{digest}"), path))
+        Ok(path)
     };
-    let disk_digest = blob(&image.disk_sha256)?.0;
-    let nvram_digest = if nvram.is_some() {
-        Some(
-            blob(image.firmware_sha256.as_deref().ok_or_else(|| {
+    let disk_path = component(&image.disk_sha256, "disk.qcow2")?;
+    let nvram_path = if nvram.is_some() {
+        Some(component(
+            image.firmware_sha256.as_deref().ok_or_else(|| {
                 invalid("selected image has no NVRAM seed required by this profile".into())
-            })?)?
-            .0,
-        )
+            })?,
+            "firmware.fd",
+        )?)
     } else {
         None
     };
@@ -815,9 +1013,8 @@ fn bind_image(
         image
             .tpm_state_sha256
             .as_deref()
-            .map(blob)
+            .map(|digest| component(digest, "tpm-state"))
             .transpose()?
-            .map(|(_, path)| path)
     } else {
         None
     };
@@ -836,9 +1033,12 @@ fn bind_image(
             "profile.assets.{loader} is required: --image supplies disk and NVRAM, but firmware code must be imported and bound in the profile"
         )));
     }
-    assets.insert(disk, serde_json::Value::String(disk_digest));
-    if let Some((name, digest)) = nvram.zip(nvram_digest) {
-        assets.insert(name, serde_json::Value::String(digest));
+    assets.insert(
+        disk,
+        serde_json::Value::String(disk_path.display().to_string()),
+    );
+    if let Some((name, path)) = nvram.zip(nvram_path) {
+        assets.insert(name, serde_json::Value::String(path.display().to_string()));
     }
     object.insert(
         "image".into(),
@@ -941,13 +1141,14 @@ mod tests {
     fn image_override_binds_profile_asset_names_and_preserves_engine() {
         let root =
             std::env::temp_dir().join(format!("machineemu-bind-image-{}", std::process::id()));
-        fs::create_dir_all(root.join("blobs/sha256")).unwrap();
-        for digit in ["a", "b", "c"] {
-            fs::write(root.join("blobs/sha256").join(digit.repeat(64)), digit).unwrap();
-        }
+        let components = root.join("images/win11-dev/components");
+        fs::create_dir_all(&components).unwrap();
+        fs::write(components.join("disk.qcow2"), b"disk").unwrap();
+        fs::write(components.join("firmware.fd"), b"vars").unwrap();
+        fs::write(components.join("tpm-state"), b"tpm").unwrap();
         let image = machineemu_core::domain::ImageManifest {
             image_id: Id::new("image", "win11-dev").unwrap(),
-            engine_track: Id::new("track", "unifi-10.2").unwrap(),
+            engine_track: Id::new("track", "qemu-10.2-unifi").unwrap(),
             supported_engine_tracks: Vec::new(),
             target: "x86_64-softmmu".into(),
             disk_sha256: "a".repeat(64),
@@ -956,7 +1157,7 @@ mod tests {
         };
         let mut profile = serde_json::json!({
             "id": "analysis", "image": "old", "target": "x86_64-softmmu",
-            "engine": {"track": "unifi-10.2-analysis"},
+            "engine": {"track": "qemu-10.2-analysis"},
             "storage": {"disk": {"asset": "custom-disk"}},
             "firmware": {"loader": {"asset": "code"}, "nvram": {"asset": "vars"}},
             "assets": {"code": "preserved-code", "custom-disk": "old-disk"},
@@ -972,20 +1173,27 @@ mod tests {
         let mut compatible = image.clone();
         compatible
             .supported_engine_tracks
-            .push(Id::new("track", "unifi-10.2-analysis").unwrap());
+            .push(Id::new("track", "qemu-10.2-analysis").unwrap());
         assert!(bind_image(&mut original.clone(), &compatible, &root, false).is_ok());
         let tpm = bind_image(&mut profile, &image, &root, true).unwrap();
-        assert_eq!(tpm.unwrap(), root.join("blobs/sha256").join("c".repeat(64)));
+        assert_eq!(
+            tpm.unwrap(),
+            root.join("images/win11-dev/components/tpm-state")
+        );
         assert_eq!(profile["image"], "win11-dev");
         assert_eq!(profile["engine"], original["engine"]);
         assert_eq!(profile["assets"]["code"], "preserved-code");
         assert_eq!(
             profile["assets"]["custom-disk"],
-            format!("sha256:{}", "a".repeat(64))
+            root.join("images/win11-dev/components/disk.qcow2")
+                .display()
+                .to_string()
         );
         assert_eq!(
             profile["assets"]["vars"],
-            format!("sha256:{}", "b".repeat(64))
+            root.join("images/win11-dev/components/firmware.fd")
+                .display()
+                .to_string()
         );
         let mut incompatible = image.clone();
         incompatible.target = "aarch64-softmmu".into();
@@ -1017,7 +1225,7 @@ mod tests {
         incompatible = image.clone();
         incompatible.disk_sha256 = "../invalid".into();
         assert!(bind_image(&mut original.clone(), &incompatible, &root, true).is_err());
-        fs::remove_file(root.join("blobs/sha256").join("a".repeat(64))).unwrap();
+        fs::remove_file(root.join("images/win11-dev/components/disk.qcow2")).unwrap();
         assert!(
             bind_image(&mut original.clone(), &image, &root, true)
                 .unwrap_err()
@@ -1044,7 +1252,18 @@ mod tests {
             ])
             .is_err()
         );
-        assert!(Cli::try_parse_from(["machineemu", "create"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "machineemu",
+                "create",
+                "--file",
+                "instance.yaml",
+                "--disk-size",
+                "80GiB"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["machineemu", "create"]).is_ok());
     }
 
     #[test]
@@ -1052,6 +1271,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "machineemu",
             "run",
+            "--profile",
             "malware-analysis-x64",
             "analysis01",
             "--image",
@@ -1059,11 +1279,12 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(cli.command, Command::Run(RunArgs { launch: LaunchArgs { image: Some(image), .. }, .. }) if image == "win11-dev")
+            matches!(cli.command, Command::Run(RunArgs { launch: LaunchArgs { profile: Some(profile), image: Some(image), instance: Some(instance), .. }, .. }) if profile == "malware-analysis-x64" && image == "win11-dev" && instance == "analysis01")
         );
         let forced = Cli::try_parse_from([
             "machineemu",
             "run",
+            "--profile",
             "analysis",
             "lab",
             "--image",
@@ -1079,18 +1300,72 @@ mod tests {
             })
         ));
         assert!(Cli::try_parse_from(["machineemu", "run", "analysis", "lab", "--force"]).is_err());
-        let cli = Cli::try_parse_from(["machineemu", "run", "win11-dev", "dev01"]).unwrap();
+        let cli = Cli::try_parse_from(["machineemu", "run", "dev01"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Run(RunArgs {
-                launch: LaunchArgs { image: None, .. },
+                launch: LaunchArgs { image: None, instance: Some(instance), .. },
                 ..
-            })
+            }) if instance == "dev01"
         ));
-        let create = Cli::try_parse_from(["machineemu", "create", "win11-dev", "dev02"]).unwrap();
-        assert!(matches!(create.command, Command::Create(_)));
-        let disposable =
-            Cli::try_parse_from(["machineemu", "run", "win11-dev", "temp01", "--rm"]).unwrap();
+        let create =
+            Cli::try_parse_from(["machineemu", "create", "--profile", "win11-dev", "dev02"])
+                .unwrap();
+        assert!(
+            matches!(create.command, Command::Create(LaunchArgs { profile: Some(profile), instance: Some(instance), .. }) if profile == "win11-dev" && instance == "dev02")
+        );
+        let profiled =
+            Cli::try_parse_from(["machineemu", "run", "--profile", "debian13", "linux01"]).unwrap();
+        assert!(
+            matches!(profiled.command, Command::Run(RunArgs { launch: LaunchArgs { profile: Some(profile), instance: Some(instance), .. }, .. }) if profile == "debian13" && instance == "linux01")
+        );
+        let existing =
+            Cli::try_parse_from(["machineemu", "run", "--network0", "bridge:br0", "linux01"])
+                .unwrap();
+        assert!(
+            matches!(existing.command, Command::Run(RunArgs { launch: LaunchArgs { instance: Some(instance), .. }, .. }) if instance == "linux01")
+        );
+        assert!(Cli::try_parse_from(["machineemu", "run", "debian13", "linux01"]).is_err());
+        let create = Cli::try_parse_from([
+            "machineemu",
+            "create",
+            "--profile",
+            "win11-dev",
+            "dev03",
+            "--disk-size",
+            "80GiB",
+            "--memory",
+            "8GiB",
+        ])
+        .unwrap();
+        assert!(
+            matches!(create.command, Command::Create(LaunchArgs { disk_size: Some(size), .. }) if size == "80GiB")
+        );
+        let sized_run = Cli::try_parse_from([
+            "machineemu",
+            "run",
+            "--profile",
+            "win11-dev",
+            "dev04",
+            "--disk-size",
+            "80GiB",
+            "--memory",
+            "8GiB",
+            "--fresh",
+        ])
+        .unwrap();
+        assert!(
+            matches!(sized_run.command, Command::Run(RunArgs { launch: LaunchArgs { disk_size: Some(size), .. }, fresh: true, .. }) if size == "80GiB")
+        );
+        let disposable = Cli::try_parse_from([
+            "machineemu",
+            "run",
+            "--profile",
+            "win11-dev",
+            "temp01",
+            "--rm",
+        ])
+        .unwrap();
         assert!(matches!(
             disposable.command,
             Command::Run(RunArgs { rm: true, .. })

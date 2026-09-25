@@ -14,8 +14,8 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
-use winit::keyboard::PhysicalKey;
-use winit::window::{Window, WindowId};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::keymap;
 use crate::media::{Frame, Video};
@@ -27,6 +27,33 @@ use crate::protocol::{Cursor, MAX_CLIPBOARD_BYTES, message};
 const RESIZE_SETTLE: Duration = Duration::from_millis(400);
 /// Pixel scroll distance that counts as one wheel step.
 const PIXELS_PER_WHEEL_STEP: f64 = 50.0;
+const TOOLBAR_HEIGHT: u32 = 38;
+const SCREEN_SIZES: &[(u32, u32)] = &[(1024, 768), (1280, 800), (1920, 1080), (2560, 1440)];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScaleMode {
+    Fit,
+    Percent(u32),
+}
+
+impl ScaleMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Fit => Self::Percent(100),
+            Self::Percent(100) => Self::Percent(125),
+            Self::Percent(125) => Self::Percent(150),
+            Self::Percent(150) => Self::Percent(200),
+            _ => Self::Fit,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Fit => "FIT".into(),
+            Self::Percent(value) => format!("{value}%"),
+        }
+    }
+}
 
 pub enum UiEvent {
     /// A new frame is waiting in the shared slot.
@@ -69,6 +96,33 @@ impl Viewport {
             width,
             height,
         })
+    }
+
+    fn scaled(source: (u32, u32), area: (u32, u32, u32, u32), scale: ScaleMode) -> Option<Self> {
+        let (x, y, width, height) = area;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let mut view = match scale {
+            ScaleMode::Fit => Self::fit(source, (width, height))?,
+            ScaleMode::Percent(percent) => {
+                let scaled_width = source.0.saturating_mul(percent) / 100;
+                let scaled_height = source.1.saturating_mul(percent) / 100;
+                if scaled_width <= width && scaled_height <= height {
+                    Self {
+                        x: (width - scaled_width) / 2,
+                        y: (height - scaled_height) / 2,
+                        width: scaled_width.max(1),
+                        height: scaled_height.max(1),
+                    }
+                } else {
+                    Self::fit((scaled_width, scaled_height), (width, height))?
+                }
+            }
+        };
+        view.x += x;
+        view.y += y;
+        Some(view)
     }
 
     /// Map a window position to guest pixels, or `None` outside the display.
@@ -184,6 +238,143 @@ fn mouse_button(button: MouseButton) -> Option<u32> {
     })
 }
 
+fn fill_rect(pixels: &mut [u32], stride: u32, rect: (u32, u32, u32, u32), color: u32) {
+    let rows = pixels.len() / stride as usize;
+    let (x, y, width, height) = rect;
+    let x1 = x.saturating_add(width).min(stride) as usize;
+    let y1 = y.saturating_add(height).min(rows as u32) as usize;
+    for row in y as usize..y1 {
+        pixels[row * stride as usize + x as usize..row * stride as usize + x1].fill(color);
+    }
+}
+
+fn glyph(character: char) -> [&'static str; 7] {
+    match character.to_ascii_uppercase() {
+        'A' => [
+            "01110", "10001", "10001", "11111", "10001", "10001", "10001",
+        ],
+        'B' => [
+            "11110", "10001", "10001", "11110", "10001", "10001", "11110",
+        ],
+        'C' => [
+            "01111", "10000", "10000", "10000", "10000", "10000", "01111",
+        ],
+        'E' => [
+            "11111", "10000", "10000", "11110", "10000", "10000", "11111",
+        ],
+        'F' => [
+            "11111", "10000", "10000", "11110", "10000", "10000", "10000",
+        ],
+        'G' => [
+            "01111", "10000", "10000", "10111", "10001", "10001", "01111",
+        ],
+        'I' => [
+            "11111", "00100", "00100", "00100", "00100", "00100", "11111",
+        ],
+        'L' => [
+            "10000", "10000", "10000", "10000", "10000", "10000", "11111",
+        ],
+        'N' => [
+            "10001", "11001", "10101", "10011", "10001", "10001", "10001",
+        ],
+        'O' => [
+            "01110", "10001", "10001", "10001", "10001", "10001", "01110",
+        ],
+        'P' => [
+            "11110", "10001", "10001", "11110", "10000", "10000", "10000",
+        ],
+        'R' => [
+            "11110", "10001", "10001", "11110", "10100", "10010", "10001",
+        ],
+        'S' => [
+            "01111", "10000", "10000", "01110", "00001", "00001", "11110",
+        ],
+        'T' => [
+            "11111", "00100", "00100", "00100", "00100", "00100", "00100",
+        ],
+        'U' => [
+            "10001", "10001", "10001", "10001", "10001", "10001", "01110",
+        ],
+        'V' => [
+            "10001", "10001", "10001", "10001", "10001", "01010", "00100",
+        ],
+        'X' => [
+            "10001", "10001", "01010", "00100", "01010", "10001", "10001",
+        ],
+        '0' => [
+            "01110", "10011", "10101", "10101", "10101", "11001", "01110",
+        ],
+        '1' => [
+            "00100", "01100", "00100", "00100", "00100", "00100", "01110",
+        ],
+        '2' => [
+            "01110", "10001", "00001", "00010", "00100", "01000", "11111",
+        ],
+        '3' => [
+            "11110", "00001", "00001", "01110", "00001", "00001", "11110",
+        ],
+        '4' => [
+            "00010", "00110", "01010", "10010", "11111", "00010", "00010",
+        ],
+        '5' => [
+            "11111", "10000", "10000", "11110", "00001", "00001", "11110",
+        ],
+        '6' => [
+            "01110", "10000", "10000", "11110", "10001", "10001", "01110",
+        ],
+        '7' => [
+            "11111", "00001", "00010", "00100", "01000", "01000", "01000",
+        ],
+        '8' => [
+            "01110", "10001", "10001", "01110", "10001", "10001", "01110",
+        ],
+        '9' => [
+            "01110", "10001", "10001", "01111", "00001", "00001", "01110",
+        ],
+        '+' => [
+            "00000", "00100", "00100", "11111", "00100", "00100", "00000",
+        ],
+        '%' => [
+            "11001", "11010", "00100", "01000", "10110", "00110", "00000",
+        ],
+        _ => ["00000"; 7],
+    }
+}
+
+fn draw_text(pixels: &mut [u32], stride: u32, mut x: u32, y: u32, text: &str, color: u32) {
+    for character in text.chars() {
+        for (row, pattern) in glyph(character).iter().enumerate() {
+            for (column, bit) in pattern.bytes().enumerate() {
+                if bit == b'1' {
+                    fill_rect(
+                        pixels,
+                        stride,
+                        (x + column as u32, y + row as u32, 1, 1),
+                        color,
+                    );
+                }
+            }
+        }
+        x += 6;
+    }
+}
+
+fn toolbar_button(
+    pixels: &mut [u32],
+    stride: u32,
+    rect: (u32, u32, u32, u32),
+    label: &str,
+    active: bool,
+) {
+    fill_rect(
+        pixels,
+        stride,
+        rect,
+        if active { 0x003b_82f6 } else { 0x0030_3745 },
+    );
+    draw_text(pixels, stride, rect.0 + 8, rect.1 + 10, label, 0x00f3_f4f6);
+}
+
 pub struct App {
     options: Options,
     video: Arc<Video>,
@@ -209,6 +400,12 @@ pub struct App {
     buttons: HashSet<u32>,
     wheel: f64,
     resize_at: Option<Instant>,
+    scale: ScaleMode,
+    screen_size: usize,
+    grabbed: bool,
+    shortcut_inhibitor: Option<crate::shortcuts::ShortcutInhibitor>,
+    modifiers: ModifiersState,
+    pointer_window: Option<(f64, f64)>,
     clipboard: Option<arboard::Clipboard>,
     clipboard_available: bool,
     last_clipboard: Option<String>,
@@ -249,6 +446,12 @@ impl App {
             buttons: HashSet::new(),
             wheel: 0.0,
             resize_at: None,
+            scale: ScaleMode::Fit,
+            screen_size: 1,
+            grabbed: false,
+            shortcut_inhibitor: None,
+            modifiers: ModifiersState::empty(),
+            pointer_window: None,
             clipboard,
             clipboard_available: false,
             last_clipboard: None,
@@ -279,7 +482,130 @@ impl App {
     }
 
     fn viewport(&self) -> Option<Viewport> {
-        Viewport::fit(self.source_size()?, self.window_size()?)
+        let source = self.source_size()?;
+        let (width, height) = self.window_size()?;
+        Viewport::scaled(
+            source,
+            (
+                0,
+                TOOLBAR_HEIGHT,
+                width,
+                height.saturating_sub(TOOLBAR_HEIGHT),
+            ),
+            self.scale,
+        )
+    }
+
+    fn guest_window_size(&self) -> Option<(u32, u32)> {
+        let (width, height) = self.window_size()?;
+        Some((width, height.saturating_sub(TOOLBAR_HEIGHT)))
+    }
+
+    fn set_grabbed(&mut self, grabbed: bool) {
+        if !self.options.control {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        if grabbed {
+            let result = window
+                .set_cursor_grab(CursorGrabMode::Confined)
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked));
+            if let Err(error) = result {
+                warn!(%error, "cannot grab input");
+                return;
+            }
+            self.grabbed = true;
+            match crate::shortcuts::ShortcutInhibitor::new(&window) {
+                Ok(inhibitor) => self.shortcut_inhibitor = inhibitor,
+                Err(error) => warn!(%error, "cannot inhibit compositor shortcuts"),
+            }
+            window.set_cursor_visible(false);
+        } else {
+            self.release_inputs();
+            self.shortcut_inhibitor = None;
+            if let Err(error) = window.set_cursor_grab(CursorGrabMode::None) {
+                warn!(%error, "cannot release input grab");
+            }
+            self.grabbed = false;
+            window.set_cursor_visible(true);
+        }
+        window.request_redraw();
+    }
+
+    fn draw_toolbar(
+        pixels: &mut [u32],
+        stride: u32,
+        screen_size: usize,
+        scale: ScaleMode,
+        resize_guest: bool,
+        grabbed: bool,
+    ) {
+        fill_rect(pixels, stride, (0, 0, stride, TOOLBAR_HEIGHT), 0x0011_1827);
+        let size = SCREEN_SIZES[screen_size];
+        toolbar_button(
+            pixels,
+            stride,
+            (8, 5, 152, 28),
+            &format!("SIZE {}X{}", size.0, size.1),
+            false,
+        );
+        toolbar_button(
+            pixels,
+            stride,
+            (168, 5, 118, 28),
+            &format!("SCALE {}", scale.label()),
+            scale != ScaleMode::Fit,
+        );
+        toolbar_button(
+            pixels,
+            stride,
+            (294, 5, 104, 28),
+            if resize_guest { "AUTO ON" } else { "AUTO OFF" },
+            resize_guest,
+        );
+        toolbar_button(
+            pixels,
+            stride,
+            (406, 5, 116, 28),
+            if grabbed { "INPUT GRAB" } else { "INPUT FREE" },
+            grabbed,
+        );
+        if stride > 690 {
+            draw_text(pixels, stride, 538, 15, "RELEASE CTRL+ALT+G", 0x009c_a3af);
+        }
+    }
+
+    fn toolbar_action(&mut self, x: f64, y: f64) -> bool {
+        if y < 0.0 || y >= f64::from(TOOLBAR_HEIGHT) {
+            return false;
+        }
+        match x as u32 {
+            8..=159 => {
+                self.screen_size = (self.screen_size + 1) % SCREEN_SIZES.len();
+                let size = SCREEN_SIZES[self.screen_size];
+                self.control(message::resize(size.0, size.1).expect("preset size is valid"));
+                if let Some(window) = &self.window {
+                    let _ = window
+                        .request_inner_size(PhysicalSize::new(size.0, size.1 + TOOLBAR_HEIGHT));
+                }
+            }
+            168..=285 => {
+                self.scale = self.scale.next();
+                self.update_output_size();
+            }
+            294..=397 => {
+                self.options.resize_guest = !self.options.resize_guest;
+                self.resize_at = None;
+            }
+            406..=521 => self.set_grabbed(!self.grabbed),
+            _ => {}
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        true
     }
 
     /// Have the GPU post-processor scale to the viewport, so the frame that
@@ -334,6 +660,14 @@ impl App {
         if let (Some(cursor), Some(view), Some(source)) = (&self.cursor, view, self.source) {
             draw_cursor(cursor, &mut buffer, width, view, source);
         }
+        Self::draw_toolbar(
+            &mut buffer,
+            width,
+            self.screen_size,
+            self.scale,
+            self.options.resize_guest,
+            self.grabbed,
+        );
         if let Err(error) = buffer.present() {
             warn!(%error, "cannot present");
         }
@@ -380,7 +714,8 @@ impl App {
                 self.cursor = Some(cursor);
                 if let Some(window) = &self.window {
                     window.set_cursor_visible(
-                        !(self.options.control
+                        !(self.grabbed
+                            && self.options.control
                             && self.pointer_in_view
                             && self.cursor.as_ref().is_some_and(|cursor| cursor.visible)),
                     );
@@ -409,7 +744,8 @@ impl App {
                         height = size.1,
                         "sizing window to the guest display"
                     );
-                    let _ = window.request_inner_size(PhysicalSize::new(size.0, size.1));
+                    let _ = window
+                        .request_inner_size(PhysicalSize::new(size.0, size.1 + TOOLBAR_HEIGHT));
                 }
                 self.update_output_size();
                 if let Some(window) = &self.window {
@@ -489,6 +825,7 @@ impl ApplicationHandler<UiEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                self.set_grabbed(false);
                 self.release_inputs();
                 self.outbound = None;
                 event_loop.exit();
@@ -511,12 +848,24 @@ impl ApplicationHandler<UiEvent> for App {
                     buttons = self.buttons.len(),
                     "focus lost; releasing held input"
                 );
-                self.release_inputs();
+                self.set_grabbed(false);
             }
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else {
                     return;
                 };
+                if code == KeyCode::KeyG
+                    && event.state == ElementState::Pressed
+                    && self.modifiers.control_key()
+                    && self.modifiers.alt_key()
+                {
+                    self.set_grabbed(false);
+                    return;
+                }
+                if !self.grabbed {
+                    return;
+                }
                 let Some(key) = keymap::qnum(code) else {
                     debug!(?code, "key has no QEMU keycode; ignored");
                     return;
@@ -535,6 +884,7 @@ impl ApplicationHandler<UiEvent> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.pointer_window = Some((position.x, position.y));
                 let guest_position = self
                     .viewport()
                     .zip(self.source_size())
@@ -543,12 +893,15 @@ impl ApplicationHandler<UiEvent> for App {
                 self.pointer_position = guest_position;
                 if let Some(window) = &self.window {
                     window.set_cursor_visible(
-                        !(self.options.control
+                        !(self.grabbed
+                            && self.options.control
                             && self.pointer_in_view
                             && self.cursor.as_ref().is_some_and(|cursor| cursor.visible)),
                     );
                 }
-                if let Some((x, y)) = guest_position {
+                if self.grabbed
+                    && let Some((x, y)) = guest_position
+                {
                     self.control(message::mouse_abs(x, y));
                 }
             }
@@ -559,6 +912,19 @@ impl ApplicationHandler<UiEvent> for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && let Some((x, y)) = self.pointer_window
+                    && self.toolbar_action(x, y)
+                {
+                    return;
+                }
+                if state == ElementState::Pressed && !self.grabbed {
+                    self.set_grabbed(true);
+                }
+                if !self.grabbed {
+                    return;
+                }
                 let Some(button) = mouse_button(button) else {
                     return;
                 };
@@ -578,6 +944,9 @@ impl ApplicationHandler<UiEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if !self.grabbed {
+                    return;
+                }
                 self.wheel += match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(position) => position.y / PIXELS_PER_WHEEL_STEP,
@@ -598,7 +967,7 @@ impl ApplicationHandler<UiEvent> for App {
         if let Some(deadline) = self.resize_at {
             if Instant::now() >= deadline {
                 self.resize_at = None;
-                match (self.window_size(), self.source) {
+                match (self.guest_window_size(), self.source) {
                     (Some(window), Some(source)) if window == source => {
                         debug!(?window, "window matches the guest display; no resize");
                     }
@@ -672,6 +1041,63 @@ mod tests {
         assert_eq!(
             view.guest_position((1920, 1080), 999.9, 780.9),
             Some((1919, 1079))
+        );
+    }
+
+    #[test]
+    fn scaled_viewport_reserves_toolbar_and_preserves_aspect_ratio() {
+        assert_eq!(
+            Viewport::scaled(
+                (1280, 800),
+                (0, TOOLBAR_HEIGHT, 1600, 1000),
+                ScaleMode::Percent(100)
+            ),
+            Some(Viewport {
+                x: 160,
+                y: 138,
+                width: 1280,
+                height: 800,
+            })
+        );
+        let fitted = Viewport::scaled(
+            (1920, 1080),
+            (0, TOOLBAR_HEIGHT, 1000, 800),
+            ScaleMode::Percent(200),
+        )
+        .unwrap();
+        assert_eq!(fitted.y, TOOLBAR_HEIGHT + (800 - fitted.height) / 2);
+        assert_eq!(fitted.width, 1000);
+        assert!((fitted.width as f64 / fitted.height as f64 - 16.0 / 9.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn scale_button_cycles_through_all_choices() {
+        let mut scale = ScaleMode::Fit;
+        for expected in [
+            ScaleMode::Percent(100),
+            ScaleMode::Percent(125),
+            ScaleMode::Percent(150),
+            ScaleMode::Percent(200),
+            ScaleMode::Fit,
+        ] {
+            scale = scale.next();
+            assert_eq!(scale, expected);
+        }
+    }
+
+    #[test]
+    fn toolbar_renders_inside_its_reserved_rows() {
+        let mut pixels = vec![0u32; 720 * 80];
+        App::draw_toolbar(&mut pixels, 720, 1, ScaleMode::Fit, true, false);
+        assert!(
+            pixels[..720 * TOOLBAR_HEIGHT as usize]
+                .iter()
+                .any(|pixel| *pixel != 0)
+        );
+        assert!(
+            pixels[720 * TOOLBAR_HEIGHT as usize..]
+                .iter()
+                .all(|pixel| *pixel == 0)
         );
     }
 

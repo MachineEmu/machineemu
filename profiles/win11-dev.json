@@ -5,7 +5,7 @@
   "name": "Windows 11 Driver Development",
   "domain": "windows-driver-development",
   "engine": {
-    "track": "unifi-10.2",
+    "track": "qemu-system",
     "version": "10.2.4"
   },
   "machine": "q35",

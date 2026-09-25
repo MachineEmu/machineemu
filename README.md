@@ -7,6 +7,12 @@ consumes immutable engine bundles produced by `machineemu/qemu`.
 The repository is licensed under AGPL-3.0-or-later. Third-party and restricted
 inputs retain their own licensing and distribution requirements.
 
+**The Python application is deprecated.** Use the Rust `machineemu` CLI and
+`machineemu-daemon` for new development and operation. The `python/machineemu`
+package and Python console entry points in `pyproject.toml` are legacy. Python
+helper scripts remain for specific compatibility, import, and test workflows
+documented elsewhere in this repository.
+
 ## Rust development
 
 The Rust implementation uses two packages: `machineemu-core` for planning,

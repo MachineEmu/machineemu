@@ -149,6 +149,18 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         "-machine".into(),
         machine_arg.clone(),
     ];
+    if machine.contains("q35") {
+        // PCI devices cannot be hotplugged directly on pcie.0. Keep stable
+        // downstream ports available for live ISO and NIC operations.
+        argv.extend([
+            "-device".into(),
+            "pcie-root-port,id=pcie-root-port-iso,chassis=16,slot=16".into(),
+            "-device".into(),
+            "pcie-root-port,id=pcie-root-port-1,chassis=17,slot=17".into(),
+            "-device".into(),
+            "pcie-root-port,id=pcie-root-port-2,chassis=18,slot=18".into(),
+        ]);
+    }
     if let Some(accel) = resources.get("accelerator").and_then(Value::as_str) {
         argv.extend(accelerator(accel, resources.get("accelerator_thread"))?);
     }
@@ -350,7 +362,17 @@ fn validate_launch_settings(profile: &Map<String, Value>) -> Result<(), Error> {
         let boot = object(boot, "profile.boot")?;
         for key in boot.keys() {
             if ![
-                "kernel", "initrd", "dtb", "append", "menu", "from", "splash", "timeout",
+                "kernel",
+                "initrd",
+                "dtb",
+                "append",
+                "menu",
+                "from",
+                "once",
+                "strict",
+                "reboot_timeout",
+                "splash",
+                "timeout",
             ]
             .contains(&key.as_str())
             {
@@ -359,26 +381,15 @@ fn validate_launch_settings(profile: &Map<String, Value>) -> Result<(), Error> {
                 )));
             }
         }
-        for key in ["splash", "timeout"] {
-            if boot.contains_key(key) {
-                return Err(invalid(&format!(
-                    "profile.boot.{key} is not supported by the launch planner"
-                )));
-            }
-        }
-        if let Some(from) = boot.get("from") {
-            if from.as_str() != Some("disk") {
-                return Err(invalid("profile.boot.from only supports disk"));
-            }
-            if profile
+        if boot.get("from").and_then(Value::as_str) == Some("disk")
+            && profile
                 .get("storage")
                 .and_then(|storage| storage.get("disk"))
                 .is_none()
-            {
-                return Err(invalid(
-                    "profile.boot.from=disk requires profile.storage.disk",
-                ));
-            }
+        {
+            return Err(invalid(
+                "profile.boot.from=disk requires profile.storage.disk",
+            ));
         }
     }
     let Some(devices) = profile.get("devices") else {
@@ -852,16 +863,16 @@ pub(super) fn append_devices(
         }
     }
     if h264 {
-        if video_model != Some("virtio-vga-gl") {
+        if !matches!(video_model, Some("virtio-vga-gl" | "virtio-gpu-gl")) {
             return Err(invalid(
-                "profile.devices.h264 requires devices.video.type=virtio-vga-gl",
+                "profile.devices.h264 requires devices.video.type=virtio-vga-gl or virtio-gpu-gl",
             ));
         }
         argv.extend([
             "-vga".into(),
             "none".into(),
             "-device".into(),
-            "virtio-vga-gl,id=me-video".into(),
+            format!("{},id=me-video", video_model.unwrap()),
         ]);
         argv.extend(["-display".into(), "dbus,p2p=on,gl=on".into()]);
         if vnc {
@@ -1036,16 +1047,23 @@ fn resolve_assets(
         return Ok(out);
     };
     let assets = object(assets, "profile.assets")?;
-    let root = root.ok_or_else(|| invalid("profile assets require --asset-root"))?;
     for (name, reference) in assets {
-        let r = reference
-            .as_str()
-            .ok_or_else(|| invalid(&format!("profile.assets.{name} must be a sha256 reference")))?;
-        let digest = r
-            .strip_prefix("sha256:")
-            .filter(|x| x.len() == 64 && x.chars().all(|c| c.is_ascii_hexdigit()))
-            .ok_or_else(|| invalid(&format!("profile.assets.{name} must be a sha256 reference")))?;
-        let p = root.join("sha256").join(digest);
+        let r = reference.as_str().ok_or_else(|| {
+            invalid(&format!(
+                "profile.assets.{name} must be a file path or sha256 reference"
+            ))
+        })?;
+        let p = if let Some(digest) = r.strip_prefix("sha256:") {
+            if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(invalid(&format!(
+                    "profile.assets.{name} must be a file path or sha256 reference"
+                )));
+            }
+            let root = root.ok_or_else(|| invalid("sha256 profile assets require --asset-root"))?;
+            root.join("sha256").join(digest)
+        } else {
+            PathBuf::from(r)
+        };
         if !p.is_file() {
             return Err(invalid(&format!("asset {name:?} is unavailable: {r}")));
         }
@@ -1547,14 +1565,73 @@ fn append_direct_boot(
     assets: &BTreeMap<String, PathBuf>,
 ) -> Result<(), Error> {
     let Some(boot) = boot else { return Ok(()) };
+    let mut options = Vec::new();
+    for (key, option) in [("from", "order"), ("once", "once")] {
+        if let Some(value) = boot.get(key) {
+            let drive = match value.as_str() {
+                Some("disk") => "c",
+                Some("cdrom") => "d",
+                Some("network") => "n",
+                Some("floppy") => "a",
+                _ => {
+                    return Err(invalid(&format!(
+                        "profile.boot.{key} must be disk, cdrom, network, or floppy"
+                    )));
+                }
+            };
+            options.push(format!("{option}={drive}"));
+        }
+    }
+    if let Some(strict) = boot.get("strict") {
+        let strict = strict
+            .as_bool()
+            .ok_or_else(|| invalid("profile.boot.strict must be a boolean"))?;
+        options.push(format!("strict={}", if strict { "on" } else { "off" }));
+    }
+    if let Some(timeout) = boot.get("reboot_timeout") {
+        let timeout = timeout
+            .as_i64()
+            .filter(|v| (-1..=i64::from(i32::MAX)).contains(v))
+            .ok_or_else(|| {
+                invalid(
+                    "profile.boot.reboot_timeout must be -1 or milliseconds from 0 to 2147483647",
+                )
+            })?;
+        options.push(format!("reboot-timeout={timeout}"));
+    }
     if let Some(menu) = boot.get("menu") {
         let menu = menu
             .as_bool()
             .ok_or_else(|| invalid("profile.boot.menu must be a boolean"))?;
-        argv.extend([
-            "-boot".into(),
-            format!("menu={}", if menu { "on" } else { "off" }),
-        ]);
+        options.push(format!("menu={}", if menu { "on" } else { "off" }));
+    }
+    if let Some(splash) = boot.get("splash") {
+        let splash = splash
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| invalid("profile.boot.splash must be a non-empty file path"))?;
+        let path = Path::new(splash)
+            .canonicalize()
+            .map_err(|e| invalid(&format!("cannot open profile.boot.splash {splash:?}: {e}")))?;
+        if !path.is_file() {
+            return Err(invalid("profile.boot.splash must name a regular file"));
+        }
+        options.push(format!(
+            "splash={}",
+            path.to_string_lossy().replace(',', ",,")
+        ));
+    }
+    if let Some(timeout) = boot.get("timeout") {
+        let timeout = timeout
+            .as_u64()
+            .filter(|v| *v <= u64::from(u32::MAX))
+            .ok_or_else(|| {
+                invalid("profile.boot.timeout must be milliseconds from 0 to 4294967295")
+            })?;
+        options.push(format!("splash-time={timeout}"));
+    }
+    if !options.is_empty() {
+        argv.extend(["-boot".into(), options.join(",")]);
     }
     for (key, flag) in [
         ("kernel", "-kernel"),
@@ -1807,5 +1884,55 @@ mod video_storage_tests {
         assert!(argv.is_empty());
         append_analysis_video(&mut argv, Some(&json!({"type": "vga"})), None).unwrap();
         assert!(argv.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::*;
+    #[test]
+    fn firmware_boot_settings_are_combined_and_validated() {
+        let mut args = Vec::new();
+        append_direct_boot(
+            &mut args,
+            Some(&serde_json::json!({
+                "from":"disk", "once":"cdrom", "menu":true, "strict":true,
+                "timeout":2500, "reboot_timeout":-1
+            })),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            [
+                "-boot",
+                "order=c,once=d,strict=on,reboot-timeout=-1,menu=on,splash-time=2500"
+            ]
+        );
+        for source in ["disk", "cdrom", "network", "floppy"] {
+            assert!(
+                append_direct_boot(
+                    &mut Vec::new(),
+                    Some(&serde_json::json!({"from":source})),
+                    &BTreeMap::new()
+                )
+                .is_ok()
+            );
+        }
+        for invalid in [
+            serde_json::json!({"from":"disk,once=d"}),
+            serde_json::json!({"once":true}),
+            serde_json::json!({"strict":"yes"}),
+            serde_json::json!({"menu":1}),
+            serde_json::json!({"splash":false}),
+            serde_json::json!({"reboot_timeout":-2}),
+            serde_json::json!({"reboot_timeout":2147483648_u64}),
+            serde_json::json!({"timeout":1.5}),
+        ] {
+            assert!(
+                append_direct_boot(&mut Vec::new(), Some(&invalid), &BTreeMap::new()).is_err(),
+                "{invalid}"
+            );
+        }
     }
 }

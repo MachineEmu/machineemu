@@ -31,7 +31,7 @@ pub(super) fn remove_if_disposable(
 pub(super) async fn create_instance(
     State(state): State<AppState>,
     headers: HeaderMap,
-    axum::Json(input): axum::Json<CreateInstance>,
+    axum::Json(mut input): axum::Json<CreateInstance>,
 ) -> impl IntoResponse {
     if let Err(response) = authorized(&headers, &state) {
         return response.into_response();
@@ -62,6 +62,9 @@ pub(super) async fn create_instance(
             return Err(RuntimeError::Process(
                 "profile.id must match profile_id".into(),
             ));
+        }
+        if let Some(plan) = &mut input.launch_plan {
+            super::launch::apply_daemon_helpers(plan, &state.helpers);
         }
         if let Some(plan) = &input.launch_plan {
             super::launch::validate_plan_paths(workspace.root(), plan)?;

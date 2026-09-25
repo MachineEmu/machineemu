@@ -82,32 +82,34 @@ fn pci_bus(value: Option<&str>) -> Result<&str, RuntimeError> {
 }
 
 async fn media_path(root: &FsPath, value: &str, iso: bool) -> Result<PathBuf, RuntimeError> {
-    let relative = FsPath::new(value);
-    if relative.as_os_str().is_empty()
-        || relative
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-    {
-        return Err(invalid("media path must be relative to workspace/media"));
+    let requested = FsPath::new(value);
+    if requested.as_os_str().is_empty() {
+        return Err(invalid("media path is empty"));
     }
-    if iso && relative.extension().and_then(|ext| ext.to_str()) != Some("iso") {
+    if iso && requested.extension().and_then(|ext| ext.to_str()) != Some("iso") {
         return Err(invalid("CD media must have an .iso extension"));
     }
-    let media = root.join("media");
-    let base = tokio::fs::canonicalize(&media)
-        .await
-        .map_err(|_| invalid("workspace/media does not exist"))?;
-    let path = tokio::fs::canonicalize(media.join(relative))
+    let path = if requested.is_absolute() {
+        requested.to_owned()
+    } else {
+        if requested
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(invalid(
+                "relative media paths must stay inside workspace/media",
+            ));
+        }
+        root.join("media").join(requested)
+    };
+    let path = tokio::fs::canonicalize(path)
         .await
         .map_err(|_| invalid("media file does not exist"))?;
-    if !path.starts_with(&base)
-        || !tokio::fs::metadata(&path)
-            .await
-            .is_ok_and(|metadata| metadata.is_file())
+    if !tokio::fs::metadata(&path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file())
     {
-        return Err(invalid(
-            "media path must name a regular file in workspace/media",
-        ));
+        return Err(invalid("media path must name a regular file"));
     }
     Ok(path)
 }
@@ -216,19 +218,25 @@ async fn attach(
                 true,
             )
             .await?;
-            let bus = pci_bus(request.bus.as_deref())?;
             let controller = format!("{}-ctl", id.as_str());
             let node = format!("{}-node", id.as_str());
+            let bus = pci_bus(Some(request.bus.as_deref().unwrap_or("pcie-root-port-iso")))?;
             qmp.execute(
                 "device_add",
                 json!({"driver":"virtio-scsi-pci","id":controller,"bus":bus}),
             )
             .await?;
+            let scsi_bus = format!("{controller}.0");
             if let Err(error) = qmp.execute("blockdev-add", json!({"node-name":node,"driver":"raw","read-only":true,"file":{"driver":"file","filename":file_name(&path)?}})).await {
                 let _ = qmp.execute("device_del", json!({"id":controller})).await;
                 return Err(error);
             }
-            let result = qmp.execute("device_add", json!({"driver":"scsi-cd","id":id.as_str(),"bus":format!("{controller}.0"),"drive":node})).await;
+            let result = qmp
+                .execute(
+                    "device_add",
+                    json!({"driver":"scsi-cd","id":id.as_str(),"bus":scsi_bus,"drive":node}),
+                )
+                .await;
             if result.is_err() {
                 let _ = qmp.execute("blockdev-del", json!({"node-name":node})).await;
                 let _ = qmp.execute("device_del", json!({"id":controller})).await;
@@ -314,10 +322,15 @@ async fn detach(qmp: &mut AsyncQmp, id: &Id, kind: &str) -> Result<bool, Runtime
     }
     if kind == "iso" {
         let controller = format!("{}-ctl", id.as_str());
-        qmp.execute("device_del", json!({"id":controller})).await?;
-        let _ = qmp
-            .wait_device_deleted(&controller, std::time::Duration::from_secs(5))
-            .await?;
+        if qmp
+            .execute("device_del", json!({"id":controller}))
+            .await
+            .is_ok()
+        {
+            let _ = qmp
+                .wait_device_deleted(&controller, std::time::Duration::from_secs(5))
+                .await?;
+        }
     }
     Ok(true)
 }
@@ -423,7 +436,20 @@ pub(super) async fn list_devices(
                     .execute("human-monitor-command", json!({"command-line":"info usb"}))
                     .await
             }
-            "iso" => session.qmp.execute("query-block", Value::Null).await,
+            "iso" => {
+                let mut devices = session.qmp.execute("query-block", Value::Null).await?;
+                if let Some(devices) = devices.as_array_mut() {
+                    devices.retain(|device| {
+                        ["device", "qdev"].into_iter().any(|field| {
+                            device
+                                .get(field)
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| id == "me-iso" || id.starts_with("me-iso-"))
+                        })
+                    });
+                }
+                Ok(devices)
+            }
             "network" => session.qmp.execute("query-pci", Value::Null).await,
             _ => Err(invalid("unknown device kind")),
         }
@@ -453,8 +479,17 @@ mod tests {
         std::fs::write(root.join("media/install.iso"), b"iso").unwrap();
         assert!(media_path(&root, "install.iso", true).await.is_ok());
         assert!(media_path(&root, "../secret.iso", true).await.is_err());
-        assert!(media_path(&root, "/etc/passwd", false).await.is_err());
+        assert!(media_path(&root, "/etc/passwd", false).await.is_ok());
         assert!(media_path(&root, "install.iso", false).await.is_ok());
+        assert!(
+            media_path(
+                &root,
+                root.join("media/install.iso").to_str().unwrap(),
+                true
+            )
+            .await
+            .is_ok()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -543,6 +543,14 @@ fn parse_device_help(text: &str) -> Vec<String> {
         if !values.iter().any(|item| item == name) {
             values.push(name.to_owned());
         }
+        // QEMU accepts both the canonical name and the alias shown by -device help.
+        if let Some((_, alias)) = rest[end + 1..].split_once(", alias \"")
+            && let Some((alias, _)) = alias.split_once('"')
+            && !alias.is_empty()
+            && !values.iter().any(|item| item == alias)
+        {
+            values.push(alias.to_owned());
+        }
     }
     values
 }
@@ -567,4 +575,22 @@ fn parse_property_help(text: &str) -> Vec<String> {
         }
     }
     values
+}
+
+#[cfg(test)]
+mod device_alias_tests {
+    use super::*;
+    #[test]
+    fn device_help_includes_advertised_aliases_without_duplicates() {
+        assert_eq!(
+            parse_device_help(
+                r#"Display devices:
+name "virtio-gpu-gl-pci", bus PCI, alias "virtio-gpu-gl"
+name "virtio-gpu-gl", bus PCI
+name "VGA", bus PCI
+"#
+            ),
+            ["virtio-gpu-gl-pci", "virtio-gpu-gl", "VGA"]
+        );
+    }
 }

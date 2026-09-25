@@ -69,6 +69,45 @@ fn h264_plan_uses_dbus_display_and_usb_tablet() {
 }
 
 #[test]
+fn h264_gpu_plan_uses_dbus_display_and_usb_tablet() {
+    let mut argv = Vec::new();
+    append_devices(
+        &mut argv,
+        Some(&serde_json::json!({"vnc": false, "h264": true, "usb_tablet": true, "video": {"type":"virtio-gpu-gl"}})),
+        None,
+        Path::new("/tmp/machineemu-test-instance"),
+    )
+    .unwrap();
+    assert!(
+        argv.windows(2)
+            .any(|args| args == ["-display", "dbus,p2p=on,gl=on"])
+    );
+    assert!(
+        argv.windows(2)
+            .any(|args| args == ["-device", "virtio-gpu-gl,id=me-video"])
+    );
+    assert!(
+        argv.windows(2)
+            .any(|args| args == ["-device", "qemu-xhci,id=usb"])
+    );
+    assert!(
+        argv.windows(2)
+            .any(|args| args == ["-device", "usb-tablet,bus=usb.0"])
+    );
+    assert!(!argv.iter().any(|arg| arg == "-vnc"));
+    let mut invalid = Vec::new();
+    assert!(
+        append_devices(
+            &mut invalid,
+            Some(&serde_json::json!({"h264":true})),
+            None,
+            Path::new("/tmp/machineemu-test-instance")
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn gl_video_conflicts_with_vnc_for_both_gpu_names() {
     for model in ["virtio-vga-gl", "virtio-gpu-gl"] {
         for vnc in [serde_json::json!(true), serde_json::json!({"port":"auto"})] {
@@ -689,7 +728,7 @@ fn win11_profile_renders_boot_storage_and_pointer_devices() {
     assert!(
         plan.argv
             .windows(2)
-            .any(|pair| pair == ["-boot", "menu=off"])
+            .any(|pair| pair == ["-boot", "order=c,menu=off"])
     );
     assert!(
         plan.argv
@@ -724,14 +763,14 @@ fn win11_profile_renders_boot_storage_and_pointer_devices() {
 }
 
 #[test]
-fn bundled_profiles_render_vsock_and_explain_unsupported_boot_settings() {
+fn bundled_profiles_render_vsock_and_boot_settings() {
     let root = test_root("bundled-validation");
     let debian = bundled_input(&root, "debian13-cloud");
     let plan = build_plan(debian.clone()).unwrap();
     assert!(
         plan.argv
             .windows(2)
-            .any(|pair| pair == ["-boot", "menu=off"])
+            .any(|pair| pair == ["-boot", "order=c,menu=off"])
     );
     assert!(plan.argv.iter().any(|arg| arg.contains("discard=unmap")));
     let cid = plan.manifest["vsock"]["guest_cid"].as_u64().unwrap();
@@ -768,25 +807,50 @@ fn bundled_profiles_render_vsock_and_explain_unsupported_boot_settings() {
     );
 
     let mut analysis = bundled_input(&root, "malware-analysis-x64");
+    let splash = root.join("boot,splash.bmp");
+    fs::write(&splash, b"fixture").unwrap();
+    analysis.profile["boot"]["splash"] = Value::from(splash.to_str().unwrap());
+    let plan = build_plan(analysis.clone()).unwrap();
+    let expected = format!(
+        "order=c,menu=on,splash={},splash-time=2500",
+        splash.to_string_lossy().replace(',', ",,")
+    );
     assert!(
-        build_plan(analysis.clone())
-            .unwrap_err()
-            .to_string()
-            .contains("profile.boot.splash")
+        plan.argv
+            .windows(2)
+            .any(|pair| pair[0] == "-boot" && pair[1] == expected)
     );
     analysis.profile["boot"]
         .as_object_mut()
         .unwrap()
         .remove("splash");
-    analysis.profile["boot"]
-        .as_object_mut()
-        .unwrap()
-        .remove("timeout");
-    let plan = build_plan(analysis).unwrap();
+    let without_splash = build_plan(analysis.clone()).unwrap();
     assert!(
-        plan.argv
+        without_splash
+            .argv
             .windows(2)
-            .any(|pair| pair == ["-boot", "menu=on"])
+            .any(|pair| pair == ["-boot", "order=c,menu=on,splash-time=2500"])
+    );
+    for timeout in [
+        serde_json::json!(-1),
+        serde_json::json!("2500"),
+        serde_json::json!(4294967296_u64),
+    ] {
+        let mut bad = analysis.clone();
+        bad.profile["boot"]["timeout"] = timeout;
+        assert!(
+            build_plan(bad)
+                .unwrap_err()
+                .to_string()
+                .contains("profile.boot.timeout")
+        );
+    }
+    analysis.profile["boot"]["splash"] = Value::from(root.join("missing.bmp").to_str().unwrap());
+    assert!(
+        build_plan(analysis)
+            .unwrap_err()
+            .to_string()
+            .contains("profile.boot.splash")
     );
     assert!(plan.argv.windows(2).any(|pair| pair == ["-vga", "none"]));
     assert!(

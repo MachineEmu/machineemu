@@ -131,6 +131,7 @@
             clippy
             rustfmt
             gcc
+            mold
             pkg-config
           ];
 

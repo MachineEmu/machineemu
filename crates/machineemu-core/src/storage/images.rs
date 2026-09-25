@@ -1,10 +1,10 @@
 use super::Workspace;
-use super::blobs::hex_digest;
+use super::digests::{copy_and_hash, hex_digest};
 use crate::domain::{Id, ImageBundleComponent, ImageBundleManifest, ImageManifest};
 use crate::{Error, Result};
 use rusqlite::params;
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -124,13 +124,21 @@ impl Workspace {
         if !disk.is_file() {
             return Err(Error::InvalidBundlePath(disk.display().to_string()));
         }
-        let import_named = |path: &Path| -> Result<String> { self.import_blob_computed(path) };
-        let disk_sha256 = import_named(&disk)?;
+        let image_root = image_root(&self.root, &image_id)?;
+        let components = image_root.join("components");
+        fs::create_dir_all(&components).map_err(|source| Error::Io {
+            path: components.clone(),
+            source,
+        })?;
+        let disk_sha256 = publish_component(&disk, &components.join("disk.qcow2"), None)?;
         let firmware_sha256 = firmware
             .is_file()
-            .then(|| import_named(&firmware))
+            .then(|| publish_component(&firmware, &components.join("firmware.fd"), None))
             .transpose()?;
-        let tpm_state_sha256 = tpm.is_file().then(|| import_named(&tpm)).transpose()?;
+        let tpm_state_sha256 = tpm
+            .is_file()
+            .then(|| publish_component(&tpm, &components.join("tpm-state"), None))
+            .transpose()?;
         let manifest = ImageManifest {
             image_id,
             engine_track,
@@ -149,22 +157,33 @@ impl Workspace {
         image_id: &Id,
         destination: &Path,
     ) -> Result<ImageBundleManifest> {
+        Self::export_image_bundle_from_root(&self.root, image_id, destination)
+    }
+
+    pub fn export_image_bundle_from_root(
+        root: impl AsRef<Path>,
+        image_id: &Id,
+        destination: &Path,
+    ) -> Result<ImageBundleManifest> {
+        let root = root.as_ref();
         if destination.exists() {
             return Err(Error::BundleExists(destination.to_owned()));
         }
-        let image = self.image(image_id)?;
+        let image = read_manifest(&manifest_path(root, image_id)?, image_id.as_str())?;
         fs::create_dir_all(destination.join("components")).map_err(|source| Error::Io {
             path: destination.join("components"),
             source,
         })?;
+        let image_root = image_root(root, &image.image_id)?;
         let mut components = std::collections::BTreeMap::new();
         let mut export_component =
-            |name: &str, path: &str, digest: Option<&String>| -> Result<()> {
+            |name: &str, source_name: &str, path: &str, digest: Option<&String>| -> Result<()> {
                 let Some(digest) = digest else {
                     return Ok(());
                 };
                 let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
-                let source = self.root.join("blobs/sha256").join(digest);
+                let source = image_root.join("components").join(source_name);
+                verify_component(&source, digest)?;
                 let target = destination.join(path);
                 fs::copy(&source, &target).map_err(|source_error| Error::Io {
                     path: target.clone(),
@@ -179,14 +198,21 @@ impl Workspace {
                 );
                 Ok(())
             };
-        export_component("disk", "components/disk.qcow2", Some(&image.disk_sha256))?;
+        export_component(
+            "disk",
+            "disk.qcow2",
+            "components/disk.qcow2",
+            Some(&image.disk_sha256),
+        )?;
         export_component(
             "firmware",
+            "firmware.fd",
             "components/firmware.fd",
             image.firmware_sha256.as_ref(),
         )?;
         export_component(
             "tpm_state",
+            "tpm-state",
             "components/tpm-state",
             image.tpm_state_sha256.as_ref(),
         )?;
@@ -220,7 +246,14 @@ impl Workspace {
                 "unsupported schema_version".into(),
             ));
         }
-        let component = |name: &str| -> Result<Option<String>> {
+        let image_id = manifest.image_id;
+        let image_root = image_root(&self.root, &image_id)?;
+        let components_dir = image_root.join("components");
+        fs::create_dir_all(&components_dir).map_err(|source| Error::Io {
+            path: components_dir.clone(),
+            source,
+        })?;
+        let component = |name: &str, destination_name: &str| -> Result<Option<String>> {
             let Some(component) = manifest.components.get(name) else {
                 return Ok(None);
             };
@@ -236,21 +269,23 @@ impl Workspace {
             if !file.is_file() {
                 return Err(Error::InvalidBundlePath(component.path.clone()));
             }
-            let imported = self.import_blob(&file, &component.sha256)?;
-            Ok(imported
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()))
+            let digest = publish_component(
+                &file,
+                &components_dir.join(destination_name),
+                Some(&component.sha256),
+            )?;
+            Ok(Some(digest))
         };
-        let disk = component("disk")?
+        let disk = component("disk", "disk.qcow2")?
             .ok_or_else(|| Error::InvalidBundlePath("disk component is required".into()))?;
         let image = ImageManifest {
-            image_id: manifest.image_id,
+            image_id,
             engine_track: manifest.engine_track,
             supported_engine_tracks: manifest.supported_engine_tracks,
             target: manifest.target,
             disk_sha256: disk,
-            firmware_sha256: component("firmware")?,
-            tpm_state_sha256: component("tpm_state")?,
+            firmware_sha256: component("firmware", "firmware.fd")?,
+            tpm_state_sha256: component("tpm_state", "tpm-state")?,
         };
         let digest = self.register_image(&image)?;
         Ok((image, digest))
@@ -338,9 +373,107 @@ impl Workspace {
     }
 }
 
-fn manifest_path(root: &Path, id: &Id) -> Result<PathBuf> {
+fn image_root(root: &Path, id: &Id) -> Result<PathBuf> {
     Id::new("image", id.as_str())?;
-    Ok(root.join("images").join(id.as_str()).join("manifest.json"))
+    Ok(root.join("images").join(id.as_str()))
+}
+
+fn manifest_path(root: &Path, id: &Id) -> Result<PathBuf> {
+    Ok(image_root(root, id)?.join("manifest.json"))
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let staging = path.with_file_name(format!(
+        ".hash-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let output = File::create(&staging).map_err(|source| Error::Io {
+        path: staging.clone(),
+        source,
+    })?;
+    let result = copy_and_hash(path, &staging, output);
+    let _ = fs::remove_file(&staging);
+    result
+}
+
+fn verify_component(path: &Path, expected_sha256: &str) -> Result<()> {
+    let expected_sha256 = expected_sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(expected_sha256);
+    let actual = hash_file(path)?;
+    if actual != expected_sha256 {
+        return Err(Error::DigestMismatch {
+            expected: expected_sha256.to_owned(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn publish_component(
+    source: &Path,
+    destination: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<String> {
+    let expected_sha256 =
+        expected_sha256.map(|digest| digest.strip_prefix("sha256:").unwrap_or(digest));
+    if destination.is_file() {
+        let digest = hash_file(destination)?;
+        if let Some(expected) = expected_sha256
+            && digest != expected
+        {
+            return Err(Error::DigestMismatch {
+                expected: expected.to_owned(),
+                actual: digest,
+            });
+        }
+        return Ok(digest);
+    }
+    let directory = destination.parent().expect("component has parent");
+    fs::create_dir_all(directory).map_err(|source| Error::Io {
+        path: directory.to_owned(),
+        source,
+    })?;
+    let temporary = directory.join(format!(
+        ".component-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|source| Error::Io {
+            path: temporary.clone(),
+            source,
+        })?;
+    let result = (|| -> Result<String> {
+        let digest = copy_and_hash(source, &temporary, output)?;
+        if let Some(expected) = expected_sha256
+            && digest != expected
+        {
+            return Err(Error::DigestMismatch {
+                expected: expected.to_owned(),
+                actual: digest,
+            });
+        }
+        fs::rename(&temporary, destination).map_err(|source| Error::Io {
+            path: destination.to_owned(),
+            source,
+        })?;
+        Ok(digest)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn validate_manifest(image: &ImageManifest, expected_id: &str) -> Result<()> {

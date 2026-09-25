@@ -17,8 +17,14 @@ pub struct ManagedProcess {
     child: Option<Child>,
     adopted_start: Option<u64>,
     preserve_on_drop: bool,
+    systemd_scope: Option<SystemdScope>,
     pub pid: u32,
     pub run_id: Id,
+}
+
+struct SystemdScope {
+    unit: String,
+    user: bool,
 }
 
 impl ManagedProcess {
@@ -29,6 +35,42 @@ impl ManagedProcess {
         stderr: Option<&Path>,
     ) -> Result<Self> {
         Self::spawn_inner(run_id, argv, stdout, stderr, None)
+    }
+
+    #[cfg(unix)]
+    pub fn spawn_systemd_scope(
+        run_id: Id,
+        argv: &[String],
+        stdout: Option<&Path>,
+        stderr: Option<&Path>,
+    ) -> Result<Self> {
+        Self::spawn_systemd_scope_inner(run_id.clone(), argv, stdout, stderr).or_else(
+            |scope_error| match scope_error {
+                Error::ExecutableNotFound { executable } if executable == "systemd-run" => {
+                    Self::spawn(run_id, argv, stdout, stderr)
+                }
+                Error::Process(message)
+                    if message.contains("System has not been booted with systemd")
+                        || message.contains("Failed to connect to bus")
+                        || message.contains("exited before QEMU published its pid")
+                        || message.contains("timed out waiting for scoped QEMU pid")
+                        || message.contains("Interactive authentication required") =>
+                {
+                    Self::spawn(run_id, argv, stdout, stderr)
+                }
+                other => Err(other),
+            },
+        )
+    }
+
+    #[cfg(not(unix))]
+    pub fn spawn_systemd_scope(
+        run_id: Id,
+        argv: &[String],
+        stdout: Option<&Path>,
+        stderr: Option<&Path>,
+    ) -> Result<Self> {
+        Self::spawn(run_id, argv, stdout, stderr)
     }
 
     #[cfg(unix)]
@@ -105,7 +147,116 @@ impl ManagedProcess {
             pid,
             run_id,
             preserve_on_drop: false,
+            systemd_scope: None,
         })
+    }
+
+    #[cfg(unix)]
+    fn spawn_systemd_scope_inner(
+        run_id: Id,
+        argv: &[String],
+        stdout: Option<&Path>,
+        stderr: Option<&Path>,
+    ) -> Result<Self> {
+        let executable = argv
+            .first()
+            .ok_or_else(|| Error::Process("empty process argv".into()))?;
+        let unit = systemd_scope_name(&run_id);
+        let user_scope = !nix::unistd::Uid::effective().is_root();
+        let pidfile = std::env::temp_dir().join(format!("machineemu-{}-qemu.pid", run_id.as_str()));
+        let _ = fs::remove_file(&pidfile);
+        let mut command = Command::new("systemd-run");
+        if user_scope {
+            command.arg("--user");
+        }
+        command.args([
+            "--scope",
+            "--quiet",
+            "--collect",
+            "--unit",
+            &unit,
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '%s\n' \"$$\" > \"$1\"; shift; exec \"$@\"",
+            "machineemu-qemu-scope",
+            pidfile
+                .to_str()
+                .ok_or_else(|| Error::Process("scope pidfile path is not UTF-8".into()))?,
+            executable,
+        ]);
+        command.args(argv.iter().skip(1));
+        set_stdio(&mut command, stdout, stderr)?;
+        let child = command.spawn().map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                Error::ExecutableNotFound {
+                    executable: "systemd-run".into(),
+                }
+            } else {
+                Error::Spawn {
+                    executable: "systemd-run".into(),
+                    source,
+                }
+            }
+        })?;
+        let mut process = Self {
+            child: Some(child),
+            adopted_start: None,
+            pid: 0,
+            run_id,
+            preserve_on_drop: false,
+            systemd_scope: Some(SystemdScope {
+                unit,
+                user: user_scope,
+            }),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match fs::read_to_string(&pidfile) {
+                Ok(contents) => {
+                    let _ = fs::remove_file(&pidfile);
+                    let pid = contents.trim().parse::<u32>().map_err(|error| {
+                        Error::Process(format!("invalid scoped QEMU pid {contents:?}: {error}"))
+                    })?;
+                    process.pid = pid;
+                    process.adopted_start = process_start_identity(pid);
+                    if process.adopted_start.is_none() {
+                        return Err(Error::Process(format!(
+                            "cannot read process identity for scoped QEMU pid {pid}"
+                        )));
+                    }
+                    return Ok(process);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if process.try_wait()?.is_some() {
+                        let _ = fs::remove_file(&pidfile);
+                        return Err(Error::Process(format!(
+                            "systemd scope {scope} exited before QEMU published its pid",
+                            scope = process
+                                .systemd_scope
+                                .as_ref()
+                                .map(|scope| scope.unit.as_str())
+                                .unwrap_or("unknown"),
+                        )));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = process.terminate();
+                        let _ = fs::remove_file(&pidfile);
+                        return Err(Error::Process(
+                            "timed out waiting for scoped QEMU pid".into(),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(source) => {
+                    let _ = process.terminate();
+                    return Err(Error::Io {
+                        path: pidfile,
+                        source,
+                    });
+                }
+            }
+        }
     }
 
     pub fn adopt(run_id: Id, pid: u32, process_start: u64) -> Result<Self> {
@@ -120,6 +271,7 @@ impl ManagedProcess {
             pid,
             run_id,
             preserve_on_drop: true,
+            systemd_scope: None,
         })
     }
 
@@ -176,6 +328,22 @@ impl ManagedProcess {
     }
 
     pub fn terminate(&mut self) -> Result<()> {
+        if let Some(scope) = &self.systemd_scope {
+            let mut command = Command::new("systemctl");
+            if scope.user {
+                command.arg("--user");
+            }
+            let status = command
+                .args(["stop", &scope.unit])
+                .status()
+                .map_err(|source| Error::Spawn {
+                    executable: "systemctl".into(),
+                    source,
+                })?;
+            if status.success() {
+                return Ok(());
+            }
+        }
         if let Some(child) = self.child.as_mut() {
             return child
                 .kill()
@@ -232,14 +400,52 @@ impl Drop for ManagedProcess {
     fn drop(&mut self) {
         // A Child handle alone does not own the process on drop. Keep the
         // process tied to its supervisor even when a later start step fails.
-        if !self.preserve_on_drop
-            && let Some(child) = &mut self.child
-            && matches!(child.try_wait(), Ok(None))
-        {
-            let _ = child.kill();
-            let _ = child.wait();
+        if !self.preserve_on_drop {
+            if self.systemd_scope.is_some() {
+                let _ = self.terminate();
+                let _ = self.wait();
+            } else if let Some(child) = &mut self.child
+                && matches!(child.try_wait(), Ok(None))
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
+}
+
+fn set_stdio(command: &mut Command, stdout: Option<&Path>, stderr: Option<&Path>) -> Result<()> {
+    if let Some(path) = stdout {
+        let file = File::create(path).map_err(|source| Error::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        command.stdout(Stdio::from(file));
+    } else {
+        command.stdout(Stdio::null());
+    }
+    if let Some(path) = stderr {
+        let file = File::create(path).map_err(|source| Error::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        command.stderr(Stdio::from(file));
+    } else {
+        command.stderr(Stdio::null());
+    }
+    Ok(())
+}
+
+fn systemd_scope_name(run_id: &Id) -> String {
+    let mut name = String::from("machineemu-");
+    for byte in run_id.as_str().bytes() {
+        name.push(match byte {
+            b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => byte as char,
+            _ => '-',
+        });
+    }
+    name.push_str(".scope");
+    name
 }
 
 #[cfg(target_os = "linux")]

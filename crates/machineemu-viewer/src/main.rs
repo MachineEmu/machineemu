@@ -9,6 +9,7 @@ mod keymap;
 mod media;
 mod net;
 mod protocol;
+mod shortcuts;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;

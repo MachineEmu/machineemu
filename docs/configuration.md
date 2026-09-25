@@ -25,11 +25,11 @@ engines:
   system:
     path: /run/current-system/sw/bin
     version: 10.2.4
-  unifi-10.2:
+  qemu-10.2-unifi:
     path: /home/rick/projects-caddy/machineemu/qemu/.cache/qemu-build-10.2.4-unifi
     version: 10.2.4
     target: aarch64-softmmu
-  unifi-10.2-analysis:
+  qemu-10.2-analysis:
     path: /home/rick/projects-caddy/machineemu/qemu/.cache/qemu-build-10.2.4-analysis
     version: 10.2.4
     target: x86_64-softmmu
@@ -78,3 +78,18 @@ When the server uses `unix_socket`, the daemon creates the socket with mode
 `0600` and requests received on that socket do not require bearer auth. TCP
 listeners always require `bearer_token`. Relative paths are resolved relative
 to the configuration file.
+
+## Keeping local QEMU runtime libraries available
+
+Local engines may point directly at the sibling QEMU build directories, such as
+`../qemu/.cache/qemu-build-10.2.4-analysis`. Rebuild or re-enter the matching
+QEMU development shell when those binaries report missing runtime libraries.
+Do not keep stale wrapper launchers under `machineemu-workspace/engines`; the
+saved instance launch plan should record the actual executable selected from the
+configured engine path.
+
+Verify the configured analysis engine after rebuilding QEMU:
+
+```sh
+../qemu/.cache/qemu-build-10.2.4-analysis/qemu-system-x86_64 --version
+```

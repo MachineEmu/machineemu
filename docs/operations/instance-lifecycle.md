@@ -49,19 +49,20 @@ history and operation records are removed with an auto-removed instance; the
 tombstone is the durable removal record.
 
 An extra digest for every source file is not required for normal restart.
-Imported disk, firmware, and TPM assets already use SHA-256 blob identities;
-the resolved launch plan and profile are saved with the instance. A future
-provenance feature could fingerprint mutable host executables or helper files
-when exact replay and audit are required.
+Imported disk, firmware, and TPM image components already carry SHA-256
+verification metadata; the resolved launch plan and profile are saved with the
+instance. A future provenance feature could fingerprint mutable host
+executables or helper files when exact replay and audit are required.
 
-A daemon restart preserves successfully started VM and helper processes. The
-new daemon verifies their recorded PID/start identity and queries QMP to restore
-`running` or `paused`, including when the stored lifecycle was `error` or
-`starting`. An unavailable QMP socket is retried without killing a live VM.
-Helpers started by this version have persisted identities and are cleaned up
-with their recovered VM. Stop a VM explicitly through its lifecycle endpoint.
-External service managers must also leave VM processes alive during a daemon
-restart; killing the entire service process group cannot preserve them.
+A daemon restart preserves successfully started VM and helper processes. QEMU
+and run-owned helpers are launched through per-process `systemd-run --scope`
+units when systemd is available, so stopping the daemon service does not
+implicitly kill the VM scope. The new daemon verifies recorded PID/start
+identity and queries QMP to restore `running` or `paused`, including when the
+stored lifecycle was `error` or `starting`. An unavailable QMP socket is retried
+without killing a live VM. Helpers started by this version have persisted
+identities and are cleaned up with their recovered VM. Stop a VM explicitly
+through its lifecycle endpoint.
 
 Instance removal commits metadata deletion and a durable filesystem cleanup
 record in one transaction. If cleanup is interrupted, retry or workspace reopen

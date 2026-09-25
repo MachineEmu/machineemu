@@ -381,8 +381,10 @@ mod tests {
             audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             control_streams: Arc::new(Mutex::new(BTreeMap::new())),
             events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+            image_imports: Arc::new(Mutex::new(BTreeMap::new())),
 
             guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+            helpers: Arc::new(HelperConfig::default()),
             local_unix: false,
         };
         (root, state, run, process)

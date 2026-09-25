@@ -11,7 +11,7 @@ Execution is represented separately by a **run**.
 | Object | Question it answers | Examples | Ownership |
 | --- | --- | --- | --- |
 | Device model | What hardware can we emulate? | UDM Pro, U6+, a configurable x86 PC | Versioned hardware definition, constraints, defaults, supported peripherals and engine requirements |
-| Image | What initial software/state can this machine boot? | Prepared UDM firmware release, Windows analysis baseline | Immutable manifest and content-addressed components, compatibility requirements and provenance |
+| Image | What initial software/state can this machine boot? | Prepared UDM firmware release, Windows analysis baseline | Immutable manifest, named local components, compatibility requirements and provenance |
 | Instance | Which particular machine is mine? | `gateway-lab-01`, `analysis-42` | Stable identity, resolved configuration and all writable machine state |
 | Run | What happened during this execution? | The current execution of `gateway-lab-01` | Exact launch plan, process identity, endpoints, helper processes, logs and execution outcome |
 
@@ -71,8 +71,9 @@ necessarily one disk file.
 
 Each component declares its role and initialization behavior: read-only use,
 copy into instance state, or writable overlay over an immutable backing file.
-Components reference content-addressed blobs. The image manifest itself has a
-digest; a human-readable name/tag resolves to that digest before instance creation.
+Components are stored as named local files with SHA-256 verification metadata.
+The image manifest itself has a digest; a human-readable name/tag resolves to
+that digest before instance creation.
 
 An image declares compatibility with model revisions/configurations. Architecture
 alone is insufficient: board layout, boot method, storage interfaces and firmware

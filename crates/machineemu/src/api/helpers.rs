@@ -57,7 +57,7 @@ pub(super) async fn spawn(
     }
     let log = directory.join(format!("helper-{}.log", name.as_str()));
     let helper_id = Id::new("run", format!("{}-{}", run.as_str(), name.as_str()))?;
-    let mut process = ManagedProcess::spawn(helper_id, &spec.argv, None, Some(&log))?;
+    let mut process = ManagedProcess::spawn_systemd_scope(helper_id, &spec.argv, None, Some(&log))?;
     if let Some(path) = ready {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {

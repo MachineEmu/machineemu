@@ -177,7 +177,8 @@ impl Workspace {
             }
             // Until publication ManagedProcess owns rollback: every early return
             // terminates and reaps the child, including failed database writes.
-            let mut process = ManagedProcess::spawn(run_id.clone(), argv, stdout, stderr)?;
+            let mut process =
+                ManagedProcess::spawn_systemd_scope(run_id.clone(), argv, stdout, stderr)?;
             let process_start = process.process_start()?;
             workspace.record_run(
                 run_id.clone(),

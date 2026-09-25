@@ -1,10 +1,10 @@
 use super::Workspace;
-use super::blobs::hex_digest;
+use super::digests::{copy_and_hash, hex_digest};
 use crate::domain::{Id, Instance, Snapshot};
 use crate::{Error, Result};
 use rusqlite::{OptionalExtension, params};
 use std::{
-    fs,
+    fs::{self, File},
     path::{Path, PathBuf},
 };
 
@@ -39,15 +39,12 @@ impl Workspace {
                 if component.file_name().and_then(|value| value.to_str()) != Some(name.as_str()) {
                     return Err(Error::InvalidSnapshotComponent(name.clone()));
                 }
-                let bytes = fs::read(source).map_err(|source_error| Error::Io {
-                    path: source.clone(),
-                    source: source_error,
+                let target = staging.join(name);
+                let output = File::create(&target).map_err(|source| Error::Io {
+                    path: target.clone(),
+                    source,
                 })?;
-                let digest = hex_digest(&bytes);
-                fs::write(staging.join(name), &bytes).map_err(|source_error| Error::Io {
-                    path: staging.join(name),
-                    source: source_error,
-                })?;
+                let digest = copy_and_hash(source, &target, output)?;
                 files.insert(name.clone(), digest);
             }
             Ok(())
@@ -162,22 +159,26 @@ impl Workspace {
             path: staging.clone(),
             source: source_error,
         })?;
-        for name in snapshot.files.keys() {
-            let bytes = fs::read(source.join(name)).map_err(|source_error| Error::Io {
-                path: source.join(name),
-                source: source_error,
-            })?;
-            if hex_digest(&bytes) != snapshot.files[name] {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(Error::DigestMismatch {
-                    expected: snapshot.files[name].clone(),
-                    actual: hex_digest(&bytes),
-                });
+        let copied = (|| -> Result<()> {
+            for (name, expected) in &snapshot.files {
+                let target = staging.join(name);
+                let output = File::create(&target).map_err(|source| Error::Io {
+                    path: target.clone(),
+                    source,
+                })?;
+                let actual = copy_and_hash(&source.join(name), &target, output)?;
+                if actual != *expected {
+                    return Err(Error::DigestMismatch {
+                        expected: expected.clone(),
+                        actual,
+                    });
+                }
             }
-            fs::write(staging.join(name), bytes).map_err(|source_error| Error::Io {
-                path: staging.join(name),
-                source: source_error,
-            })?;
+            Ok(())
+        })();
+        if let Err(error) = copied {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
         }
         fs::rename(&staging, &restore_destination).map_err(|source_error| Error::Io {
             path: restore_destination.clone(),

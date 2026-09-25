@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -18,14 +18,13 @@ use machineemu_core::{domain::Id, storage::Workspace};
 
 #[derive(Debug, clap::Args)]
 struct LaunchArgs {
-    /// Optional creation template (name or file); omitted with --file.
-    #[arg(required_unless_present = "file")]
+    /// Creation template (name or file). Existing run can omit this.
+    #[arg(long)]
     profile: Option<String>,
-    /// Instance ID; a complete --file supplies its own ID.
-    #[arg(required_unless_present = "file")]
+    /// Instance ID.
     instance: Option<String>,
     /// Create directly from a complete instance JSON/YAML document.
-    #[arg(long, conflicts_with_all = ["profile", "instance", "image", "seed", "vnc_password_file", "h264", "qmp_socket", "mac", "swtpm", "bridge_helper", "net", "vnc", "qemu"])]
+    #[arg(long, conflicts_with_all = ["profile", "instance", "image", "seed", "disk_size", "qmp_socket", "mac", "net", "qemu"])]
     file: Option<PathBuf>,
     /// Registered image to use for disk and firmware state.
     #[arg(long)]
@@ -36,18 +35,14 @@ struct LaunchArgs {
     /// Per-instance cloud-init seed ISO.
     #[arg(long)]
     seed: Option<PathBuf>,
+    /// Disk overlay size for a new VM; existing run requires --fresh.
+    #[arg(long)]
+    disk_size: Option<String>,
     /// profile, user, bridge[:BRIDGE], or none.
     #[arg(long, default_value = "profile")]
     net: String,
-    /// profile, auto, none, or TCP port 5900-5999.
-    #[arg(long, default_value = "profile")]
-    vnc: String,
-    /// File containing a VNC password.
-    #[arg(long)]
-    vnc_password_file: Option<PathBuf>,
-    /// Enable the D-Bus H.264 display with an absolute USB tablet.
-    #[arg(long)]
-    h264: bool,
+    #[command(flatten)]
+    hardware: hardware::HardwareArgs,
     /// External QMP relay socket path.
     #[arg(long)]
     qmp_socket: Option<PathBuf>,
@@ -57,12 +52,6 @@ struct LaunchArgs {
     /// QEMU executable.
     #[arg(long, default_value = "/run/current-system/sw/bin/qemu-system-x86_64")]
     qemu: PathBuf,
-    /// swtpm executable.
-    #[arg(long, env = "MACHINEEMU_SWTPM")]
-    swtpm: Option<PathBuf>,
-    /// Privileged QEMU bridge helper.
-    #[arg(long, env = "MACHINEEMU_BRIDGE_HELPER")]
-    bridge_helper: Option<PathBuf>,
     /// Guest NIC MAC address.
     #[arg(long)]
     mac: Option<String>,
@@ -78,10 +67,10 @@ struct LaunchArgs {
 struct RunArgs {
     #[command(flatten)]
     launch: LaunchArgs,
-    /// Delete and recreate an existing instance.
+    /// Recreate an existing instance from a clean overlay before starting.
     #[arg(long)]
     fresh: bool,
-    /// Automatically remove a new instance after its run ends.
+    /// Automatically remove the instance after its run ends.
     #[arg(long)]
     rm: bool,
 }
@@ -94,23 +83,23 @@ impl LaunchArgs {
         auto_remove: bool,
     ) -> launch::RunOptions<'_> {
         launch::RunOptions {
-            profile_name: self.profile.as_deref().unwrap_or_default(),
-            instance: self.instance.as_deref().unwrap_or_default(),
+            profile_name: self.profile.as_deref(),
+            instance: self.instance.as_deref(),
             image: self.image.as_deref(),
             force: self.force,
             seed: self.seed.as_deref(),
+            disk_size: self.disk_size.as_deref(),
             net: &self.net,
-            vnc: &self.vnc,
-            vnc_password_file: self.vnc_password_file.as_deref(),
-            h264: self.h264,
+            vnc: self.hardware.vnc.as_deref().unwrap_or("profile"),
+            vnc_password_file: self.hardware.vnc_password_file.as_deref(),
+            h264: self.hardware.h264,
+            hardware: &self.hardware,
             external_qmp_socket: self.qmp_socket.as_deref(),
             fresh,
             auto_remove,
             mode,
             workspace_root: &self.workspace,
             qemu: &self.qemu,
-            swtpm: self.swtpm.as_deref(),
-            bridge_helper: self.bridge_helper.as_deref(),
             mac: self.mac.as_deref(),
             daemon: &self.daemon,
             token: &self.token,
@@ -127,6 +116,29 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Add, remove, change, or inspect devices on a running instance.
+    Device {
+        #[command(subcommand)]
+        command: device::DeviceCommand,
+        #[arg(long, default_value = "machineemu-workspace")]
+        workspace: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
+    },
+    /// Edit hardware on a stopped instance, preserving its disks and identity.
+    Config {
+        instance: String,
+        #[command(flatten)]
+        hardware: hardware::HardwareArgs,
+        #[arg(long, default_value = "machineemu-workspace")]
+        workspace: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
+    },
     /// Show an instance config, shared profile, or image manifest as YAML.
     Show {
         #[arg(value_enum)]
@@ -261,7 +273,7 @@ enum Command {
     },
     /// Create a persistent VM without starting it.
     Create(LaunchArgs),
-    /// Create and start a VM. --rm removes a new instance after it exits.
+    /// Create or update a VM and start it.
     Run(RunArgs),
     /// Start a created or stopped VM from its saved configuration.
     Start {
@@ -290,7 +302,7 @@ enum Command {
         /// Installed engine bundle root.
         #[arg(long)]
         bundle_root: PathBuf,
-        /// Content-addressed asset root.
+        /// Optional root for legacy sha256: profile assets.
         #[arg(long)]
         asset_root: Option<PathBuf>,
         #[arg(long)]
@@ -361,9 +373,13 @@ enum Command {
         /// MachineEmu workspace root.
         #[arg(long)]
         workspace: PathBuf,
-        /// vmmanager-sh base directory, for example ~/.vm-base/win11-dev.
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
+        /// vmmanager-sh base directory. Defaults to ~/.vm-base/<image-id>.
         #[arg(long)]
-        source: PathBuf,
+        source: Option<PathBuf>,
         #[arg(long)]
         image_id: String,
         #[arg(long)]
@@ -374,19 +390,12 @@ enum Command {
         #[arg(long)]
         export_bundle: Option<PathBuf>,
     },
-    /// Register an image manifest whose blobs are already imported.
+    /// Register an image manifest already present in the workspace.
     RegisterImage {
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
         manifest: PathBuf,
-    },
-    /// Import one host asset into the workspace content-addressed store.
-    ImportAsset {
-        #[arg(long)]
-        workspace: PathBuf,
-        #[arg(long)]
-        source: PathBuf,
     },
 }
 
@@ -417,6 +426,46 @@ pub async fn main() {
 async fn run() -> Result<(), machineemu_core::engine::Error> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Device {
+            command,
+            workspace,
+            daemon,
+            token,
+        } => device::run(command, &workspace, &daemon, &token).await?,
+        Command::Config {
+            instance,
+            hardware,
+            workspace,
+            daemon,
+            token,
+        } => {
+            Id::new("instance", instance.clone())
+                .map_err(|e| machineemu_core::engine::Error::Invalid(e.to_string()))?;
+            let path = format!("/api/v2/instances/{instance}/config");
+            let mut document = daemon_request(&daemon, &token, "GET", &path, None).await?;
+            let mut plan: machineemu_core::launch::LaunchSpec =
+                serde_json::from_value(document["launch_plan"].clone())
+                    .map_err(|e| machineemu_core::engine::Error::Invalid(e.to_string()))?;
+            let (config, config_path) = machineemu_core::config::load_config(None)
+                .map_err(|e| machineemu_core::engine::Error::Invalid(e.to_string()))?;
+            let workspace = if workspace == Path::new("machineemu-workspace") {
+                config
+                    .client
+                    .as_ref()
+                    .and_then(|c| c.workspace.clone())
+                    .or_else(|| config.server.as_ref().and_then(|s| s.workspace.clone()))
+                    .map(|p| {
+                        machineemu_core::config::resolve_config_path(config_path.as_deref(), p)
+                    })
+                    .unwrap_or(workspace)
+            } else {
+                workspace
+            };
+            hardware.apply(&mut plan, &workspace, &instance)?;
+            document["launch_plan"] = serde_json::to_value(plan).unwrap();
+            daemon_request(&daemon, &token, "PUT", &path, Some(document)).await?;
+            println!("configured {instance}");
+        }
         Command::Show {
             kind,
             id,
@@ -579,6 +628,7 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
             if let Some(file) = &args.file {
                 launch::create_from_document(
                     file,
+                    &args.hardware,
                     &args.workspace,
                     &args.daemon,
                     &args.token,
@@ -599,6 +649,7 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
                 }
                 launch::create_from_document(
                     file,
+                    &args.launch.hardware,
                     &args.launch.workspace,
                     &args.launch.daemon,
                     &args.launch.token,
@@ -727,29 +778,39 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
         }
         Command::ImportVmmanagerBase {
             workspace,
+            daemon,
+            token,
             source,
             image_id,
             engine_track,
             target,
             export_bundle,
         } => {
-            let workspace = Workspace::open(workspace)
-                .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
-            let image = workspace
-                .import_vmmanager_base(
-                    source,
-                    Id::new("image", image_id).map_err(|error| {
-                        machineemu_core::engine::Error::Runtime(error.to_string())
-                    })?,
-                    Id::new("engine track", engine_track).map_err(|error| {
-                        machineemu_core::engine::Error::Runtime(error.to_string())
-                    })?,
-                    target,
-                )
-                .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+            let source = source.unwrap_or_else(|| default_vmmanager_base_source(&image_id));
+            let (daemon, token) = effective_client(&daemon, &token)?;
+            client::ensure_daemon(&daemon, &token, &workspace).await?;
+            let response = daemon_request(
+                &daemon,
+                &token,
+                "POST",
+                "/api/v2/image-imports/vmmanager-base",
+                Some(serde_json::json!({
+                    "source": source,
+                    "image_id": image_id,
+                    "engine_track": engine_track,
+                    "target": target
+                })),
+            )
+            .await?;
+            let events_url = response["events_url"].as_str().ok_or_else(|| {
+                machineemu_core::engine::Error::Invalid("daemon response has no events_url".into())
+            })?;
+            let status_url = response["status_url"].as_str().ok_or_else(|| {
+                machineemu_core::engine::Error::Invalid("daemon response has no status_url".into())
+            })?;
+            let image = follow_image_import(&daemon, &token, events_url, status_url).await?;
             if let Some(destination) = export_bundle {
-                workspace
-                    .export_image_bundle(&image.image_id, &destination)
+                Workspace::export_image_bundle_from_root(&workspace, &image.image_id, &destination)
                     .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
             }
             println!(
@@ -769,19 +830,202 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
                 .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
             println!("registered {}", image.image_id.as_str());
         }
-        Command::ImportAsset { workspace, source } => {
-            let workspace = Workspace::open(workspace)
-                .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
-            let digest = workspace
-                .import_file(&source)
-                .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
-            println!("sha256:{digest}");
-        }
     }
     Ok(())
 }
 
+fn default_vmmanager_base_source(image_id: &str) -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join(".vm-base")
+        .join(image_id)
+}
+
+async fn follow_image_import(
+    daemon: &str,
+    token: &str,
+    events_url: &str,
+    status_url: &str,
+) -> Result<machineemu_core::domain::ImageManifest, machineemu_core::engine::Error> {
+    let mut last_event_id = None::<String>;
+    let mut progress = ImportProgress::new();
+    loop {
+        let mut terminal = None::<Result<machineemu_core::domain::ImageManifest, String>>;
+        let request_last_event_id = last_event_id.clone();
+        let stream_result = client::daemon_sse_request(
+            daemon,
+            token,
+            "GET",
+            events_url,
+            None,
+            request_last_event_id.as_deref(),
+            |event| {
+                if let Some(id) = event.id {
+                    last_event_id = Some(id);
+                }
+                let data: serde_json::Value =
+                    serde_json::from_str(&event.data).map_err(|error| {
+                        machineemu_core::engine::Error::Invalid(format!(
+                            "invalid import progress event: {error}"
+                        ))
+                    })?;
+                match event.event.as_str() {
+                    "snapshot" | "progress" | "component-start" | "component-complete" => {
+                        progress.render(&data);
+                    }
+                    "complete" => {
+                        progress.render(&data);
+                        eprintln!();
+                        let manifest =
+                            serde_json::from_value(data["manifest"].clone()).map_err(|error| {
+                                machineemu_core::engine::Error::Invalid(error.to_string())
+                            })?;
+                        terminal = Some(Ok(manifest));
+                        return Ok(false);
+                    }
+                    "failed" => {
+                        eprintln!();
+                        terminal = Some(Err(data["error"]
+                            .as_str()
+                            .unwrap_or("import failed")
+                            .into()));
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+                Ok(true)
+            },
+        )
+        .await;
+        if let Some(result) = terminal {
+            return result.map_err(machineemu_core::engine::Error::Invalid);
+        }
+        if let Err(error) = stream_result {
+            eprintln!("\nimport event stream disconnected: {error}; reconnecting");
+        }
+        let status = daemon_request(daemon, token, "GET", status_url, None).await?;
+        match status["status"].as_str() {
+            Some("complete") => {
+                eprintln!();
+                let manifest = serde_json::from_value(status["manifest"].clone())
+                    .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
+                return Ok(manifest);
+            }
+            Some("failed") => {
+                eprintln!();
+                return Err(machineemu_core::engine::Error::Invalid(
+                    status["error"].as_str().unwrap_or("import failed").into(),
+                ));
+            }
+            _ => progress.render(&status),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+struct ImportProgress {
+    started: Instant,
+    last_len: usize,
+}
+
+impl ImportProgress {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            last_len: 0,
+        }
+    }
+
+    fn render(&mut self, data: &serde_json::Value) {
+        let done = data["bytes_done"].as_u64().unwrap_or(0);
+        let total = data["bytes_total"].as_u64().unwrap_or(0);
+        let component = data["component"]
+            .as_str()
+            .or_else(|| data["current_component"].as_str())
+            .unwrap_or("import");
+        let phase = data["phase"]
+            .as_str()
+            .or_else(|| data["status"].as_str())
+            .unwrap_or("running");
+        let byte_phase = matches!(
+            phase,
+            "copying+hashing" | "queued" | "complete" | "verified"
+        );
+        let percent = if total == 0 {
+            0.0
+        } else {
+            (done as f64 / total as f64) * 100.0
+        };
+        let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
+        let speed = done as f64 / elapsed;
+        let eta = if !byte_phase {
+            "--:--".into()
+        } else if total > done && speed > 0.0 {
+            format_duration(Duration::from_secs_f64((total - done) as f64 / speed))
+        } else if total > 0 {
+            "00:00".into()
+        } else {
+            "--:--".into()
+        };
+        let bar = progress_bar(done, total, 28);
+        let line = format!(
+            "{component:>10} {phase:<15} {bar} {percent:5.1}%  {} / {}  {}/s  eta {eta}",
+            human_bytes(done),
+            human_bytes(total),
+            human_bytes(speed as u64)
+        );
+        let padding = self.last_len.saturating_sub(line.len());
+        eprint!("\r{line}{}", " ".repeat(padding));
+        self.last_len = line.len();
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
+}
+
+fn progress_bar(done: u64, total: u64, width: usize) -> String {
+    if total == 0 {
+        return format!("[{}]", ".".repeat(width));
+    }
+    let filled = ((done as f64 / total as f64) * width as f64)
+        .round()
+        .clamp(0.0, width as f64) as usize;
+    format!(
+        "[{}{}]",
+        "#".repeat(filled),
+        ".".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn human_bytes(value: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = value as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{value} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 mod client;
+mod device;
+mod hardware;
 mod launch;
 use client::{daemon_request, effective_client};
 use launch::run_rust_owned;

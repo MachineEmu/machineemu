@@ -7,8 +7,8 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-mod blobs;
 mod configuration;
+mod digests;
 pub use configuration::InstanceDocument;
 mod images;
 mod instances;
@@ -164,10 +164,6 @@ impl Workspace {
         })?;
         fs::create_dir_all(self.root.join("instances")).map_err(|source| Error::Io {
             path: self.root.join("instances"),
-            source,
-        })?;
-        fs::create_dir_all(self.root.join("blobs/sha256")).map_err(|source| Error::Io {
-            path: self.root.join("blobs/sha256"),
             source,
         })?;
         fs::create_dir_all(self.root.join("staging")).map_err(|source| Error::Io {

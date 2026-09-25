@@ -169,6 +169,112 @@ pub(super) async fn daemon_request(
     Ok(value)
 }
 
+pub(super) struct SseEvent {
+    pub(super) event: String,
+    pub(super) id: Option<String>,
+    pub(super) data: String,
+}
+
+pub(super) async fn daemon_sse_request(
+    endpoint: &str,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    last_event_id: Option<&str>,
+    mut on_event: impl FnMut(SseEvent) -> Result<bool, machineemu_core::engine::Error>,
+) -> Result<(), machineemu_core::engine::Error> {
+    let (endpoint, token) = effective_client(endpoint, token)?;
+    let mut stream = connect_daemon(&endpoint).await?;
+    let bytes = body
+        .map(|value| serde_json::to_vec(&value).expect("JSON value serializes"))
+        .unwrap_or_default();
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {endpoint}\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        bytes.len()
+    );
+    if let Some(id) = last_event_id {
+        request.push_str(&format!("Last-Event-ID: {id}\r\n"));
+    }
+    request.push_str("\r\n");
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|error| {
+            machineemu_core::engine::Error::Invalid(format!("cannot write daemon request: {error}"))
+        })?;
+    stream.write_all(&bytes).await.map_err(|error| {
+        machineemu_core::engine::Error::Invalid(format!("cannot write daemon request: {error}"))
+    })?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.map_err(|error| {
+        machineemu_core::engine::Error::Invalid(format!("cannot read daemon response: {error}"))
+    })?;
+    let status = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(599);
+    loop {
+        line.clear();
+        let count = reader.read_line(&mut line).await.map_err(|error| {
+            machineemu_core::engine::Error::Invalid(format!("cannot read daemon response: {error}"))
+        })?;
+        if count == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    if !(200..300).contains(&status) {
+        let mut payload = String::new();
+        reader.read_to_string(&mut payload).await.map_err(|error| {
+            machineemu_core::engine::Error::Invalid(format!("cannot read daemon response: {error}"))
+        })?;
+        return Err(machineemu_core::engine::Error::Invalid(format!(
+            "daemon returned HTTP {status}: {payload}"
+        )));
+    }
+    let mut event = String::from("message");
+    let mut id = None;
+    let mut data = String::new();
+    loop {
+        line.clear();
+        let count = reader.read_line(&mut line).await.map_err(|error| {
+            machineemu_core::engine::Error::Invalid(format!("cannot read daemon event: {error}"))
+        })?;
+        if count == 0 {
+            break;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            if !data.is_empty() {
+                if !on_event(SseEvent {
+                    event: std::mem::replace(&mut event, String::from("message")),
+                    id: id.take(),
+                    data: data.trim_end_matches('\n').to_owned(),
+                })? {
+                    return Ok(());
+                }
+                data.clear();
+            }
+            continue;
+        }
+        if trimmed.starts_with(':') {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("event:") {
+            event = value.trim_start().to_owned();
+        } else if let Some(value) = trimmed.strip_prefix("id:") {
+            id = Some(value.trim_start().to_owned());
+        } else if let Some(value) = trimmed.strip_prefix("data:") {
+            data.push_str(value.trim_start());
+            data.push('\n');
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

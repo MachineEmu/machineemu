@@ -46,9 +46,9 @@ exactly at the end of MEMFD, so MEMFD grows by the same amount.
 ## Keeping the profile and the firmware in step
 
 The PCDs come from the same JSON QEMU gets its ACPI identity from, so editing
-`analysis.acpi` changes both. The firmware digests do change, though, so after
-editing the profile you have to rebuild, re-pin the digests and re-import the
-blobs:
+`analysis.acpi` changes both. The firmware files do change, though, so after
+editing the profile you have to rebuild and update the profile asset paths or
+digests:
 
 ```sh
 nix build .#analysis-ovmf.fd
@@ -59,16 +59,15 @@ sha256sum result-fd/FV/OVMF_CODE.fd result-fd/FV/OVMF_VARS.ms.fd
 Nix only sees files that git tracks, so the profile and the logo have to be
 tracked (or at least `git add -N`) before `nix build` can read them.
 
-## Importing into a workspace
+## Using in a workspace
 
-Assets are read from the workspace's content-addressed store:
+Profiles can point directly at local firmware files:
 
 ```sh
 ws=machineemu-workspace
-for f in OVMF_CODE.fd OVMF_VARS.ms.fd; do
-  d=$(sha256sum "result-fd/FV/$f" | cut -d' ' -f1)
-  install -Dm444 "result-fd/FV/$f" "$ws/blobs/sha256/$d"
-done
+install -Dm444 result-fd/FV/OVMF_CODE.fd "$ws/assets/analysis/OVMF_CODE.fd"
+install -Dm444 result-fd/FV/OVMF_VARS.ms.fd "$ws/assets/analysis/OVMF_VARS.ms.fd"
+# update assets.firmware_code / assets.firmware_vars in the profile to those paths
 ```
 
 An image selected with `--image` still supplies its own NVRAM seed. That seed

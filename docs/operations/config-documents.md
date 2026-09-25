@@ -96,3 +96,68 @@ and `instance_launch` tables. Existing instance documents are preserved. Export
 failure leaves the old tables intact for retry. SQLite continues to own lifecycle,
 instance registration, operations, runs and snapshots. There is no legacy
 configuration fallback, inline start plan, or daemon-level profile launch map.
+
+## Hardware flags
+
+`create`, `run`, and `config INSTANCE` share hardware overrides. They also work
+with `create --file` and `run --file`. `config` edits the saved launch plan through
+the revision-checked API; stop the instance first, then start it after editing.
+The copied template remains provenance; the launch plan is authoritative.
+
+```sh
+machineemu create win11-dev desktop --cpus 4 --memory 8GiB --h264
+machineemu config desktop --cpus 8 --memory 16GiB
+machineemu config desktop --vnc auto --vnc-password password
+machineemu config desktop --h264
+machineemu config desktop --network bridge:br0 --network1 bridge:br2 \
+  --network2 host --portfwd '2=tcp:127.0.0.1:2222-:22'
+machineemu config desktop --network2 off
+machineemu config desktop --iso /path/to/installer.iso
+machineemu config desktop --iso off
+```
+
+- `--h264` selects D-Bus with GL, `virtio-vga-gl`, and USB tablet input with an
+  xHCI controller, and disables VNC. Reapplying it does not duplicate the tablet.
+- `--vnc auto`, `--vnc 5901`, or `--vnc off` controls loopback VNC. Enabling VNC
+  replaces the GL card with standard VGA. `--vnc-password` accepts 1–8 bytes and
+  stores them in an owner-only file under the local workspace's `secrets/`;
+  the saved arguments reference the file. `--vnc-password-file` is also supported.
+- `--network` (alias `--network0`) and `--network1` through `--network3` select
+  slots `net0` through `net3`. `host` means QEMU user networking/NAT. Existing NIC
+  models and MACs are retained; new slots get stable per-instance MACs.
+  `--portfwd SLOT=RULE` is repeatable and only applies to a host/user backend.
+  Selecting a backend replaces its old forwarding rules; omitting a slot leaves
+  it unchanged. `off` removes the slot. The older `--net` profile override remains
+  available on template-based creation.
+- `--iso PATH` attaches a read-only CD-ROM; replacing or ejecting it preserves
+  the separate cloud-init seed and writable disks. Paths refer to the local host
+  used by the daemon.
+- `--cpus N` replaces the CPU count and resets any explicit socket/core topology.
+  `--memory SIZE` accepts positive whole MiB/GiB/TiB quantities, or bare MiB.
+
+## Firmware boot settings
+
+Profiles support these `boot` fields (milliseconds for both timeouts):
+
+```yaml
+boot:
+  from: disk
+  once: cdrom
+  menu: true
+  splash: assets/analysis/neutral-boot-logo.bmp
+  timeout: 2500
+  strict: true
+  reboot_timeout: -1
+```
+
+`from` sets persistent boot selection and `once` overrides the first boot; both
+accept `disk`, `cdrom`, `network`, or `floppy`. The selected device must be
+available to the guest. `splash` names an existing local image file, resolved
+against the CLI working directory and saved as an absolute path. `timeout` is
+the splash duration (`splash-time`); `reboot_timeout` is the delay after boot
+failure, with `-1` disabling automatic retry. `menu` and `strict` are booleans.
+These settings are passed together in QEMU's `-boot` option. Their visible
+behavior depends on the guest firmware; see the
+[QEMU boot-option documentation](https://www.qemu.org/docs/master/system/qemu-manpage.html).
+Direct boot through `kernel`, `initrd`, `dtb` asset references and an `append`
+command line remains supported.

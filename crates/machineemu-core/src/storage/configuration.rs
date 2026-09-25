@@ -299,15 +299,14 @@ impl Workspace {
             ));
         }
         let plan: Value = serde_json::from_str(plan_json)?;
-        if auto_remove != document.auto_remove
-            || document
-                .launch_plan
-                .as_ref()
-                .and_then(|p| p.get("preparation"))
-                != plan.get("preparation")
+        if document
+            .launch_plan
+            .as_ref()
+            .and_then(|p| p.get("preparation"))
+            != plan.get("preparation")
         {
             return Err(Error::Process(
-                "instance policy and disk, NVRAM and TPM preparation cannot change".into(),
+                "disk, NVRAM and TPM preparation cannot change".into(),
             ));
         }
         if profile.is_none() && document.profile.is_some() {
@@ -321,6 +320,7 @@ impl Workspace {
             return Err(Error::Process("profile.id must match profile_id".into()));
         }
         document.profile = profile.cloned();
+        document.auto_remove = auto_remove;
         document.launch_plan = Some(plan);
         self.write_instance_document_at(&self.instance_document_path(id)?, &document)?;
         if let Err(error) = self.materialize_instance_profile(id) {

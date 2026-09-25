@@ -52,8 +52,10 @@ fn bearer_auth_requires_exact_token() {
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        image_imports: Arc::new(Mutex::new(BTreeMap::new())),
 
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(HelperConfig::default()),
         local_unix: false,
     };
     let missing = HeaderMap::new();
@@ -80,8 +82,10 @@ async fn api_routes_require_bearer_authentication() {
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        image_imports: Arc::new(Mutex::new(BTreeMap::new())),
 
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(HelperConfig::default()),
         local_unix: false,
     };
     let response = router(state.clone())
@@ -404,6 +408,92 @@ async fn api_routes_require_bearer_authentication() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn daemon_import_job_copies_vmmanager_base() {
+    let root =
+        std::env::temp_dir().join(format!("machineemu-daemon-import-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("base");
+    std::fs::create_dir_all(source.join("tpm")).unwrap();
+    std::fs::write(source.join("disk.qcow2"), b"base disk").unwrap();
+    std::fs::write(source.join("OVMF_VARS.fd"), b"vars").unwrap();
+    std::fs::write(source.join("tpm/tpm2-00.permall"), b"tpm state").unwrap();
+    let workspace_root = root.join("workspace");
+    let state = AppState {
+        workspace: Arc::new(Mutex::new(Workspace::open(&workspace_root).unwrap())),
+        bearer_token: Arc::from("secret"),
+        supervisors: Arc::new(Mutex::new(BTreeMap::new())),
+        instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
+
+        display_stream: Arc::new(PathBuf::from("display-stream")),
+        stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
+        audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+        control_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        image_imports: Arc::new(Mutex::new(BTreeMap::new())),
+
+        guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(HelperConfig::default()),
+        local_unix: false,
+    };
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/image-imports/vmmanager-base")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "source": source,
+                        "image_id": "win11-dev",
+                        "engine_track": "qemu-10.2-analysis",
+                        "target": "x86_64-softmmu"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let status_url = body["status_url"].as_str().unwrap();
+    let mut status = serde_json::Value::Null;
+    for _ in 0..50 {
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(status_url)
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        status = serde_json::from_slice(&body).unwrap();
+        if status["status"] == "complete" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(status["status"], "complete");
+    assert_eq!(
+        std::fs::read(workspace_root.join("images/win11-dev/components/disk.qcow2")).unwrap(),
+        b"base disk"
+    );
+    assert!(!workspace_root.join("blobs/sha256").exists());
+    drop(state);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn checked_in_rust_openapi_matches_generated_document() {
     let generated = serde_json::to_value(super::openapi::document()).unwrap();
@@ -443,8 +533,10 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        image_imports: Arc::new(Mutex::new(BTreeMap::new())),
 
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(HelperConfig::default()),
         local_unix: false,
     };
     let socket = root.join("qmp.sock");
@@ -1006,8 +1098,10 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        image_imports: Arc::new(Mutex::new(BTreeMap::new())),
 
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(HelperConfig::default()),
         local_unix: false,
     };
     let mut headers = HeaderMap::new();

@@ -16,7 +16,7 @@ use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use machineemu_core::{
     Error as RuntimeError,
-    config::{load_config, resolve_config_path},
+    config::{HelperConfig, load_config, resolve_config_path},
     domain::{Id, ImageManifest},
     runtime::ManagedProcess,
     storage::Workspace,
@@ -39,6 +39,12 @@ struct Args {
     /// Path to the display-stream encoder.
     #[arg(long)]
     display_stream: Option<PathBuf>,
+    /// swtpm executable used by this daemon for TPM-backed profiles.
+    #[arg(long, env = "MACHINEEMU_SWTPM")]
+    swtpm: Option<PathBuf>,
+    /// Privileged QEMU bridge helper used by this daemon for bridge networking.
+    #[arg(long, env = "MACHINEEMU_BRIDGE_HELPER")]
+    bridge_helper: Option<PathBuf>,
     /// Print the generated API v2 OpenAPI document and exit.
     #[arg(long)]
     print_openapi: bool,
@@ -55,7 +61,9 @@ struct AppState {
     audio_sessions: Arc<Mutex<BTreeMap<String, streams::AudioSession>>>,
     control_streams: Arc<Mutex<BTreeMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     events: Arc<Mutex<events::EventHub>>,
+    image_imports: Arc<Mutex<BTreeMap<String, images::ImageImportJob>>>,
     guest_executions: Arc<Mutex<BTreeMap<String, Arc<guest_exec::ExecutionJob>>>>,
+    helpers: Arc<HelperConfig>,
     local_unix: bool,
 }
 
@@ -146,6 +154,12 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         .bearer_token
         .or(server.bearer_token)
         .unwrap_or_default();
+    let helpers = resolve_daemon_helpers(
+        args.swtpm,
+        args.bridge_helper,
+        config.helpers,
+        config_path.as_deref(),
+    );
     let mut workspace = Workspace::open(&workspace_path)?;
     let recovered_runs = workspace.reconcile_active_runs()?;
     for run in recovered_runs.iter().filter(|run| run.status == "running") {
@@ -173,8 +187,10 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         control_streams: Arc::new(Mutex::new(BTreeMap::new())),
         events: Arc::new(Mutex::new(events::EventHub::new()?)),
+        image_imports: Arc::new(Mutex::new(BTreeMap::new())),
 
         guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(helpers),
         local_unix: unix_socket.is_some(),
     };
     tracing::info!(
@@ -265,6 +281,15 @@ fn router(state: AppState) -> Router {
         .route("/api/v2/openapi.json", get(openapi_document))
         .route("/api/v2/images", post(register_image))
         .route(
+            "/api/v2/image-imports/vmmanager-base",
+            post(start_vmmanager_base_import),
+        )
+        .route("/api/v2/image-imports/:id", get(get_image_import))
+        .route(
+            "/api/v2/image-imports/:id/events",
+            get(stream_image_import_events),
+        )
+        .route(
             "/api/v2/images/:id",
             get(get_image).put(documents::put_image),
         )
@@ -351,6 +376,37 @@ fn router(state: AppState) -> Router {
         )
         .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
+}
+
+fn resolve_daemon_helpers(
+    swtpm: Option<PathBuf>,
+    bridge_helper: Option<PathBuf>,
+    configured: Option<HelperConfig>,
+    config_path: Option<&std::path::Path>,
+) -> HelperConfig {
+    let mut helpers = configured.unwrap_or_default();
+    if let Some(path) = swtpm {
+        helpers.swtpm = Some(path);
+    }
+    if let Some(path) = bridge_helper {
+        helpers.qemu_bridge_helper = Some(path);
+    }
+    helpers.swtpm = helpers
+        .swtpm
+        .map(|path| resolve_config_path(config_path, path));
+    helpers.qemu_bridge_helper = helpers
+        .qemu_bridge_helper
+        .map(|path| resolve_config_path(config_path, path));
+    helpers.bluetooth_simulator = helpers
+        .bluetooth_simulator
+        .map(|path| resolve_config_path(config_path, path));
+    helpers.unifi_hub = helpers
+        .unifi_hub
+        .map(|path| resolve_config_path(config_path, path));
+    helpers.wifi_simulator = helpers
+        .wifi_simulator
+        .map(|path| resolve_config_path(config_path, path));
+    helpers
 }
 
 /// Wait for the signals a supervisor or an operator actually sends. SIGINT

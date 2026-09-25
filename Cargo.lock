@@ -1577,6 +1577,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
+ "wayland-shortcuts",
  "winit",
 ]
 
@@ -3462,6 +3463,18 @@ dependencies = [
  "proc-macro2",
  "quick-xml",
  "quote",
+]
+
+[[package]]
+name = "wayland-shortcuts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "raw-window-handle",
+ "tracing",
+ "wayland-client",
+ "wayland-protocols",
+ "winit",
 ]
 
 [[package]]

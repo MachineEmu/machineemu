@@ -1,4 +1,4 @@
-use super::{Workspace, blobs::hex_digest};
+use super::{Workspace, digests::hex_digest};
 use crate::domain::{Id, Operation};
 use crate::{Error, Result};
 use rusqlite::{OptionalExtension, params};

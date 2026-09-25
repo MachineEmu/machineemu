@@ -6,7 +6,7 @@ The portable base and its default lab template live in
 `machineemu run udm-pro-lab udmlab`.
 
 The `udm-pro` template boots a prepared UDM Pro firmware bundle using the
-`unifi-10.2` AArch64 engine. Import creates a workspace template; the instance
+`qemu-10.2-unifi` AArch64 engine. Import creates a workspace template; the instance
 gets its own document when created.
 
 Build the Rust CLI and import the prepared bundle (not a vendor firmware
@@ -22,7 +22,7 @@ The bundle must contain `Image`, `initramfs.cpio`, `boot.img`, and `spi.img`.
 Use the pristine bundle directory, not its previously booted `run/` directory.
 The importer hashes and copies these files into the workspace and writes a
 local profile with their asset references. Firmware and host paths stay out
-of bundled profiles. Configure the `unifi-10.2` engine as described in
+of bundled profiles. Configure the `qemu-10.2-unifi` engine as described in
 [configuration](configuration.md).
 
 This template boots offline, with four CPUs, 2 GiB RAM, and serial output in

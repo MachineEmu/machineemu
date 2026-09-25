@@ -35,6 +35,14 @@ For H.264, set `devices.h264: true` and `devices.video.type: virtio-vga-gl` in a
 
 By default the viewer takes display input (`--view-only` disables it, `--takeover` revokes the current controller). It forwards keys as QEMU qnums by physical position, sends the absolute pointer, mouse buttons and the wheel, requests a guest resolution matching the window 400 ms after a resize (`--no-resize-guest` disables this), plays D-Bus guest audio (`--no-audio`), and syncs clipboard text (`--no-clipboard`). The guest clipboard is copied to the host when it changes, and the host clipboard is sent to the guest when the window gains focus. The dev shell provides the GStreamer plugins and the Wayland/X11 libraries: `nix develop -c cargo run --release -p machineemu-viewer -- <instance>`.
 
+The top bar controls the live session. `SIZE` cycles through 1024×768,
+1280×800, 1920×1080, and 2560×1440 guest resolutions. `SCALE` cycles through
+Fit, 100%, 125%, 150%, and 200% local presentation without changing the guest.
+`AUTO` toggles guest resolution changes when the window is resized. Click the
+display or `INPUT` to confine keyboard and pointer input to the viewer; press
+`Ctrl+Alt+G` to release it. The toolbar remains outside the guest viewport and
+is never included in guest pointer coordinates or automatic resolution sizes.
+
 ## Screenshot and key chords
 
 `POST /api/v2/instances/{id}/screenshot` returns the primary display as
@@ -66,19 +74,43 @@ For an MT7981 profile, `wifi.enabled:true` attaches QEMU to `instances/{id}/wifi
 
 ## Live devices
 
-All device IDs are caller supplied and must start with the matching prefix. Put media files in `workspace/media`; API paths are relative to that directory. `GET /api/v2/instances/{id}/devices/{kind}` queries QEMU's current USB, block, or PCI devices.
+All device IDs are caller supplied and must start with the matching prefix. Media paths may be absolute host paths; relative paths resolve beneath `workspace/media`. `GET /api/v2/instances/{id}/devices/{kind}` queries QEMU's current USB, block, or PCI devices.
+
+The CLI exposes the same live QMP operations:
+
+```sh
+machineemu device list lab01 usb-host
+machineemu device add lab01 usb-host me-usbh-1 --hostbus 1 --hostaddr 2
+machineemu device add lab01 usb-image me-usbi-1 --path tools.img
+machineemu device add lab01 iso me-iso-1 --path /path/to/installer.iso
+machineemu device iso-change lab01 /path/to/second.iso
+machineemu device iso-eject lab01 me-iso-1
+machineemu device add lab01 network me-net-1 --bus pcie-root-port-1 --model virtio-net-pci
+machineemu device remove lab01 iso me-iso-1
+```
+
+These commands require a running instance. `config` remains the command for
+hardware that must be present from boot.
+Absolute media paths are attached directly. Add `--copy-media` when the file
+should first be retained beneath `workspace/media`; an identical existing copy
+is reused.
 
 | Operation | Method and path | JSON body |
 | --- | --- | --- |
 | Attach host USB | `POST .../devices/usb-host` | `{"device_id":"me-usbh-1","hostbus":1,"hostaddr":2}` |
 | Attach USB image | `POST .../devices/usb-image` | `{"device_id":"me-usbi-1","path":"disk.img","read_only":false}` |
 | Attach USB redirection | `POST .../devices/usbredir` | `{"device_id":"me-redir-0"}` |
-| Attach ISO drive | `POST .../devices/iso` | `{"device_id":"me-iso-1","path":"installer.iso","bus":"pcie-root-port-0"}` |
+| Attach ISO drive | `POST .../devices/iso` | `{"device_id":"me-iso-1","path":"installer.iso","bus":"pcie-root-port-iso"}` |
 | Change ISO | `POST .../devices/iso/me-iso-1/change` | `{"path":"second.iso"}` |
 | Eject ISO | `POST .../devices/iso/me-iso-1/eject` | `{"force":false}` |
 | Attach network card | `POST .../devices/network` | `{"device_id":"me-net-1","bus":"pcie-root-port-1","model":"virtio-net-pci","mac":"52:54:00:12:34:56"}` |
 | Detach any managed device | `DELETE .../devices/{kind}/{device_id}` | None |
 
-For a q35 VM, reserve PCIe root ports in the launch plan before starting QEMU, for example `-device pcie-root-port,id=pcie-root-port-0,chassis=1,slot=1` and a second port with a different ID, chassis, and slot for the network card. The `bus` field must name an available reserved port. The VM needs a USB controller such as `-device qemu-xhci,id=usb0` for USB devices. Network hotplug currently creates a QEMU user-mode network backend. `model` can be `virtio-net-pci`, `e1000`, or `rtl8139`.
+Q35 launch plans reserve `pcie-root-port-iso`, `pcie-root-port-1`, and `pcie-root-port-2` for live devices. ISO hotplug defaults to a virtio-SCSI controller on `pcie-root-port-iso` with a SCSI CD-ROM behind it. Pass `--bus` to select another reserved port. Network cards use one of the remaining reserved ports. Network hotplug currently creates a QEMU user-mode backend. `model` can be `virtio-net-pci`, `e1000`, or `rtl8139`.
+
+A Windows guest needs its virtio-SCSI driver before it can see a live ISO on
+the reserved PCIe port. Bootstrap that driver with `machineemu config INSTANCE
+--iso /absolute/path/to/virtio-win.iso`, start the VM, and install the driver;
+that boot-time optical drive uses the built-in AHCI controller.
 
 Detaching waits up to five seconds for QEMU's `DEVICE_DELETED` event before deleting the associated block, network, or character backend. A response with `"detached":false` means guest removal remains pending; stop the VM before reusing that device ID.

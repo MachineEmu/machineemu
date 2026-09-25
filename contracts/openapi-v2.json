@@ -97,6 +97,156 @@
         ]
       }
     },
+    "/api/v2/image-imports/vmmanager-base": {
+      "post": {
+        "tags": [],
+        "summary": "Start a vmmanager-sh base image import job",
+        "operationId": "start_vmmanager_base_import",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportVmmanagerBase"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Start a vmmanager-sh base image import job",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/image-imports/{id}": {
+      "get": {
+        "tags": [],
+        "summary": "Get an image import job",
+        "operationId": "get_image_import",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get an image import job",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/image-imports/{id}/events": {
+      "get": {
+        "tags": [],
+        "summary": "Stream image import progress",
+        "description": "SSE progress events use event, id, and JSON data fields. Reconnect with Last-Event-ID to replay retained progress.",
+        "operationId": "stream_image_import_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Image import event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Image import not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v2/images": {
       "post": {
         "tags": [],
@@ -2265,6 +2415,29 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ImportVmmanagerBase": {
+        "type": "object",
+        "required": [
+          "source",
+          "image_id",
+          "engine_track",
+          "target"
+        ],
+        "properties": {
+          "engine_track": {
+            "type": "string"
+          },
+          "image_id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
           }
         }
       },

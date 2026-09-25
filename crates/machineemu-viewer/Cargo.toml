@@ -26,5 +26,8 @@ tracing-subscriber.workspace = true
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 winit = "0.30"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-shortcuts = { path = "../../support/wayland-shortcuts" }
+
 [lints]
 workspace = true

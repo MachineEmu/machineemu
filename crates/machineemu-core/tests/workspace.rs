@@ -430,21 +430,6 @@ fn stopped_instance_can_be_removed_but_snapshotted_instance_cannot() {
 }
 
 #[test]
-fn blob_import_verifies_before_atomic_publication() {
-    let root = temp_root("blobs");
-    let workspace = Workspace::open(&root).unwrap();
-    let source = root.join("source.bin");
-    fs::write(&source, b"immutable input").unwrap();
-    let digest = hex_digest(b"immutable input");
-    let imported = workspace.import_blob(&source, &digest).unwrap();
-    assert_eq!(fs::read(&imported).unwrap(), b"immutable input");
-    assert!(workspace.import_blob(&source, &"0".repeat(64)).is_err());
-    assert!(!root.join("staging/import-").exists());
-    drop(workspace);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
 fn portable_image_bundle_round_trips_named_components() {
     let root = temp_root("image-bundle");
     let workspace = Workspace::open(&root).unwrap();
@@ -479,6 +464,16 @@ fn portable_image_bundle_round_trips_named_components() {
         manifest.supported_engine_tracks
     );
     assert_eq!(image.disk_sha256, hex_digest(disk));
+    assert_eq!(
+        fs::read(
+            workspace
+                .root()
+                .join("images/portable-test/components/disk.qcow2")
+        )
+        .unwrap(),
+        disk
+    );
+    assert!(!workspace.root().join("blobs/sha256").exists());
     let exported = root.join("exported-image");
     let exported_manifest = workspace
         .export_image_bundle(&image.image_id, &exported)
@@ -518,12 +513,12 @@ fn vmmanager_base_import_ignores_runtime_lock_files() {
         fs::read(
             workspace
                 .root()
-                .join("blobs/sha256")
-                .join(&image.disk_sha256)
+                .join("images/win11-dev/components/disk.qcow2")
         )
         .unwrap(),
         b"base disk"
     );
+    assert!(!workspace.root().join("blobs/sha256").exists());
     assert!(image.firmware_sha256.is_some());
     assert!(image.tpm_state_sha256.is_some());
     let _ = fs::remove_dir_all(root);
@@ -1113,6 +1108,47 @@ fn stopped_snapshot_restores_hashed_components() {
 }
 
 #[test]
+fn snapshot_streams_large_component_and_rejects_corruption() {
+    let root = temp_root("snapshot-stream");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    let instance = workspace
+        .create_instance(
+            Id::new("instance", "lab01").unwrap(),
+            image.image_id,
+            Id::new("profile", "profile01").unwrap(),
+        )
+        .unwrap();
+    let bytes = vec![0x5a; 3 * 1024 * 1024 + 17];
+    let source = root.join("overlay.qcow2");
+    fs::write(&source, &bytes).unwrap();
+    let snapshot = workspace
+        .create_snapshot(
+            Id::new("snapshot", "large01").unwrap(),
+            instance.instance_id,
+            &[("overlay.qcow2".into(), source)],
+        )
+        .unwrap();
+    assert_eq!(snapshot.files["overlay.qcow2"], hex_digest(&bytes));
+    let restored = root.join("restored");
+    workspace
+        .restore_snapshot(&snapshot.snapshot_id, &restored)
+        .unwrap();
+    assert_eq!(fs::read(restored.join("overlay.qcow2")).unwrap(), bytes);
+    fs::write(root.join("snapshots/large01/overlay.qcow2"), b"corrupted").unwrap();
+    let failed = root.join("failed-restore");
+    assert!(matches!(
+        workspace.restore_snapshot(&snapshot.snapshot_id, &failed),
+        Err(Error::DigestMismatch { .. })
+    ));
+    assert!(!failed.exists());
+    assert!(!failed.with_extension("restore-staging").exists());
+    drop(workspace);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn image_listing_is_sorted_and_read_only_while_workspace_is_locked() {
     let root = temp_root("list-images");
     assert!(Workspace::list_images(&root).unwrap().is_empty());
@@ -1327,9 +1363,21 @@ fn configuration_commit_is_atomic_and_rebuilds_profile_cache() {
         "3G"
     );
     fs::write(&path, original_bytes).unwrap();
-    workspace
-        .replace_instance_configuration(&id, revision, "{\"changed\":true}", false, Some(&changed))
+    let revision = workspace
+        .replace_instance_configuration(&id, revision, "{\"changed\":true}", true, Some(&changed))
         .unwrap();
+    assert!(workspace.instance_document(&id).unwrap().auto_remove);
+    assert!(
+        workspace
+            .replace_instance_configuration(
+                &id,
+                revision,
+                "{\"preparation\":{\"disk_size\":\"larger\"}}",
+                true,
+                Some(&changed)
+            )
+            .is_err()
+    );
     assert!(
         workspace
             .replace_instance_configuration(&id, revision, "{}", false, None)

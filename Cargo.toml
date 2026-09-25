@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/machineemu-core", "crates/machineemu", "crates/machineemu-viewer", "crates/display-stream", "crates/display-stream-protocol"]
+exclude = ["support/wayland-shortcuts"]
 resolver = "2"
 
 [workspace.package]
@@ -28,7 +29,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 utoipa = { version = "5.5", features = ["macros"] }
 machineemu-core = { path = "crates/machineemu-core" }
-nix = { version = "0.29", features = ["socket", "uio", "signal"] }
+nix = { version = "0.29", features = ["socket", "uio", "signal", "user"] }
 display-stream-protocol = { path = "crates/display-stream-protocol" }
 zbus = { version = "5.19", default-features = false, features = ["p2p", "tokio"] }
 

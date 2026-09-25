@@ -221,17 +221,16 @@ pub(super) async fn put_instance_config(
                 input.revision, current_revision
             )));
         }
-        let (old_plan, auto_remove) = workspace
+        let (old_plan, _) = workspace
             .instance_launch(&instance_id)?
             .ok_or_else(|| RuntimeError::Process("instance has no saved launch plan".into()))?;
         let old_plan: LaunchSpec = serde_json::from_str(&old_plan)?;
         if input.instance_id != instance_id.as_str()
             || input.image_id != instance.image_id.as_str()
             || input.profile_id != instance.profile_id.as_str()
-            || input.auto_remove != auto_remove
         {
             return Err(RuntimeError::Process(
-                "instance, image, profile IDs and auto_remove cannot be changed here".into(),
+                "instance, image and profile IDs cannot be changed here".into(),
             ));
         }
         if input.launch_plan.preparation != old_plan.preparation {
@@ -251,7 +250,7 @@ pub(super) async fn put_instance_config(
             &instance_id,
             input.revision,
             &serde_json::to_string(&input.launch_plan)?,
-            auto_remove,
+            input.auto_remove,
             input.profile.as_ref(),
         )?;
         input.revision = updated;
