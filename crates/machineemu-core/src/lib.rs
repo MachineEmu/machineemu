@@ -6,6 +6,7 @@ pub mod engine;
 mod error;
 pub mod launch;
 pub mod protocols;
+pub mod resolution;
 pub mod runtime;
 pub mod storage;
 pub use error::{Error, Result};

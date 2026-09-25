@@ -18,6 +18,32 @@ use tokio::sync::mpsc;
 
 const IMPORT_SYNC_INTERVAL_BYTES: u64 = 512 * 1024 * 1024;
 
+fn image_components_from_digests(
+    disk: Option<&String>,
+    firmware: Option<&String>,
+    tpm_state: Option<&String>,
+) -> BTreeMap<String, machineemu_core::domain::ImageBundleComponent> {
+    let mut components = BTreeMap::new();
+    let mut insert = |name: &str, path: &str, digest: Option<&String>| {
+        if let Some(digest) = digest {
+            components.insert(
+                name.to_owned(),
+                machineemu_core::domain::ImageBundleComponent {
+                    path: path.to_owned(),
+                    sha256: format!(
+                        "sha256:{}",
+                        digest.strip_prefix("sha256:").unwrap_or(digest)
+                    ),
+                },
+            );
+        }
+    };
+    insert("disk", "components/disk.qcow2", disk);
+    insert("firmware", "components/firmware.fd", firmware);
+    insert("tpm_state", "components/tpm-state", tpm_state);
+    components
+}
+
 #[derive(Clone)]
 pub(super) struct ImageImportEvent {
     sequence: u64,
@@ -44,7 +70,7 @@ pub(super) struct ImageImportJob {
     current_component: Option<String>,
     bytes_done: u64,
     bytes_total: u64,
-    manifest: Option<ImageManifest>,
+    manifest: Option<Value>,
     error: Option<String>,
     next_sequence: u64,
     next_subscriber: u64,
@@ -53,6 +79,14 @@ pub(super) struct ImageImportJob {
 }
 
 impl ImageImportJob {
+    pub(super) fn engine(source: PathBuf) -> Self {
+        Self::new(&ImportVmmanagerBase {
+            source: source.to_string_lossy().into_owned(),
+            image_id: String::new(),
+            engine_track: String::new(),
+            target: String::new(),
+        })
+    }
     fn new(input: &ImportVmmanagerBase) -> Self {
         Self {
             status: "queued".into(),
@@ -91,7 +125,7 @@ impl ImageImportJob {
     }
 }
 
-fn image_import_id() -> String {
+pub(super) fn image_import_id() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -99,7 +133,7 @@ fn image_import_id() -> String {
     format!("imgimp-{}-{now:x}", std::process::id())
 }
 
-fn publish_import_event(
+pub(super) fn publish_import_event(
     state: &AppState,
     import_id: &str,
     kind: &'static str,
@@ -127,7 +161,7 @@ fn publish_import_event(
     Ok(())
 }
 
-fn set_import_status(
+pub(super) fn set_import_status(
     state: &AppState,
     import_id: &str,
     status: &str,
@@ -150,10 +184,10 @@ fn set_import_status(
     Ok(())
 }
 
-fn finish_import(
+pub(super) fn finish_import(
     state: &AppState,
     import_id: &str,
-    manifest: ImageManifest,
+    manifest: impl Serialize,
 ) -> Result<(), RuntimeError> {
     let mut imports = state
         .image_imports
@@ -164,12 +198,15 @@ fn finish_import(
         job.phase = "complete".into();
         job.current_component = None;
         job.bytes_done = job.bytes_total;
-        job.manifest = Some(manifest);
+        job.manifest = Some(
+            serde_json::to_value(manifest)
+                .map_err(|error| RuntimeError::Process(error.to_string()))?,
+        );
     }
     Ok(())
 }
 
-fn fail_import(state: &AppState, import_id: &str, error: String) {
+pub(super) fn fail_import(state: &AppState, import_id: &str, error: String) {
     if let Ok(mut imports) = state.image_imports.lock()
         && let Some(job) = imports.get_mut(import_id)
     {
@@ -188,6 +225,14 @@ pub(super) async fn register_image(
         return response.into_response();
     }
     let result = blocking(move || -> Result<_, RuntimeError> {
+        let disk_sha256 = input.disk_sha256;
+        let firmware_sha256 = input.firmware_sha256;
+        let tpm_state_sha256 = input.tpm_state_sha256;
+        let components = image_components_from_digests(
+            Some(&disk_sha256),
+            firmware_sha256.as_ref(),
+            tpm_state_sha256.as_ref(),
+        );
         let manifest = ImageManifest {
             image_id: Id::new("image", input.image_id)?,
             engine_track: Id::new("engine track", input.engine_track)?,
@@ -197,9 +242,10 @@ pub(super) async fn register_image(
                 .map(|track| Id::new("engine track", track))
                 .collect::<Result<_, _>>()?,
             target: input.target,
-            disk_sha256: input.disk_sha256,
-            firmware_sha256: input.firmware_sha256,
-            tpm_state_sha256: input.tpm_state_sha256,
+            components,
+            disk_sha256,
+            firmware_sha256,
+            tpm_state_sha256,
         };
         let workspace = state
             .workspace
@@ -510,12 +556,19 @@ fn import_vmmanager_base_job(
             _ => {}
         }
     }
+    let disk_sha256 = disk_sha256.expect("disk component is required");
+    let components = image_components_from_digests(
+        Some(&disk_sha256),
+        firmware_sha256.as_ref(),
+        tpm_state_sha256.as_ref(),
+    );
     let manifest = ImageManifest {
         image_id,
         engine_track,
         supported_engine_tracks: Vec::new(),
         target: input.target,
-        disk_sha256: disk_sha256.expect("disk component is required"),
+        components,
+        disk_sha256,
         firmware_sha256,
         tpm_state_sha256,
     };
@@ -658,6 +711,35 @@ fn copy_component_with_progress(
         source: source_error,
     })?;
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+pub(super) async fn list_images(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(response) = authorized(&headers, &state) {
+        return response.into_response();
+    }
+    let result = blocking(move || -> Result<_, RuntimeError> {
+        let root = state
+            .workspace
+            .lock()
+            .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?
+            .root()
+            .to_owned();
+        Workspace::list_images(root)
+    })
+    .await;
+    match result {
+        Ok(images) => documents::render_document(&headers, images),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(ErrorBody {
+                error: error.to_string(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 pub(super) async fn get_image(

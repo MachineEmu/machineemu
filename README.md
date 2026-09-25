@@ -29,14 +29,15 @@ List registered images and available named profiles:
 ```sh
 cargo run -p machineemu -- images
 cargo run -p machineemu -- profiles
-# Select another workspace or emit JSON:
-cargo run -p machineemu -- images --workspace ./my-workspace --json
-cargo run -p machineemu -- profiles --workspace ./my-workspace --json
+# Emit JSON:
+cargo run -p machineemu -- images --json
+cargo run -p machineemu -- profiles --json
 ```
 
-Both commands default to `./machineemu-workspace` and leave it unchanged.
-Images come from editable `images/<image-id>/manifest.json` files in the
-workspace. Existing SQLite image metadata can be migrated with
+`images` and `profiles` query the daemon API using the configured client
+connection; use `--daemon` and `--token` to override it.
+The daemon reads images from editable `images/<image-id>/manifest.json` files in
+its workspace. Existing SQLite image metadata can be migrated with
 `cargo run -p machineemu -- migrate-images` (also automatic when the updated
 daemon opens the workspace). Profiles combine its `profiles/*.json`
 with the repository's `./profiles/*.json`; workspace profiles take precedence for the

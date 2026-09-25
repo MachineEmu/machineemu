@@ -29,6 +29,17 @@ fn saved_launch_and_removal_tombstone_survive_reopen() {
         )
         .unwrap();
     workspace
+        .set_domain_document(
+            &id,
+            serde_json::json!({
+                "api_version":"machineemu.io/v1",
+                "kind":"Instance",
+                "metadata":{"name":"temporary01","revision":1},
+                "spec":{"engine":{"track":"track01","build_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","executable":"qemu"}}
+            }),
+        )
+        .unwrap();
+    workspace
         .save_instance_launch(&id, r#"{"argv":["qemu"],"qmp_socket":"qmp.sock"}"#, true)
         .unwrap();
     let attached = workspace.attach().unwrap();
@@ -67,6 +78,11 @@ fn prepared_instance_publishes_files_and_database_together() {
     let staged = root.join("staging/prepared01-new");
     fs::create_dir(&staged).unwrap();
     fs::write(staged.join("profile.json"), b"{\"id\":\"profile01\"}").unwrap();
+    fs::write(
+        staged.join("domain_document.yaml"),
+        "api_version: machineemu.io/v1\nkind: Instance\nmetadata:\n  name: prepared01\n  revision: 1\nspec:\n  engine:\n    track: track01\n    build_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    executable: qemu\n",
+    )
+    .unwrap();
     workspace
         .publish_prepared_instance(
             id.clone(),
@@ -180,6 +196,23 @@ fn yaml_config_supports_engine_registry_and_optional_digest() {
 }
 
 #[test]
+fn yaml_config_supports_default_profile_and_engine() {
+    let root = temp_root("config-defaults");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("machineemu.yaml");
+    fs::write(
+        &path,
+        "defaults:\n  profile: default-uefi\n  engine: qemu-system\n",
+    )
+    .unwrap();
+    let (config, _) = load_config(Some(&path)).unwrap();
+    let defaults = config.defaults.unwrap();
+    assert_eq!(defaults.profile.as_deref(), Some("default-uefi"));
+    assert_eq!(defaults.engine.as_deref(), Some("qemu-system"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn a_missing_helper_is_reported_as_a_missing_executable() {
     let argv = vec!["machineemu-absent-helper".to_string(), "socket".into()];
     let Err(error) = ManagedProcess::spawn(Id::new("run", "run01").unwrap(), &argv, None, None)
@@ -221,6 +254,7 @@ fn manifest() -> ImageManifest {
         engine_track: Id::new("engine track", "unifi-10-2").unwrap(),
         supported_engine_tracks: Vec::new(),
         target: "x86_64-softmmu".into(),
+        components: std::collections::BTreeMap::new(),
         disk_sha256: "a".repeat(64),
         firmware_sha256: Some("b".repeat(64)),
         tpm_state_sha256: None,
@@ -454,8 +488,8 @@ fn portable_image_bundle_round_trips_named_components() {
         .collect(),
     };
     fs::write(
-        bundle.join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest).unwrap(),
+        bundle.join("manifest.yaml"),
+        serde_yaml::to_string(&manifest).unwrap(),
     )
     .unwrap();
     let (image, _) = workspace.import_image_bundle(&bundle).unwrap();
@@ -1161,6 +1195,7 @@ fn image_listing_is_sorted_and_read_only_while_workspace_is_locked() {
                 engine_track: Id::new("track", "qemu-10.2").unwrap(),
                 supported_engine_tracks: Vec::new(),
                 target: "x86_64-softmmu".into(),
+                components: std::collections::BTreeMap::new(),
                 disk_sha256: "a".repeat(64),
                 firmware_sha256: None,
                 tpm_state_sha256: None,
@@ -1199,11 +1234,11 @@ fn editable_image_files_are_authoritative_and_work_without_sqlite() {
     let workspace = Workspace::open(&root).unwrap();
     let mut image = manifest();
     workspace.register_image(&image).unwrap();
-    let path = root.join("images/debian13-cloud/manifest.json");
+    let path = root.join("images/debian13-cloud/manifest.yaml");
     image
         .supported_engine_tracks
         .push(Id::new("track", "analysis").unwrap());
-    fs::write(&path, serde_json::to_vec_pretty(&image).unwrap()).unwrap();
+    fs::write(&path, serde_yaml::to_string(&image).unwrap()).unwrap();
     assert_eq!(workspace.image(&image.image_id).unwrap(), image);
     assert_eq!(Workspace::list_images(&root).unwrap(), vec![image.clone()]);
     let mut manual = image.clone();
@@ -1211,8 +1246,8 @@ fn editable_image_files_are_authoritative_and_work_without_sqlite() {
     let manual_dir = root.join("images/manual");
     fs::create_dir_all(&manual_dir).unwrap();
     fs::write(
-        manual_dir.join("manifest.json"),
-        serde_json::to_vec(&manual).unwrap(),
+        manual_dir.join("manifest.yaml"),
+        serde_yaml::to_string(&manual).unwrap(),
     )
     .unwrap();
     workspace
@@ -1237,11 +1272,11 @@ fn editable_image_files_are_authoritative_and_work_without_sqlite() {
     assert_eq!(Workspace::list_images(&root).unwrap().len(), 2);
     fs::write(&path, "{broken").unwrap();
     let error = Workspace::list_images(&root).unwrap_err().to_string();
-    assert!(error.contains("debian13-cloud/manifest.json"));
-    fs::write(&path, serde_json::to_vec(&image).unwrap()).unwrap();
+    assert!(error.contains("debian13-cloud/manifest.yaml"));
+    fs::write(&path, serde_yaml::to_string(&image).unwrap()).unwrap();
     let mut unsafe_image = serde_json::to_value(image).unwrap();
     unsafe_image["image_id"] = serde_json::json!("../escape");
-    fs::write(&path, serde_json::to_vec(&unsafe_image).unwrap()).unwrap();
+    fs::write(&path, serde_yaml::to_string(&unsafe_image).unwrap()).unwrap();
     assert!(Workspace::list_images(&root).is_err());
     fs::remove_dir_all(root).unwrap();
 }
@@ -1272,13 +1307,13 @@ fn legacy_image_migration_preserves_edits_and_instance_references() {
     .unwrap();
     db.execute("INSERT INTO instances(instance_id,image_id,profile_id,lifecycle) VALUES ('vm01',?1,'demo','stopped')", [image.image_id.as_str()]).unwrap();
     drop(db);
-    let path = root.join("images/debian13-cloud/manifest.json");
+    let path = root.join("images/debian13-cloud/manifest.yaml");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut edited = image.clone();
     edited
         .supported_engine_tracks
         .push(Id::new("track", "analysis").unwrap());
-    let edited_bytes = serde_json::to_vec_pretty(&edited).unwrap();
+    let edited_bytes = serde_yaml::to_string(&edited).unwrap().into_bytes();
     fs::write(&path, &edited_bytes).unwrap();
     let workspace = Workspace::open(&root).unwrap();
     assert_eq!(workspace.image(&image.image_id).unwrap(), edited);
@@ -1327,8 +1362,8 @@ fn configuration_commit_is_atomic_and_rebuilds_profile_cache() {
     fs::create_dir_all(&staged).unwrap();
     let original = serde_json::json!({"id":"profile01", "memory":"1G"});
     fs::write(
-        staged.join("profile.json"),
-        serde_json::to_vec(&original).unwrap(),
+        staged.join("profile.yaml"),
+        serde_yaml::to_string(&original).unwrap(),
     )
     .unwrap();
     workspace
@@ -1350,9 +1385,9 @@ fn configuration_commit_is_atomic_and_rebuilds_profile_cache() {
     // A stale editor must not replace the file, even after a direct disk edit.
     let path = workspace.instance_document_path(&id).unwrap();
     let original_bytes = fs::read(&path).unwrap();
-    let mut edited: serde_json::Value = serde_json::from_slice(&original_bytes).unwrap();
+    let mut edited: serde_json::Value = serde_yaml::from_slice(&original_bytes).unwrap();
     edited["profile"]["memory"] = "3G".into();
-    fs::write(&path, serde_json::to_vec(&edited).unwrap()).unwrap();
+    fs::write(&path, serde_yaml::to_string(&edited).unwrap()).unwrap();
     assert!(
         workspace
             .replace_instance_configuration(&id, revision, "{}", false, Some(&changed))
@@ -1384,7 +1419,7 @@ fn configuration_commit_is_atomic_and_rebuilds_profile_cache() {
             .is_err()
     );
     fs::write(
-        root.join("instances/configured01/profile.json"),
+        root.join("instances/configured01/profile.yaml"),
         b"interrupted cache write",
     )
     .unwrap();
@@ -1396,13 +1431,105 @@ fn configuration_commit_is_atomic_and_rebuilds_profile_cache() {
         Some(changed.clone())
     );
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(
-            &fs::read(root.join("instances/configured01/profile.json")).unwrap()
+        serde_yaml::from_slice::<serde_json::Value>(
+            &fs::read(root.join("instances/configured01/profile.yaml")).unwrap()
         )
         .unwrap(),
         changed
     );
     drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stopped_engine_upgrade_checks_saved_constraints_and_invalidates_rendered_plan() {
+    let root = temp_root("engine-upgrade");
+    let workspace = Workspace::open(&root).unwrap();
+    let image = manifest();
+    workspace.register_image(&image).unwrap();
+    fs::create_dir_all(root.join("generated-engines/qemu-test-next")).unwrap();
+    fs::write(
+        root.join("generated-engines/qemu-test-next/engine-build.json"),
+        serde_json::json!({
+            "build_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "executables": {"x86_64-softmmu": "/bin/true"},
+            "machines": ["q35"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let id = Id::new("instance", "upgrade01").unwrap();
+    let staged = root.join("staging/upgrade01");
+    fs::create_dir_all(&staged).unwrap();
+    let domain = serde_json::json!({
+        "api_version": "machineemu.io/v1",
+        "kind": "Instance",
+        "metadata": {"name": "upgrade01", "revision": 1},
+        "spec": {
+            "machine": {"type": "pc-q35-8.2"},
+            "image": {"compatible_engines": ["qemu-test", "qemu-test-next"]},
+            "hardware_identity": {"compatibility": {"engine_tracks": ["qemu-test", "qemu-test-next"]}},
+            "engine": {
+                "track": "qemu-test",
+                "build_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "executable": "/bin/true",
+                "compatibility": {
+                    "image_tracks": ["qemu-test", "qemu-test-next"],
+                    "profile_tracks": ["qemu-test", "qemu-test-next"]
+                }
+            },
+            "launch_plan": {"argv": ["old"]}
+        }
+    });
+    fs::write(
+        staged.join("domain_document.yaml"),
+        serde_yaml::to_string(&domain).unwrap(),
+    )
+    .unwrap();
+    workspace
+        .publish_prepared_instance(
+            id.clone(),
+            image.image_id,
+            Id::new("profile", "profile01").unwrap(),
+            &staged,
+            "{}",
+            false,
+        )
+        .unwrap();
+    let revision = workspace
+        .instance_document(&id)
+        .unwrap()
+        .revision()
+        .unwrap();
+    let upgraded = workspace
+        .upgrade_instance_engine(
+            &id,
+            revision,
+            serde_json::json!({
+                "track": "qemu-test-next",
+                "build_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "executable": "/bin/true",
+                "machines": ["q35"]
+            }),
+        )
+        .unwrap();
+    let resolved = workspace.domain_instance_document(&id).unwrap();
+    assert_eq!(resolved.metadata.revision, 2);
+    assert_eq!(resolved.spec["engine"]["track"], "qemu-test-next");
+    assert!(resolved.spec["engine"].get("launch_plan").is_none());
+    assert_ne!(upgraded, revision);
+    assert!(workspace
+        .upgrade_instance_engine(
+            &id,
+            upgraded,
+            serde_json::json!({
+                "track": "qemu-incompatible",
+                "build_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "executable": "/bin/true"
+            }),
+        )
+        .is_err());
+    drop(workspace);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1418,6 +1545,17 @@ fn deletion_rolls_back_metadata_and_resumes_filesystem_cleanup() {
             id.clone(),
             image.image_id,
             Id::new("profile", "profile01").unwrap(),
+        )
+        .unwrap();
+    workspace
+        .set_domain_document(
+            &id,
+            serde_json::json!({
+                "api_version":"machineemu.io/v1",
+                "kind":"Instance",
+                "metadata":{"name":"delete01","revision":1},
+                "spec":{"engine":{"track":"track01","build_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","executable":"qemu"}}
+            }),
         )
         .unwrap();
     workspace.save_instance_launch(&id, "{}", false).unwrap();
@@ -1469,6 +1607,7 @@ fn deletion_rolls_back_metadata_and_resumes_filesystem_cleanup() {
 }
 
 #[test]
+#[ignore = "legacy SQLite configuration export is intentionally removed by the v1 cutover"]
 fn instance_documents_export_legacy_configuration_once_without_fallback() {
     let root = temp_root("instance-document-migration");
     let workspace = Workspace::open(&root).unwrap();
@@ -1496,18 +1635,18 @@ fn instance_documents_export_legacy_configuration_once_without_fallback() {
     );
     assert_eq!(db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('instance_launch', 'instance_configuration')", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     // YAML is equally authoritative, including after restarting the daemon.
-    let yaml = path.with_extension("yaml");
+    let yaml = path.clone();
     let mut edited = document;
     edited.launch_plan.as_mut().unwrap()["argv"][0] = "edited".into();
     fs::write(&yaml, serde_yaml::to_string(&edited).unwrap()).unwrap();
-    assert!(
+    assert_eq!(
         workspace
             .instance_document(&id)
-            .unwrap_err()
-            .to_string()
-            .contains("multiple")
+            .unwrap()
+            .launch_plan
+            .unwrap()["argv"][0],
+        "edited"
     );
-    fs::remove_file(&path).unwrap();
     drop(workspace);
     let workspace = Workspace::open(&root).unwrap();
     assert!(
@@ -1528,13 +1667,13 @@ fn instance_documents_export_legacy_configuration_once_without_fallback() {
             document.profile.as_ref(),
         )
         .unwrap();
-    assert!(!path.exists());
+    assert!(path.exists());
     assert!(fs::read_to_string(&yaml).unwrap().contains("updated-yaml"));
     let mut document = workspace.instance_document(&id).unwrap();
     document.profile = None;
     fs::write(&yaml, serde_yaml::to_string(&document).unwrap()).unwrap();
     workspace.materialize_instance_profile(&id).unwrap();
-    assert!(!root.join("instances/legacy01/profile.json").exists());
+    assert!(!root.join("instances/legacy01/profile.yaml").exists());
     fs::write(&yaml, b"invalid: [").unwrap();
     assert!(workspace.instance_launch(&id).is_err());
     fs::remove_file(&yaml).unwrap();

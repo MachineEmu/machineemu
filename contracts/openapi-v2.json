@@ -10,6 +10,135 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v2/engine-imports": {
+      "post": {
+        "tags": [],
+        "summary": "Import and verify an engine bundle",
+        "operationId": "start_engine_import",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportEngine"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Import and verify an engine bundle",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/engine-imports/{id}": {
+      "get": {
+        "tags": [],
+        "summary": "Get an engine import job",
+        "operationId": "get_engine_import",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get an engine import job",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/engine-imports/{id}/events": {
+      "get": {
+        "tags": [],
+        "summary": "Stream engine import progress",
+        "operationId": "stream_engine_import_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Engine import events",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v2/guest-executions/{id}/events": {
       "get": {
         "tags": [],
@@ -49,6 +178,166 @@
           },
           "404": {
             "description": "Execution not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/hardware-identities": {
+      "get": {
+        "tags": [],
+        "summary": "List hardware identities",
+        "operationId": "list_hardware_identities",
+        "responses": {
+          "200": {
+            "description": "List hardware identities",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [],
+        "summary": "Create a hardware identity",
+        "operationId": "create_hardware_identity",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Create a hardware identity",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/hardware-identities/{id}": {
+      "get": {
+        "tags": [],
+        "summary": "Get a hardware identity",
+        "operationId": "get_hardware_identity",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get a hardware identity",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [],
+        "summary": "Replace a hardware identity",
+        "operationId": "put_hardware_identity",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Replace a hardware identity",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -248,6 +537,36 @@
       }
     },
     "/api/v2/images": {
+      "get": {
+        "tags": [],
+        "summary": "List registered images",
+        "operationId": "list_images",
+        "responses": {
+          "200": {
+            "description": "List registered images",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
       "post": {
         "tags": [],
         "summary": "Register an image",
@@ -429,6 +748,46 @@
         "responses": {
           "201": {
             "description": "Create an instance",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/instances/resolve": {
+      "post": {
+        "tags": [],
+        "summary": "Resolve a complete instance without saving it",
+        "operationId": "resolve_instance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Resolve a complete instance without saving it",
             "content": {
               "application/json": {
                 "schema": {}
@@ -959,6 +1318,58 @@
         ]
       }
     },
+    "/api/v2/instances/{id}/engine-upgrade": {
+      "post": {
+        "tags": [],
+        "summary": "Upgrade a stopped instance to a compatible engine build",
+        "operationId": "upgrade_instance_engine",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngineUpgrade"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upgrade a stopped instance to a compatible engine build",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v2/instances/{id}/events": {
       "get": {
         "tags": [],
@@ -1287,6 +1698,49 @@
         "responses": {
           "200": {
             "description": "Send a helper action",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/instances/{id}/logs": {
+      "get": {
+        "tags": [],
+        "summary": "Read instance logs",
+        "operationId": "instance_logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read instance logs",
             "content": {
               "application/json": {
                 "schema": {}
@@ -1898,6 +2352,38 @@
         ]
       }
     },
+    "/api/v2/profiles": {
+      "get": {
+        "tags": [],
+        "summary": "List profiles",
+        "operationId": "list_profiles",
+        "responses": {
+          "200": {
+            "description": "List profiles",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v2/profiles/{id}": {
       "get": {
         "tags": [],
@@ -2118,7 +2604,7 @@
       "get": {
         "tags": [],
         "summary": "Open a ticketed WebSocket stream",
-        "description": "Use a one-use ticket issued by the stream or SPICE ticket endpoint. Kinds: vnc, video, audio-dbus, usbredir, lcm, frontpanel, spice-main, spice-playback, spice-record. See docs/operations/api-v2-streams-devices.md for binary framing and input messages.",
+        "description": "Use a one-use ticket issued by the stream or SPICE ticket endpoint. Kinds: vnc, video, audio-dbus, usbredir, serial, lcm, frontpanel, spice-main, spice-playback, spice-record. See docs/operations/api-v2-streams-devices.md for binary framing and input messages.",
         "operationId": "connect_stream",
         "parameters": [
           {
@@ -2244,12 +2730,21 @@
       "CreateInstance": {
         "type": "object",
         "required": [
-          "instance_id",
-          "image_id"
+          "instance_id"
         ],
         "properties": {
           "auto_remove": {
             "type": "boolean"
+          },
+          "context": {
+            "type": "object"
+          },
+          "hardware_identity": {
+            "type": "object"
+          },
+          "image": {
+            "type": "object",
+            "description": "Optional domain documents used by the server-owned resolver.  The ID\nfields remain the persisted references; these fields let callers send\na consistent read snapshot when the document is not in the workspace."
           },
           "image_id": {
             "type": "string"
@@ -2257,21 +2752,15 @@
           "instance_id": {
             "type": "string"
           },
-          "launch_plan": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/LaunchSpec"
-              }
-            ]
+          "overrides": {
+            "type": "object"
           },
           "profile": {},
           "profile_id": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateSnapshot": {
         "type": "object",
@@ -2289,6 +2778,23 @@
         "properties": {
           "force": {
             "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EngineUpgrade": {
+        "type": "object",
+        "required": [
+          "revision",
+          "engine"
+        ],
+        "properties": {
+          "engine": {
+            "type": "object"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
           }
         },
         "additionalProperties": false
@@ -2418,6 +2924,17 @@
           }
         }
       },
+      "ImportEngine": {
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          }
+        }
+      },
       "ImportVmmanagerBase": {
         "type": "object",
         "required": [
@@ -2450,22 +2967,19 @@
           "profile_id",
           "revision",
           "auto_remove",
-          "launch_plan"
+          "domain_document"
         ],
         "properties": {
           "auto_remove": {
             "type": "boolean"
           },
+          "domain_document": {},
           "image_id": {
             "type": "string"
           },
           "instance_id": {
             "type": "string"
           },
-          "launch_plan": {
-            "$ref": "#/components/schemas/LaunchSpec"
-          },
-          "profile": {},
           "profile_id": {
             "type": "string"
           },

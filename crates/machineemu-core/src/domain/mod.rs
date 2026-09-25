@@ -1,5 +1,10 @@
 //! Persisted records and identity validation; no filesystem ownership.
+pub mod configuration;
 use crate::{Error, Result};
+pub use configuration::{
+    CreateInstanceOverrides, HardwareIdentity, HardwareIdentityDocument, ImageDocument,
+    ImageManifestDocument, InstanceDocument, PartialProfile, ProfileDocument,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -49,8 +54,13 @@ pub struct ImageManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_engine_tracks: Vec<Id>,
     pub target: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub components: std::collections::BTreeMap<String, ImageBundleComponent>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub disk_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tpm_state_sha256: Option<String>,
 }
 

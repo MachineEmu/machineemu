@@ -2,6 +2,7 @@ use super::*;
 use super::{capabilities::*, plan::*};
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -17,8 +18,7 @@ fn console_uart_creates_interactive_serial_socket() {
     let mut argv = Vec::new();
     append_devices(
         &mut argv,
-        Some(&serde_json::json!({"vnc": true})),
-        Some(&serde_json::json!({"uart": true})),
+        Some(&serde_json::json!({"console":{"type":"serial"},"serial":{"type":"socket"}})),
         Path::new("/tmp/machineemu-test-instance"),
     )
     .unwrap();
@@ -34,8 +34,7 @@ fn h264_plan_uses_dbus_display_and_usb_tablet() {
     let mut argv = Vec::new();
     append_devices(
         &mut argv,
-        Some(&serde_json::json!({"vnc": false, "h264": true, "usb_tablet": true, "video": {"type":"virtio-vga-gl"}})),
-        None,
+        Some(&serde_json::json!({"console":{"type":"h264"},"usb_tablet": true, "video": {"model":"virtio-vga-gl"}})),
         Path::new("/tmp/machineemu-test-instance"),
     )
     .unwrap();
@@ -60,8 +59,7 @@ fn h264_plan_uses_dbus_display_and_usb_tablet() {
     assert!(
         append_devices(
             &mut invalid,
-            Some(&serde_json::json!({"h264":true})),
-            None,
+            Some(&serde_json::json!({"console":{"type":"h264"}})),
             Path::new("/tmp/machineemu-test-instance")
         )
         .is_err()
@@ -73,8 +71,7 @@ fn h264_gpu_plan_uses_dbus_display_and_usb_tablet() {
     let mut argv = Vec::new();
     append_devices(
         &mut argv,
-        Some(&serde_json::json!({"vnc": false, "h264": true, "usb_tablet": true, "video": {"type":"virtio-gpu-gl"}})),
-        None,
+        Some(&serde_json::json!({"console":{"type":"h264"},"usb_tablet": true, "video": {"model":"virtio-gpu-gl"}})),
         Path::new("/tmp/machineemu-test-instance"),
     )
     .unwrap();
@@ -99,8 +96,7 @@ fn h264_gpu_plan_uses_dbus_display_and_usb_tablet() {
     assert!(
         append_devices(
             &mut invalid,
-            Some(&serde_json::json!({"h264":true})),
-            None,
+            Some(&serde_json::json!({"console":{"type":"h264"}})),
             Path::new("/tmp/machineemu-test-instance")
         )
         .is_err()
@@ -110,17 +106,19 @@ fn h264_gpu_plan_uses_dbus_display_and_usb_tablet() {
 #[test]
 fn gl_video_conflicts_with_vnc_for_both_gpu_names() {
     for model in ["virtio-vga-gl", "virtio-gpu-gl"] {
-        for vnc in [serde_json::json!(true), serde_json::json!({"port":"auto"})] {
-            let devices = serde_json::json!({"vnc":vnc,"h264":true,"video":{"type":model}});
+        for console in [
+            serde_json::json!({"type":"vnc"}),
+            serde_json::json!({"type":"vnc","port":"auto"}),
+        ] {
+            let devices = serde_json::json!({"console":console,"video":{"model":model}});
             let error = append_devices(
                 &mut Vec::new(),
                 Some(&devices),
-                None,
                 Path::new("/tmp/machineemu-test-instance"),
             )
             .unwrap_err();
             assert!(
-                error.to_string().contains("vnc conflicts with GL video"),
+                error.to_string().contains("conflicts with GL video"),
                 "{error}"
             );
         }
@@ -142,7 +140,6 @@ fn usb_pointers_share_one_xhci_controller() {
         append_devices(
             &mut argv,
             Some(&serde_json::json!({"usb_mouse":mouse,"usb_tablet":tablet})),
-            None,
             Path::new("/tmp/machineemu-test-instance"),
         )
         .unwrap();
@@ -158,7 +155,6 @@ fn usb_pointers_share_one_xhci_controller() {
         append_devices(
             &mut Vec::new(),
             Some(&serde_json::json!({"usb_mouse":"yes"})),
-            None,
             Path::new("/tmp/machineemu-test-instance")
         )
         .is_err()
@@ -168,7 +164,7 @@ fn usb_pointers_share_one_xhci_controller() {
 #[test]
 fn dbus_and_spice_audio_plan_distinct_transports() {
     let runtime = Path::new("/tmp/machineemu-audio");
-    let devices = serde_json::json!({"vnc":true});
+    let devices = serde_json::json!({"console":{"type":"vnc"}});
     let mut dbus = vec!["-display".into(), "vnc=:0".into()];
     append_audio(
         &mut dbus,
@@ -271,11 +267,11 @@ fn profile_validation_rejects_choices_missing_from_target_qemu() {
 }
 
 #[test]
-fn profile_validation_checks_optional_qemu_version_pin() {
+fn profile_validation_ignores_removed_qemu_version_pin() {
     let profile = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "id": "fixture",
-        "engine": {"track": "fixture", "version": "10.2.4"},
+        "engine": ["fixture"],
         "machine": "pc",
     });
     let options = QemuOptions {
@@ -293,8 +289,7 @@ fn profile_validation_checks_optional_qemu_version_pin() {
         analysis_machine_properties: vec![],
         device_properties: vec![],
     };
-    let error = validate_profile_against_qemu(&profile, &options).unwrap_err();
-    assert!(error.to_string().contains("10.2.4"));
+    assert!(validate_profile_against_qemu(&profile, &options).is_ok());
 }
 
 #[test]
@@ -453,7 +448,7 @@ fn tpm_fixture(root: &Path) -> (Value, Value, PathBuf) {
           "source_revision": "test", "targets": ["x86_64-softmmu"], "executables": {"x86_64-softmmu": "bin/qemu"}, "dirty_source": false
         }"#).unwrap();
     let release = serde_json::json!({"schema_version":1,"engines":{"fixture":{"manifest":"manifest.json","build_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}});
-    let profile = serde_json::json!({"schema_version":1,"id":"fixture","engine":{"track":"fixture"},"machine":"pc-q35-10.2","resources":{"memory":"512MiB","vcpus":2},"network":{"type":"disabled"},"tpm":{"model":"tpm-crb","backend":{"type":"emulator","version":"2.0"}}});
+    let profile = serde_json::json!({"schema_version":2,"id":"fixture","engine":["fixture"],"machine":"pc-q35-10.2","resources":{"memory":"512MiB","vcpus":2},"network":{"type":"disabled"},"tpm":{"model":"tpm-crb","backend":{"type":"emulator","version":"2.0"}}});
     (profile, release, bundle)
 }
 
@@ -466,6 +461,7 @@ fn tpm_helper_defaults_to_swtpm_on_path() {
         release_set: release,
         bundle_root: bundle,
         asset_root: None,
+        image_components: BTreeMap::new(),
         target: "x86_64-softmmu".into(),
         runtime_dir: root.join("runtime"),
         state_dir: None,
@@ -490,6 +486,7 @@ fn tpm_helper_uses_the_configured_swtpm() {
         release_set: release,
         bundle_root: bundle,
         asset_root: None,
+        image_components: BTreeMap::new(),
         target: "x86_64-softmmu".into(),
         runtime_dir: root.join("runtime"),
         state_dir: None,
@@ -522,6 +519,7 @@ fn plan_with(root: &Path, mac: Option<&str>, instance: Option<&str>) -> Result<L
         release_set: release,
         bundle_root: bundle,
         asset_root: None,
+        image_components: BTreeMap::new(),
         target: "x86_64-softmmu".into(),
         runtime_dir: root.join("runtime"),
         state_dir: None,
@@ -596,6 +594,7 @@ fn bridge_networking_names_the_configured_helper() {
         release_set: release,
         bundle_root: bundle,
         asset_root: None,
+        image_components: BTreeMap::new(),
         target: "x86_64-softmmu".into(),
         runtime_dir: root.join("runtime"),
         state_dir: None,
@@ -626,6 +625,7 @@ fn bridge_networking_without_a_helper_leaves_qemu_its_default() {
         release_set: release,
         bundle_root: bundle,
         asset_root: None,
+        image_components: BTreeMap::new(),
         target: "x86_64-softmmu".into(),
         runtime_dir: root.join("runtime"),
         state_dir: None,
@@ -655,13 +655,14 @@ fn plan_resolves_a_fixture_engine_without_writing_runtime_state() {
           "source_revision": "test", "targets": ["x86_64-softmmu"], "executables": {"x86_64-softmmu": "bin/qemu"}, "dirty_source": false
         }"#).unwrap();
     let release = serde_json::json!({"schema_version":1,"engines":{"fixture":{"manifest":"manifest.json","build_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}});
-    let profile = serde_json::json!({"schema_version":1,"id":"fixture","engine":{"track":"fixture"},"machine":"pc-q35-10.2","resources":{"memory":"512MiB","vcpus":2},"network":{"type":"disabled"}});
+    let profile = serde_json::json!({"schema_version":2,"id":"fixture","engine":["fixture"],"machine":"pc-q35-10.2","resources":{"memory":"512MiB","vcpus":2},"network":{"type":"disabled"}});
     let runtime = root.join("runtime");
     let plan = build_plan(PlanInput {
         profile,
         release_set: release,
         bundle_root: bundle,
         asset_root: None,
+        image_components: BTreeMap::new(),
         target: "x86_64-softmmu".into(),
         runtime_dir: runtime.clone(),
         state_dir: None,
@@ -681,34 +682,85 @@ fn plan_resolves_a_fixture_engine_without_writing_runtime_state() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn release_set_uses_package_manifest_with_matching_track() {
+    let root = test_root("plan-package-track");
+    let bundle = root.join("bundle");
+    fs::create_dir_all(bundle.join("analysis-10.2/bin")).unwrap();
+    fs::write(bundle.join("analysis-10.2/bin/qemu"), b"fixture").unwrap();
+    fs::write(
+        bundle.join("analysis-10.2/engine-build.json"),
+        r#"{
+          "schema_version": 1, "track_id": "qemu-10.2-analysis", "build_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "source_revision": "test", "targets": ["x86_64-softmmu"], "executables": {"x86_64-softmmu": "bin/qemu"}, "dirty_source": false
+        }"#,
+    )
+    .unwrap();
+    let release = serde_json::json!({"schema_version":1,"engines":{"qemu-10.2-analysis":{"manifest":"analysis-10.2/engine-build.json","build_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}});
+    let profile = serde_json::json!({"schema_version":2,"id":"fixture","engine":["qemu-10.2-analysis"],"machine":"pc-q35-10.2","resources":{"memory":"512MiB","vcpus":2},"network":{"type":"disabled"}});
+    let plan = build_plan(PlanInput {
+        profile,
+        release_set: release,
+        bundle_root: bundle,
+        asset_root: None,
+        image_components: BTreeMap::new(),
+        target: "x86_64-softmmu".into(),
+        runtime_dir: root.join("runtime"),
+        state_dir: None,
+        seed: None,
+        swtpm: None,
+        bridge_helper: None,
+        mac: None,
+        instance: None,
+    })
+    .unwrap();
+    assert!(plan.argv[0].ends_with("analysis-10.2/bin/qemu"));
+    assert_eq!(
+        plan.manifest["engine"],
+        serde_json::json!({
+            "track_id": "qemu-10.2-analysis",
+            "build_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        })
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn bundled_input(root: &Path, name: &str) -> PlanInput {
     let (_, release, bundle) = tpm_fixture(root);
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../profiles")
-        .join(format!("{name}.json"));
-    let mut profile: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    profile["engine"] = serde_json::json!({"track":"fixture"});
-    let assets = root.join("assets");
-    let digest = "b".repeat(64);
-    fs::create_dir_all(assets.join("sha256")).unwrap();
-    fs::write(assets.join("sha256").join(&digest), b"fixture").unwrap();
-    let references = profile["external_assets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|asset| {
-            (
-                asset["id"].as_str().unwrap().to_owned(),
-                Value::from(format!("sha256:{digest}")),
-            )
-        })
-        .collect();
-    profile["assets"] = Value::Object(references);
+        .join(format!("{name}.yaml"));
+    let document: Value = serde_yaml::from_slice(&fs::read(path).unwrap()).unwrap();
+    let mut profile = document.get("spec").cloned().unwrap_or(document);
+    if name == "malware-analysis-x64" {
+        let identity_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../hardware-identities/malware-analysis-nuc11.yaml");
+        let identity: Value = serde_yaml::from_slice(&fs::read(identity_path).unwrap()).unwrap();
+        if let Some(analysis) = identity.get("spec").and_then(|spec| spec.get("analysis")) {
+            profile["analysis"] = analysis.clone();
+        }
+    }
+    profile["schema_version"] = serde_json::json!(2);
+    profile["id"] = serde_json::json!(name);
+    profile["engine"] = serde_json::json!(["fixture"]);
+    let image_components = [
+        ("disk", "/components/disk.qcow2"),
+        ("firmware", "/components/firmware.fd"),
+        ("tpm_state", "/components/tpm-state"),
+        ("kernel", "/components/Image"),
+        ("initrd", "/components/initramfs.cpio"),
+        ("boot", "/components/boot.img"),
+        ("spi", "/components/spi.img"),
+    ]
+    .into_iter()
+    .map(|(name, path)| (name.to_owned(), PathBuf::from(path)))
+    .collect();
     PlanInput {
         profile,
         release_set: release,
         bundle_root: bundle,
-        asset_root: Some(assets),
+        asset_root: None,
+        image_components,
         target: "x86_64-softmmu".into(),
         runtime_dir: root.join("runtime"),
         state_dir: Some(root.join("state")),
@@ -867,11 +919,38 @@ fn bundled_profiles_render_vsock_and_boot_settings() {
 }
 
 #[test]
+fn planner_supports_virtio_vga_with_vnc() {
+    let root = test_root("planner-virtio-vga");
+    let mut input = bundled_input(&root, "debian13-cloud");
+    input.profile["devices"]["video"] = serde_json::json!({"model":"virtio-vga"});
+    input.profile["devices"]["console"] = serde_json::json!({"type":"vnc"});
+    let plan = build_plan(input.clone()).unwrap();
+    assert!(plan.argv.windows(2).any(|pair| pair == ["-vga", "none"]));
+    assert!(
+        plan.argv
+            .windows(2)
+            .any(|pair| pair == ["-device", "virtio-vga,id=me-video"])
+    );
+    assert!(
+        plan.argv
+            .windows(2)
+            .any(|pair| pair == ["-display", "vnc=:0"])
+    );
+    assert!(!plan.argv.windows(2).any(|pair| pair == ["-vga", "std"]));
+
+    input.profile["devices"]["video"]["model"] = Value::from("unknown-gpu");
+    let error = build_plan(input).unwrap_err().to_string();
+    assert!(error.contains("unknown-gpu"), "{error}");
+    assert!(error.contains("supported models:"), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn planner_rejects_silent_hardware_mismatches() {
     let root = test_root("planner-mismatches");
     let input = bundled_input(&root, "win11-dev");
     let mut vga = input.clone();
-    vga.profile["devices"]["video"] = serde_json::json!({"type":"vga"});
+    vga.profile["devices"]["video"] = serde_json::json!({"model":"vga"});
     assert!(
         build_plan(vga)
             .unwrap()
@@ -932,19 +1011,27 @@ fn test_root(name: &str) -> PathBuf {
 fn udm_pro_uses_board_cpu_and_disposable_native_storage() {
     let root = test_root("udm-pro");
     let (_, release, bundle) = tpm_fixture(&root);
-    let mut profile: Value =
-        serde_json::from_str(include_str!("../../../../profiles/udm-pro.json")).unwrap();
-    profile["engine"] = serde_json::json!({"track":"fixture"});
-    let assets = root.join("assets");
-    fs::create_dir_all(assets.join("sha256")).unwrap();
-    let digest = "b".repeat(64);
-    fs::write(assets.join("sha256").join(&digest), b"fixture").unwrap();
-    profile["assets"] = serde_json::json!({"kernel":format!("sha256:{digest}"), "initrd":format!("sha256:{digest}"), "boot":format!("sha256:{digest}"), "spi":format!("sha256:{digest}")});
+    let document: Value =
+        serde_yaml::from_str(include_str!("../../../../profiles/udm-pro.yaml")).unwrap();
+    let mut profile = document.get("spec").cloned().unwrap_or(document);
+    profile["schema_version"] = serde_json::json!(2);
+    profile["id"] = serde_json::json!("udm-pro");
+    profile["engine"] = serde_json::json!(["fixture"]);
+    let image_components: BTreeMap<String, PathBuf> = [
+        ("kernel", "/components/Image"),
+        ("initrd", "/components/initramfs.cpio"),
+        ("boot", "/components/boot.img"),
+        ("spi", "/components/spi.img"),
+    ]
+    .into_iter()
+    .map(|(name, path)| (name.to_owned(), PathBuf::from(path)))
+    .collect();
     let input = PlanInput {
         profile,
         release_set: release,
         bundle_root: bundle,
-        asset_root: Some(assets),
+        asset_root: None,
+        image_components,
         target: "x86_64-softmmu".into(),
         runtime_dir: root.join("runtime"),
         state_dir: None,
@@ -973,22 +1060,20 @@ fn udm_pro_uses_board_cpu_and_disposable_native_storage() {
     }
     assert!(plan.preparation.disk_overlay.is_none());
     let mut missing = input.clone();
-    missing.profile["assets"]
-        .as_object_mut()
-        .unwrap()
-        .remove("spi");
+    missing.image_components.remove("spi");
     assert!(
         build_plan(missing)
             .unwrap_err()
             .to_string()
-            .contains("not imported: spi")
+            .contains("image_component is unavailable: spi")
     );
     let mut lab = input.clone();
-    let assets = lab.profile["assets"].clone();
-    lab.profile =
-        serde_json::from_str(include_str!("../../../../profiles/udm-pro-lab.json")).unwrap();
-    lab.profile["engine"] = serde_json::json!({"track":"fixture"});
-    lab.profile["assets"] = assets;
+    let lab_document: Value =
+        serde_yaml::from_str(include_str!("../../../../profiles/udm-pro-lab.yaml")).unwrap();
+    lab.profile = lab_document.get("spec").cloned().unwrap_or(lab_document);
+    lab.profile["schema_version"] = serde_json::json!(2);
+    lab.profile["id"] = serde_json::json!("udm-pro-lab");
+    lab.profile["engine"] = serde_json::json!(["fixture"]);
     lab.bridge_helper = Some(PathBuf::from("/run/wrappers/bin/qemu-bridge-helper"));
     let plan = build_plan(lab.clone()).unwrap();
     let backends: Vec<_> = plan

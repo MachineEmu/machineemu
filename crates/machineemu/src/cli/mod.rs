@@ -1,11 +1,8 @@
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 use std::{
+    collections::BTreeMap,
     fs,
-    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -116,6 +113,31 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Import engine tar.gz bundles through the daemon with progress.
+    #[command(visible_alias = "import-engine")]
+    InstallEngines {
+        /// Engine archives accessible on the daemon host.
+        #[arg(long, required = true, num_args = 1..)]
+        source: Vec<PathBuf>,
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
+    },
+    /// Initialize user config and workspace-local default profiles.
+    Init {
+        /// Config file to create. Defaults to $XDG_CONFIG_HOME/machineemu/config.yaml.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Workspace root. Defaults to $XDG_DATA_HOME/machineemu/workspace.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Replace existing config/profile files.
+        #[arg(long)]
+        force: bool,
+    },
     /// Add, remove, change, or inspect devices on a running instance.
     Device {
         #[command(subcommand)]
@@ -168,30 +190,49 @@ enum Command {
         #[arg(long, default_value = "machineemu-workspace")]
         workspace: PathBuf,
     },
-    /// Migrate legacy SQLite image metadata to editable images/<id>/manifest.json files.
+    /// Migrate legacy SQLite image metadata to editable images/<id>/manifest.yaml files.
     MigrateImages {
         #[arg(long, default_value = "machineemu-workspace")]
         workspace: PathBuf,
     },
-    /// List registered workspace images.
+    /// Show or remove unreferenced immutable workspace objects.
+    ///
+    /// The default is a dry run.  Use `--collect` only after reviewing the
+    /// candidate list; creation staging and all published metadata are marked
+    /// before any object is removed.
+    GarbageCollect {
+        #[arg(long, default_value = "machineemu-workspace")]
+        workspace: PathBuf,
+        #[arg(long)]
+        collect: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List images registered with the daemon.
     Images {
-        #[arg(long, default_value = "machineemu-workspace")]
-        workspace: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
         #[arg(long)]
         json: bool,
     },
-    /// List named profiles, preferring workspace profiles over bundled profiles.
+    /// List profiles registered with the daemon.
     Profiles {
-        #[arg(long, default_value = "machineemu-workspace")]
-        workspace: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
         #[arg(long)]
         json: bool,
     },
-    /// Show an instance's local console log (or QEMU errors if boot failed).
+    /// Show an instance's console log through the daemon.
     Logs {
         instance: String,
-        #[arg(long)]
-        workspace: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
         #[arg(short, long)]
         follow: bool,
         #[arg(short = 'n', long, default_value_t = 100)]
@@ -200,11 +241,13 @@ enum Command {
         #[arg(long, default_value = "auto", value_parser = ["auto", "serial", "stderr", "stdout"])]
         source: String,
     },
-    /// Attach to the local UART. Ctrl-] detaches without stopping the guest.
+    /// Attach to the UART through a ticketed daemon WebSocket. Ctrl-] detaches.
     Serial {
         instance: String,
-        #[arg(long)]
-        workspace: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
     },
     /// Stop an instance through the daemon, retaining its writable state.
     Stop {
@@ -238,8 +281,6 @@ enum Command {
     /// Show an instance's processes, sockets, listeners and live hardware.
     Inspect {
         instance: String,
-        #[arg(long)]
-        workspace: Option<PathBuf>,
         #[arg(long)]
         json: bool,
         #[arg(long, default_value = "127.0.0.1:8787")]
@@ -393,9 +434,11 @@ enum Command {
     /// Register an image manifest already present in the workspace.
     RegisterImage {
         #[arg(long)]
-        workspace: PathBuf,
-        #[arg(long)]
         manifest: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        daemon: String,
+        #[arg(long, default_value = "machineemu-dev-token")]
+        token: String,
     },
 }
 
@@ -426,45 +469,51 @@ pub async fn main() {
 async fn run() -> Result<(), machineemu_core::engine::Error> {
     let cli = Cli::parse();
     match cli.command {
+        Command::InstallEngines {
+            source,
+            workspace,
+            daemon,
+            token,
+        } => {
+            let (daemon, token) = effective_client(&daemon, &token)?;
+            client::ensure_daemon(&daemon, &token, &workspace).await?;
+            for archive in source {
+                let response = daemon_request(
+                    &daemon,
+                    &token,
+                    "POST",
+                    "/api/v2/engine-imports",
+                    Some(serde_json::json!({"source":archive})),
+                )
+                .await?;
+                let events = response["events_url"].as_str().ok_or_else(|| {
+                    machineemu_core::engine::Error::Invalid("missing events_url".into())
+                })?;
+                let status = response["status_url"].as_str().ok_or_else(|| {
+                    machineemu_core::engine::Error::Invalid("missing status_url".into())
+                })?;
+                let manifest: serde_json::Value =
+                    follow_import(&daemon, &token, events, status).await?;
+                println!("{}", serde_json::to_string_pretty(&manifest).unwrap());
+            }
+        }
+        Command::Init {
+            config,
+            workspace,
+            force,
+        } => init(config.as_deref(), workspace.as_deref(), force)?,
         Command::Device {
             command,
             workspace,
             daemon,
             token,
         } => device::run(command, &workspace, &daemon, &token).await?,
-        Command::Config {
-            instance,
-            hardware,
-            workspace,
-            daemon,
-            token,
-        } => {
+        Command::Config { instance, .. } => {
             Id::new("instance", instance.clone())
                 .map_err(|e| machineemu_core::engine::Error::Invalid(e.to_string()))?;
-            let path = format!("/api/v2/instances/{instance}/config");
-            let mut document = daemon_request(&daemon, &token, "GET", &path, None).await?;
-            let mut plan: machineemu_core::launch::LaunchSpec =
-                serde_json::from_value(document["launch_plan"].clone())
-                    .map_err(|e| machineemu_core::engine::Error::Invalid(e.to_string()))?;
-            let (config, config_path) = machineemu_core::config::load_config(None)
-                .map_err(|e| machineemu_core::engine::Error::Invalid(e.to_string()))?;
-            let workspace = if workspace == Path::new("machineemu-workspace") {
-                config
-                    .client
-                    .as_ref()
-                    .and_then(|c| c.workspace.clone())
-                    .or_else(|| config.server.as_ref().and_then(|s| s.workspace.clone()))
-                    .map(|p| {
-                        machineemu_core::config::resolve_config_path(config_path.as_deref(), p)
-                    })
-                    .unwrap_or(workspace)
-            } else {
-                workspace
-            };
-            hardware.apply(&mut plan, &workspace, &instance)?;
-            document["launch_plan"] = serde_json::to_value(plan).unwrap();
-            daemon_request(&daemon, &token, "PUT", &path, Some(document)).await?;
-            println!("configured {instance}");
+            return Err(machineemu_core::engine::Error::Invalid(
+                "config no longer edits launch plans; use the complete instance domain document API or recreate the instance".into(),
+            ));
         }
         Command::Show {
             kind,
@@ -516,22 +565,74 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
                 workspace.root().join("images").display()
             );
         }
-        Command::Images { workspace, json } => inventory::images(&workspace, json)?,
-        Command::Profiles { workspace, json } => inventory::profiles(&workspace, json)?,
+        Command::GarbageCollect {
+            workspace,
+            collect,
+            json,
+        } => {
+            let workspace = Workspace::open(workspace)
+                .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+            let report = workspace
+                .collect_garbage(!collect)
+                .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|error| {
+                        machineemu_core::engine::Error::Invalid(error.to_string())
+                    })?
+                );
+            } else {
+                println!(
+                    "{} {} object(s); {} candidate(s), {} removed",
+                    if report.dry_run {
+                        "dry-run retained"
+                    } else {
+                        "retained"
+                    },
+                    report.retained.len(),
+                    report.candidates.len(),
+                    report.removed.len()
+                );
+                for digest in &report.candidates {
+                    println!(
+                        "{} {}",
+                        if report.dry_run {
+                            "candidate"
+                        } else {
+                            "removed"
+                        },
+                        digest
+                    );
+                }
+            }
+        }
+        Command::Images {
+            daemon,
+            token,
+            json,
+        } => inventory::images(&daemon, &token, json).await?,
+        Command::Profiles {
+            daemon,
+            token,
+            json,
+        } => inventory::profiles(&daemon, &token, json).await?,
         Command::Logs {
             instance,
-            workspace,
+            daemon,
+            token,
             follow,
             lines,
             source,
         } => {
-            console::logs(&instance, workspace.as_deref(), follow, lines, &source)?;
+            console::logs(&instance, &daemon, &token, follow, lines, &source).await?;
         }
         Command::Serial {
             instance,
-            workspace,
+            daemon,
+            token,
         } => {
-            console::serial(&instance, workspace.as_deref())?;
+            console::serial(&instance, &daemon, &token).await?;
         }
         Command::Stop {
             instance,
@@ -587,11 +688,29 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
         }
         Command::Inspect {
             instance,
-            workspace,
             json,
             daemon,
             token,
-        } => inspect::inspect(&instance, workspace.as_deref(), &daemon, &token, json).await?,
+        } => {
+            let value = daemon_request(
+                &daemon,
+                &token,
+                "GET",
+                &format!("/api/v2/instances/{instance}"),
+                None,
+            )
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            } else {
+                print!(
+                    "{}",
+                    serde_yaml::to_string(&value).map_err(|error| {
+                        machineemu_core::engine::Error::Invalid(error.to_string())
+                    })?
+                );
+            }
+        }
         Command::AnalysisTarget {
             instances,
             workspace,
@@ -722,6 +841,7 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
                 release_set: load_document(&release_set)?,
                 bundle_root,
                 asset_root,
+                image_components: BTreeMap::new(),
                 target,
                 runtime_dir,
                 state_dir,
@@ -808,7 +928,8 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
             let status_url = response["status_url"].as_str().ok_or_else(|| {
                 machineemu_core::engine::Error::Invalid("daemon response has no status_url".into())
             })?;
-            let image = follow_image_import(&daemon, &token, events_url, status_url).await?;
+            let image: machineemu_core::domain::ImageManifest =
+                follow_import(&daemon, &token, events_url, status_url).await?;
             if let Some(destination) = export_bundle {
                 Workspace::export_image_bundle_from_root(&workspace, &image.image_id, &destination)
                     .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
@@ -819,15 +940,25 @@ async fn run() -> Result<(), machineemu_core::engine::Error> {
             );
         }
         Command::RegisterImage {
-            workspace,
             manifest,
+            daemon,
+            token,
         } => {
             let image: machineemu_core::domain::ImageManifest =
                 serde_json::from_value(load_document(&manifest)?)
                     .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))?;
-            Workspace::open(workspace)
-                .and_then(|workspace| workspace.register_image(&image))
-                .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+            daemon_request(
+                &daemon,
+                &token,
+                "POST",
+                "/api/v2/images",
+                Some(
+                    serde_json::to_value(&image).map_err(|error| {
+                        machineemu_core::engine::Error::Invalid(error.to_string())
+                    })?,
+                ),
+            )
+            .await?;
             println!("registered {}", image.image_id.as_str());
         }
     }
@@ -842,16 +973,224 @@ fn default_vmmanager_base_source(image_id: &str) -> PathBuf {
         .join(image_id)
 }
 
-async fn follow_image_import(
+fn init(
+    config: Option<&Path>,
+    workspace: Option<&Path>,
+    force: bool,
+) -> Result<(), machineemu_core::engine::Error> {
+    let config_path = config
+        .map(Path::to_owned)
+        .unwrap_or_else(default_config_path);
+    let workspace = workspace
+        .map(Path::to_owned)
+        .unwrap_or_else(default_workspace_path);
+    let workspace = absolutize(&workspace);
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+    }
+    fs::create_dir_all(workspace.join("profiles"))
+        .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+    for directory in ["images", "instances", "staging"] {
+        fs::create_dir_all(workspace.join(directory))
+            .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+    }
+    let config_status =
+        write_init_file(&config_path, &default_config_document(&workspace)?, force)?;
+    println!("{config_status}: {}", config_path.display());
+    for (name, document) in default_profiles() {
+        let path = workspace.join("profiles").join(format!("{name}.json"));
+        let status = write_init_file(&path, &profile_document(&document)?, force)?;
+        println!("{status}: {}", path.display());
+    }
+    println!("workspace: {}", workspace.display());
+    Ok(())
+}
+
+fn write_init_file(
+    path: &Path,
+    contents: &str,
+    force: bool,
+) -> Result<&'static str, machineemu_core::engine::Error> {
+    let existed = path.exists();
+    if existed && !force {
+        return Ok("kept");
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+    }
+    fs::write(path, contents)
+        .map_err(|error| machineemu_core::engine::Error::Runtime(error.to_string()))?;
+    Ok(if existed { "wrote" } else { "created" })
+}
+
+fn default_config_document(workspace: &Path) -> Result<String, machineemu_core::engine::Error> {
+    serde_yaml::to_string(&serde_json::json!({
+        "server": {
+            "workspace": workspace,
+            "unix_socket": workspace.join("control.sock"),
+            "listen": "127.0.0.1:8787",
+            "bearer_token": "machineemu-dev-token"
+        },
+        "client": {
+            "workspace": workspace,
+            "unix_socket": workspace.join("control.sock"),
+            "endpoint": "127.0.0.1:8787",
+            "token": "machineemu-dev-token"
+        },
+        "defaults": {
+            "profile": "default-uefi",
+            "engine": "qemu-system"
+        },
+        "helpers": {
+            "qemu_bridge_helper": "/run/wrappers/bin/qemu-bridge-helper"
+        },
+        "engines": {
+            "qemu-system": {
+                "path": "/run/current-system/sw/bin"
+            }
+        }
+    }))
+    .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))
+}
+
+fn profile_document(profile: &serde_json::Value) -> Result<String, machineemu_core::engine::Error> {
+    serde_json::to_string_pretty(profile)
+        .map(|mut text| {
+            text.push('\n');
+            text
+        })
+        .map_err(|error| machineemu_core::engine::Error::Invalid(error.to_string()))
+}
+
+fn default_profiles() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        (
+            "default-bios",
+            default_profile(
+                "default-bios",
+                serde_json::Value::Null,
+                "Standard BIOS x86_64 VM",
+            ),
+        ),
+        (
+            "default-uefi",
+            default_profile(
+                "default-uefi",
+                serde_json::json!({
+                    "loader": {
+                        "source": {
+                            "path": "/run/libvirt/nix-ovmf/edk2-x86_64-code.fd"
+                        },
+                        "readonly": true,
+                        "secure": false
+                    },
+                    "nvram": {
+                        "source": {
+                            "path": "/run/libvirt/nix-ovmf/edk2-i386-vars.fd"
+                        }
+                    }
+                }),
+                "UEFI x86_64 VM",
+            ),
+        ),
+        (
+            "default-uefi-secure",
+            default_profile(
+                "default-uefi-secure",
+                serde_json::json!({
+                    "loader": {
+                        "source": {
+                            "path": "/run/libvirt/nix-ovmf/edk2-x86_64-secure-code.fd"
+                        },
+                        "readonly": true,
+                        "secure": true
+                    },
+                    "nvram": {
+                        "source": {
+                            "path": "/run/libvirt/nix-ovmf/edk2-i386-vars.fd"
+                        }
+                    }
+                }),
+                "Secure Boot UEFI x86_64 VM",
+            ),
+        ),
+    ]
+}
+
+fn default_profile(id: &str, firmware: serde_json::Value, name: &str) -> serde_json::Value {
+    let mut profile = serde_json::json!({
+        "schema_version": 2,
+        "id": id,
+        "name": name,
+        "target": "x86_64-softmmu",
+        "machine": "q35",
+        "resources": {
+            "memory": "4GiB",
+            "vcpus": 2
+        },
+        "network": {
+            "type": "user"
+        },
+        "devices": {
+            "console": {
+                "type": "vnc"
+            },
+            "video": {
+                "model": "virtio-vga"
+            },
+            "serial": {
+                "type": "file"
+            },
+            "usb_tablet": true
+        }
+    });
+    if !firmware.is_null()
+        && let Some(object) = profile.as_object_mut()
+    {
+        object.insert("smm".into(), serde_json::Value::Bool(true));
+        object.insert("firmware".into(), firmware);
+    }
+    profile
+}
+
+fn default_config_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("machineemu/config.yaml")
+}
+
+fn default_workspace_path() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from(".local/share"))
+        .join("machineemu/workspace")
+}
+
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(path))
+            .unwrap_or_else(|_| path.to_owned())
+    }
+}
+
+async fn follow_import<T: serde::de::DeserializeOwned>(
     daemon: &str,
     token: &str,
     events_url: &str,
     status_url: &str,
-) -> Result<machineemu_core::domain::ImageManifest, machineemu_core::engine::Error> {
+) -> Result<T, machineemu_core::engine::Error> {
     let mut last_event_id = None::<String>;
     let mut progress = ImportProgress::new();
     loop {
-        let mut terminal = None::<Result<machineemu_core::domain::ImageManifest, String>>;
+        let mut terminal = None::<Result<T, String>>;
         let request_last_event_id = last_event_id.clone();
         let stream_result = client::daemon_sse_request(
             daemon,
@@ -870,7 +1209,16 @@ async fn follow_image_import(
                             "invalid import progress event: {error}"
                         ))
                     })?;
-                match event.event.as_str() {
+                let kind = if event.event == "snapshot" {
+                    match data["status"].as_str() {
+                        Some("complete") => "complete",
+                        Some("failed") => "failed",
+                        _ => "snapshot",
+                    }
+                } else {
+                    event.event.as_str()
+                };
+                match kind {
                     "snapshot" | "progress" | "component-start" | "component-complete" => {
                         progress.render(&data);
                     }
@@ -950,7 +1298,7 @@ impl ImportProgress {
             .unwrap_or("running");
         let byte_phase = matches!(
             phase,
-            "copying+hashing" | "queued" | "complete" | "verified"
+            "copying+hashing" | "queued" | "complete" | "verified" | "extracting" | "verifying"
         );
         let percent = if total == 0 {
             0.0
@@ -1031,6 +1379,7 @@ use client::{daemon_request, effective_client};
 use launch::run_rust_owned;
 
 mod console;
+#[cfg(test)]
 mod inspect;
 mod inventory;
 mod kvm;

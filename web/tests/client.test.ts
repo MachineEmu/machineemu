@@ -1,168 +1,54 @@
 import { describe, expect, it } from "bun:test";
 
 import { MachineEmuApiError, MachineEmuClient } from "../src/client";
-import { createCatalogSession } from "../src/catalog-flow";
+
+function testClient(response: unknown, status = 200) {
+  const calls: Request[] = [];
+  const client = new MachineEmuClient({
+    baseUrl: "http://127.0.0.1", token: "token",
+    fetchImpl: async (input, init) => {
+      calls.push(new Request(input, init));
+      return new Response(JSON.stringify(response), { status, headers: { "Content-Type": "application/json" } });
+    },
+  });
+  return { client, calls };
+}
 
 describe("MachineEmuClient", () => {
-  it("sends authenticated read requests with encoded session IDs", async () => {
-    const calls: Request[] = [];
-    const client = new MachineEmuClient({
-      baseUrl: "http://127.0.0.1",
-      token: "token",
-      fetchImpl: async (input, init) => {
-        calls.push(new Request(input, init));
-        return new Response(JSON.stringify({ session_id: "a/b", instance_id: "instance", state: "created" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      },
-    });
-
-    const result = await client.inspectSession("instance", "a/b");
-    expect(result.state).toBe("created");
-    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/sessions/instance/a%2Fb");
-    expect(calls[0].headers.get("X-MachineEmu-Token")).toBe("token");
+  it("uses bearer auth and the v2 health endpoint", async () => {
+    const { client, calls } = testClient({ ok: true, api: "v2" });
+    expect(await client.health()).toEqual({ ok: true, api: "v2" });
+    expect(calls[0].url).toBe("http://127.0.0.1/api/v2/health");
+    expect(calls[0].headers.get("Authorization")).toBe("Bearer token");
   });
 
-  it("requests a read-only instance state inventory", async () => {
-    const calls: Request[] = [];
-    const client = new MachineEmuClient({
-      baseUrl: "http://127.0.0.1", token: "token",
-      fetchImpl: async (input, init) => {
-        calls.push(new Request(input, init));
-        return new Response(JSON.stringify({ schema_version: 1, files: [], file_count: 0 }), { status: 200 });
-      },
-    });
-    const result = await client.inventoryInstanceState("instance/one");
-    expect(result.file_count).toBe(0);
-    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/instances/instance%2Fone/state/inventory");
-    expect(calls[0].method).toBe("GET");
+  it("lists v2 instance status records and exposes network metadata", async () => {
+    const { client } = testClient([{ instance: { instance_id: "instance", profile_id: "demo", image_id: "img", state: "running", revision: 2 }, ip: "192.0.2.10", configured: true, auto_remove: false }]);
+    await expect(client.listSessions()).resolves.toEqual([{ session_id: "instance", instance_id: "instance", profile_id: "demo", image_id: "img", state: "running", revision: 2, ip: "192.0.2.10", configured: true, auto_remove: false }]);
   });
 
-  it("lists public session summaries", async () => {
-    const calls: Request[] = [];
-    const client = new MachineEmuClient({
-      baseUrl: "http://127.0.0.1", token: "token",
-      fetchImpl: async (input, init) => {
-        calls.push(new Request(input, init));
-        return new Response(JSON.stringify({ sessions: [{
-          session_id: "session", instance_id: "instance", profile_id: "demo", machine: "virt",
-          state: "stopped", capabilities: {},
-        }] }), { status: 200 });
-      },
-    });
-    const sessions = await client.listSessions();
-    expect(sessions[0].session_id).toBe("session");
-    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/sessions");
-  });
-
-  it("sends same-origin mutation bodies as JSON", async () => {
-    const calls: Request[] = [];
-    const client = new MachineEmuClient({
-      baseUrl: "http://127.0.0.1",
-      token: "token",
-      fetchImpl: async (input, init) => {
-        calls.push(new Request(input, init));
-        return new Response(JSON.stringify({ session_id: "session", state: "failed" }), { status: 200 });
-      },
-    });
-
-    await client.reconcileSession({ instance_id: "instance", session_id: "session" });
+  it("creates an instance with a v2 JSON body", async () => {
+    const { client, calls } = testClient({ instance_id: "instance", state: "created" });
+    await client.createCatalogSession({ profile_id: "demo", image_id: "img", instance_id: "instance" });
+    expect(calls[0].url).toBe("http://127.0.0.1/api/v2/instances");
     expect(calls[0].method).toBe("POST");
-    expect(calls[0].headers.get("Content-Type")).toBe("application/json");
-    expect(await calls[0].json()).toEqual({ instance_id: "instance", session_id: "session" });
+    expect(await calls[0].json()).toEqual({ profile_id: "demo", image_id: "img", instance_id: "instance" });
   });
 
-  it("requests a short-lived terminal ticket over the authenticated API", async () => {
-    const calls: Request[] = [];
-    const client = new MachineEmuClient({
-      baseUrl: "http://127.0.0.1", token: "token",
-      fetchImpl: async (input, init) => {
-        calls.push(new Request(input, init));
-        return new Response(JSON.stringify({ ticket: "opaque", expires_in_seconds: 30 }), { status: 200 });
-      },
-    });
-    const ticket = await client.createTerminalTicket("instance", "session/one");
-    expect(ticket.ticket).toBe("opaque");
-    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/sessions/instance/session%2Fone/terminal/ticket");
-    expect(await calls[0].json()).toEqual({});
+  it("issues a ticket for the v2 serial stream", async () => {
+    const { client, calls } = testClient({ ticket: "opaque", expires_in_seconds: 30, kind: "serial" });
+    await client.createTerminalTicket("instance", "ignored");
+    expect(calls[0].url).toBe("http://127.0.0.1/api/v2/instances/instance/streams/serial/ticket");
+    expect(await calls[0].json()).toEqual({ control: true });
   });
 
-  it("preserves a safe API error detail for the interface", async () => {
-    const client = new MachineEmuClient({
-      token: "token",
-      fetchImpl: async () => new Response(JSON.stringify({ detail: "catalog is not configured" }), {
-        status: 404, headers: { "Content-Type": "application/json" },
-      }),
-    });
-
-    try {
-      await client.listProfiles();
-      throw new Error("expected request to fail");
-    } catch (error) {
+  it("preserves the daemon error field", async () => {
+    const { client } = testClient({ error: "instance not found" }, 404);
+    try { await client.getProfile("missing"); throw new Error("expected request to fail"); }
+    catch (error) {
       expect(error).toBeInstanceOf(MachineEmuApiError);
       expect((error as MachineEmuApiError).status).toBe(404);
-      expect((error as Error).message).toBe("catalog is not configured");
+      expect((error as Error).message).toBe("instance not found");
     }
-  });
-
-  it("uses catalog IDs for profile selection and session creation", async () => {
-    const calls: Request[] = [];
-    const client = new MachineEmuClient({
-      baseUrl: "http://127.0.0.1",
-      token: "token",
-      fetchImpl: async (input, init) => {
-        calls.push(new Request(input, init));
-        return new Response(JSON.stringify({ id: "demo", machine: "virt" }), { status: 200 });
-      },
-    });
-
-    await client.getProfile("demo/lab");
-    await client.createCatalogSession({ profile_id: "demo", instance_id: "instance", session_id: "session" });
-    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/catalog/profiles/demo%2Flab");
-    expect(calls[1].url).toBe("http://127.0.0.1/api/v1/catalog/sessions");
-    expect(await calls[1].json()).toEqual({ profile_id: "demo", instance_id: "instance", session_id: "session" });
-  });
-
-  it("orchestrates catalog selection before session creation", async () => {
-    const calls: string[] = [];
-    const client = {
-      listProfiles: async () => [{ id: "demo", machine: "virt" } as never],
-      createCatalogSession: async (request: { profile_id: string; instance_id: string; session_id: string }) => {
-        calls.push(`${request.profile_id}:${request.instance_id}:${request.session_id}`);
-        return { session_id: request.session_id, manifest: "/runtime/manifest.json", state: "created" } as never;
-      },
-    };
-    const result = await createCatalogSession(client, {
-      profileId: "demo", instanceId: "instance", sessionId: "session",
-    });
-    expect(result.profile.id).toBe("demo");
-    expect(result.session.state).toBe("created");
-    expect(calls).toEqual(["demo:instance:session"]);
-  });
-
-  it("rejects empty catalog identifiers before making a request", async () => {
-    const client = {
-      listProfiles: async () => { throw new Error("must not be called"); },
-      createCatalogSession: async () => { throw new Error("must not be called"); },
-    } as never;
-    await expect(createCatalogSession(client, {
-      profileId: "demo", instanceId: "   ", sessionId: "session",
-    })).rejects.toThrow("Profile, instance ID, and session ID are required.");
-  });
-
-  it("covers session-scoped snapshot and hotplug mutations", async () => {
-    const calls: Request[] = [];
-    const client = new MachineEmuClient({
-      baseUrl: "http://127.0.0.1", token: "token",
-      fetchImpl: async (input, init) => {
-        calls.push(new Request(input, init));
-        return new Response(JSON.stringify({ snapshot_id: "snap", state: "created" }), { status: 200 });
-      },
-    });
-    await client.createSessionSnapshot("instance", "session/one", "snap");
-    await client.networkAttach("instance", "session/one", { type: "user", model: { driver: "virtio-net-pci" } });
-    expect(calls[0].url).toBe("http://127.0.0.1/api/v1/sessions/instance/session%2Fone/snapshots");
-    expect(await calls[1].json()).toEqual({ type: "user", model: { driver: "virtio-net-pci" } });
   });
 });

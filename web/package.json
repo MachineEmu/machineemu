@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "generate:api-types": "openapi-typescript ../contracts/openapi.json -o src/api-types.d.ts",
+    "generate:api-types": "openapi-typescript ../contracts/openapi-v2.json -o src/api-types.d.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev": "vite --host 127.0.0.1",

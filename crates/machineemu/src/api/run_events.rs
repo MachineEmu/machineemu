@@ -339,6 +339,7 @@ mod tests {
             engine_track: Id::new("track", "track01").unwrap(),
             supported_engine_tracks: vec![],
             target: "x86_64-softmmu".into(),
+            components: std::collections::BTreeMap::new(),
             disk_sha256: "a".repeat(64),
             firmware_sha256: None,
             tpm_state_sha256: None,
@@ -524,6 +525,20 @@ mod tests {
     #[tokio::test]
     async fn disposable_instance_is_removed_after_unexpected_exit() {
         let (root, state, run, mut process) = fixture("disposable-exit");
+        state
+            .workspace
+            .lock()
+            .unwrap()
+            .set_domain_document(
+                &run.instance_id,
+                serde_json::json!({
+                    "api_version": "machineemu.io/v1",
+                    "kind": "Instance",
+                    "metadata": {"name": run.instance_id.as_str(), "revision": 1},
+                    "spec": {"engine": {"track": "track01", "build_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "executable": "qemu"}}
+                }),
+            )
+            .unwrap();
         state
             .workspace
             .lock()

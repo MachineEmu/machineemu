@@ -3,12 +3,19 @@
   "release": "unreleased",
   "host_architectures": ["x86_64-linux"],
   "engines": {
-    "unifi-10.2": {
-      "manifest": "unifi-10.2/engine-build.json",
-      "build_digest": "d6d8fce9d6c4a6e286d70c2bb31f9ad0aa56d4cb3cfdf2131bfbe4d9c1b8bfcc",
+    "qemu-10.2-analysis": {
+      "manifest": "analysis-10.2/engine-build.json",
+      "build_digest": "a01e24d1cc568e842bea126f3b516cec8b20885d350370190904177b21fb31c5",
       "require_executable_hashes": true,
       "status": "experimental",
-      "source_commit": "cab9e34"
+      "source_commit": "3e0bcba"
+    },
+    "qemu-10.2-unifi": {
+      "manifest": "unifi-10.2/engine-build.json",
+      "build_digest": "d569f3e0e61079430cdc02d944a3aa252ff378bd9eb965adeb95b31af82fd6e1",
+      "require_executable_hashes": true,
+      "status": "experimental",
+      "source_commit": "3e0bcba"
     }
   },
   "profiles": {},

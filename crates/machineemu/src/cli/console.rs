@@ -31,6 +31,7 @@ pub(super) fn instance_dir(instance: &str, workspace: Option<&Path>) -> Result<P
     Ok(path)
 }
 
+#[cfg(test)]
 fn log_path(directory: &Path, source: &str) -> Result<PathBuf, Error> {
     let names: &[&str] = match source {
         "serial" => &["serial.log"],
@@ -56,103 +57,103 @@ fn log_path(directory: &Path, source: &str) -> Result<PathBuf, Error> {
         })
 }
 
-pub(super) fn logs(
+pub(super) async fn logs(
     instance: &str,
-    workspace: Option<&Path>,
+    daemon: &str,
+    token: &str,
     follow: bool,
     lines: usize,
     source: &str,
 ) -> Result<(), Error> {
-    let directory = instance_dir(instance, workspace)?;
-    let path = log_path(&directory, source)?;
-    let mut command = ProcessCommand::new("tail");
-    command.args(["-n", &lines.to_string()]);
-    if follow {
-        command.arg("-F");
+    let mut previous = String::new();
+    loop {
+        let path = format!("/api/v2/instances/{instance}/logs?source={source}&lines={lines}");
+        let value = super::daemon_request(daemon, token, "GET", &path, None).await?;
+        let content = value
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let addition = content.strip_prefix(&previous).unwrap_or(content);
+        print!("{addition}");
+        std::io::Write::flush(&mut std::io::stdout()).map_err(error)?;
+        if !follow {
+            return Ok(());
+        }
+        previous = content.to_owned();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    let status = command.arg("--").arg(&path).status().map_err(error)?;
-    if !status.success() {
-        return Err(error(format!(
-            "tail {} exited with {status}",
-            path.display()
-        )));
-    }
-    Ok(())
 }
 
-#[cfg(unix)]
-pub(super) fn serial(instance: &str, workspace: Option<&Path>) -> Result<(), Error> {
-    let directory = instance_dir(instance, workspace)?;
-    let path = directory.join("serial.sock");
-    if !path.exists() {
-        if directory.join("serial.log").is_file() {
-            eprintln!(
-                "{instance}: this run has a file-only console; following output read-only (Ctrl-C exits). Restart with console.uart=true or devices.serial=socket for interactive input."
-            );
-            return logs(instance, workspace, true, 100, "serial");
-        }
-        return Err(error(format!(
-            "{instance}: no UART socket in this run; console.uart=true takes effect on the next launch. Restart the instance, or inspect `machineemu logs {instance}` for startup errors"
-        )));
-    }
-    let mut socket = UnixStream::connect(&path).map_err(|e| error(format!("cannot attach to {instance}: {e}; the instance may be stopped. Use `machineemu logs {instance}` for saved output")))?;
-    let mut input_socket = socket.try_clone().map_err(error)?;
-    let signal_socket = socket.try_clone().map_err(error)?;
-    // Signal handlers close the stream so the terminal guard is dropped even
-    // when another process sends SIGINT/SIGTERM. Raw-mode Ctrl-C goes to UART.
-    let runtime = tokio::runtime::Runtime::new().map_err(error)?;
-    let signal_task = runtime.spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate())?;
-        let mut interrupt = signal(SignalKind::interrupt())?;
-        let mut hangup = signal(SignalKind::hangup())?;
-        tokio::select! {
-            _ = term.recv() => {},
-            _ = interrupt.recv() => {},
-            _ = hangup.recv() => {},
-        }
-        signal_socket.shutdown(std::net::Shutdown::Both)
-    });
-    let _terminal = Terminal::raw()?;
-    eprintln!("Attached to {instance}. Ctrl-] detaches; Ctrl-C is sent to the guest.");
-    thread::spawn(move || {
+pub(super) async fn serial(instance: &str, daemon: &str, token: &str) -> Result<(), Error> {
+    use futures_util::{SinkExt, StreamExt};
+    use std::io::{Read, Write};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    Id::new("instance", instance.to_owned()).map_err(error)?;
+    let ticket = super::daemon_request(
+        daemon,
+        token,
+        "POST",
+        &format!("/api/v2/instances/{instance}/streams/serial/ticket"),
+        Some(serde_json::json!({"control":true,"takeover":false})),
+    )
+    .await?;
+    let ticket = ticket
+        .get("ticket")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| error("daemon returned no serial stream ticket"))?;
+    let (endpoint, _) = super::effective_client(daemon, token)?;
+    let stream = super::client::connect_daemon(&endpoint).await?;
+    let url = format!("ws://machineemu/ws/v2/instances/{instance}/serial?ticket={ticket}");
+    let mut request = url.into_client_request().map_err(error)?;
+    request
+        .headers_mut()
+        .insert("origin", "http://machineemu".parse().unwrap());
+    let (websocket, _) = tokio_tungstenite::client_async(request, stream)
+        .await
+        .map_err(error)?;
+    let (mut sender, mut receiver) = websocket.split();
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    tokio::task::spawn_blocking(move || {
         let mut input = std::io::stdin().lock();
         let mut bytes = [0; 4096];
-        loop {
-            let count = match input.read(&mut bytes) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            let end = bytes[..count]
-                .iter()
-                .position(|b| *b == 0x1d)
-                .unwrap_or(count);
-            if input_socket.write_all(&bytes[..end]).is_err() || end != count {
-                break;
-            }
-        }
-        let _ = input_socket.shutdown(std::net::Shutdown::Both);
-    });
-    let result = (|| {
-        let mut output = std::io::stdout().lock();
-        let mut bytes = [0; 4096];
-        loop {
-            let count = socket.read(&mut bytes).map_err(error)?;
+        while let Ok(count) = input.read(&mut bytes) {
             if count == 0 {
                 break;
             }
-            output.write_all(&bytes[..count]).map_err(error)?;
-            output.flush().map_err(error)?;
+            let end = bytes[..count]
+                .iter()
+                .position(|byte| *byte == 0x1d)
+                .unwrap_or(count);
+            if end > 0 && input_tx.blocking_send(bytes[..end].to_vec()).is_err() {
+                break;
+            }
+            if end != count {
+                break;
+            }
         }
-        Ok(())
-    })();
-    signal_task.abort();
-    result
-}
-
-#[cfg(not(unix))]
-pub(super) fn serial(_instance: &str, _workspace: Option<&Path>) -> Result<(), Error> {
-    Err(error("interactive serial requires Unix sockets"))
+    });
+    let _terminal = Terminal::raw()?;
+    eprintln!("Attached to {instance}. Ctrl-] detaches; Ctrl-C is sent to the guest.");
+    loop {
+        tokio::select! {
+            input = input_rx.recv() => match input {
+                Some(bytes) => sender.send(Message::Binary(bytes.into())).await.map_err(error)?,
+                None => { let _ = sender.send(Message::Close(None)).await; break; }
+            },
+            message = receiver.next() => match message {
+                Some(Ok(Message::Binary(bytes))) => {
+                    let mut output = std::io::stdout().lock();
+                    output.write_all(&bytes).and_then(|_| output.flush()).map_err(error)?;
+                }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {},
+                Some(Err(error_value)) => return Err(error(error_value)),
+            },
+            _ = tokio::signal::ctrl_c() => { let _ = sender.send(Message::Close(None)).await; break; }
+        }
+    }
+    Ok(())
 }
 
 struct Terminal(Option<String>);

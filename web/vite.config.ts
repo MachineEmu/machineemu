@@ -11,11 +11,11 @@ const apiProxy = (target: string, token: string): ProxyOptions => {
     ws: true,
     configure(proxy) {
       proxy.on("proxyReq", (request) => {
-        if (token) request.setHeader("X-MachineEmu-Token", token);
+        if (token) request.setHeader("Authorization", `Bearer ${token}`);
         request.setHeader("Origin", origin);
       });
       proxy.on("proxyReqWs", (request) => {
-        if (token) request.setHeader("X-MachineEmu-Token", token);
+        if (token) request.setHeader("Authorization", `Bearer ${token}`);
         request.setHeader("Origin", origin);
       });
     },

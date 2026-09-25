@@ -18,6 +18,7 @@ Create a single-use ticket with `POST /api/v2/instances/{id}/streams/{kind}/tick
 | `video` | QEMU D-Bus display through `display-stream`, exposed at `instances/{id}/video.sock` | One framed display-stream record per binary frame, including H.264 video and D-Bus audio when enabled. Viewers may use `control:false`; JSON `request_idr` is allowed. `control:true` also permits keyboard, pointer, resize, and clipboard control messages. |
 | `audio-dbus` | The same QEMU D-Bus display and `display-stream` socket | Playback only: framed audio configuration records (type 5) and PCM data records (type 6). Request with `control:false`; browser messages other than WebSocket control frames are rejected. |
 | `usbredir` | `instances/{id}/usbredir.sock` | Raw usbredir protocol bytes in binary frames, both directions. Use `control:true`. |
+| `serial` | `instances/{id}/sockets/serial.sock` | Raw UART bytes in binary frames, both directions. Use `control:true`. A serial ticket and WebSocket may be opened while the instance is stopped; the daemon waits for QEMU's socket so the client captures output from the beginning of boot. The CLI does this automatically with `machineemu serial INSTANCE`. |
 | `lcm` | Supervised UDM Pro LCD hub at `instances/{id}/display.sock` | Read-only `unifi.lcm.v1` JSON text frames. Use `control:false`. |
 | `frontpanel` | Supervised UDM Pro panel hub at `instances/{id}/frontpanel.sock` | Read-only `unifi.frontpanel.v1` JSON text frames. Use `control:false`. UDM Pro port link state is derived from configuration and host carrier, rather than a modeled LED register. |
 
@@ -26,6 +27,16 @@ records with `type: "cursor"`. Each record contains guest pixel position,
 visibility, hotspot, and the full little-endian ARGB cursor image. The latest
 cursor state is replayed when a viewer joins or resynchronizes; viewers draw it
 over the decoded H.264 frame.
+
+To capture the complete serial boot, create the instance first, attach in one
+terminal, and start it in another:
+
+```sh
+machineemu create --profile PROFILE INSTANCE
+machineemu serial INSTANCE
+# In another terminal:
+machineemu start INSTANCE
+```
 
 For H.264, set `devices.h264: true` and `devices.video.type: virtio-vga-gl` in a Rust-planned profile, or start QEMU with `-display dbus,p2p=on,gl=on` and a GL-capable virtual GPU in a custom launch plan. A Rust-planned profile cannot enable VNC with a GL video device; select one display mode. Build this workspace's `display-stream` binary (`nix develop -c cargo build -p display-stream --release`), then configure the daemon's `--display-stream` path or put the binary on `PATH`. The first video ticket starts the streamer, passes a private D-Bus socket to QEMU through QMP, and records to `instances/{id}/screen.mp4`. The streamer captures QEMU DMABUF scanout and uses VA-API H.264 hardware encoding when available; its own software fallback reports its encoder and `hardware` status in the video configuration record. The daemon stops the streamer with the VM. Records use the streamer's 16-byte display header: bytes 4–7 are the big-endian payload length, followed by that many payload bytes. Records over 16 MiB are rejected. The USB redirection stream requires a usbredir-capable client, and the `usbredir` device must first be attached below. Browser WebUSB does not itself speak usbredir.
 

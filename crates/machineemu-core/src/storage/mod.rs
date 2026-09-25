@@ -9,10 +9,14 @@ use std::{
 };
 mod configuration;
 mod digests;
+mod gc;
 pub use configuration::InstanceDocument;
+pub use gc::{GarbageCollectionReport, GarbageCollectionResult};
+pub use migration::{MigrationEntry, MigrationOptions, MigrationReport, migrate_legacy_tree};
 mod images;
 mod instances;
 mod lock;
+mod migration;
 mod operations;
 mod runs;
 mod snapshots;
@@ -79,6 +83,11 @@ impl Workspace {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Mark and optionally remove unreferenced immutable objects.
+    pub fn collect_garbage(&self, dry_run: bool) -> Result<GarbageCollectionResult> {
+        gc::collect(self, dry_run)
     }
 
     /// Open another connection under this process's existing workspace lease.

@@ -1,9 +1,8 @@
 # MachineEmu web client
 
-This browser still consumes the retained API v1
-[`../contracts/openapi.json`](../contracts/openapi.json). The Rust daemon serves
-API v2, described by [`../contracts/openapi-v2.json`](../contracts/openapi-v2.json),
-so the browser has not completed its API migration.
+The browser consumes the Rust daemon's API v2, described by
+[`../contracts/openapi-v2.json`](../contracts/openapi-v2.json). The checked-in
+TypeScript declarations are generated from that contract.
 
 Install JavaScript tooling, generate API types, and type-check with:
 
@@ -16,12 +15,11 @@ bun run build
 ```
 
 For frontend development, copy `.env.example` to `.env` and set
-`MACHINEEMU_API_TOKEN` when using an API v1 server. Vite proxies `/api` and
-`/ws` to `MACHINEEMU_API_URL` (default: `http://127.0.0.1:8000`) and adds the
-token to proxied requests. The removed Python server supplied that API; the
-current Rust daemon does not serve these v1 routes. The token is not exposed
-to the browser bundle.
+`MACHINEEMU_API_TOKEN` when the daemon requires bearer authentication. Vite
+proxies `/api` and `/ws` to `MACHINEEMU_API_URL` (default:
+`http://127.0.0.1:8000`) and adds the token to proxied requests. The token is
+not exposed to the browser bundle.
 
-The current client covers its original health, inspection, reconciliation,
-start, and stop flows. Type generation above still targets the retained v1
-schema; it does not generate Rust API v2 types.
+The client covers profile/image discovery, instance lifecycle, configuration
+metadata, screenshots, and ticketed v2 streams. Regenerate the declarations
+after changing the Rust contract with `bun run generate:api-types`.

@@ -82,6 +82,10 @@ fn socket_endpoint(root: &std::path::Path, id: &str, name: &str) -> Result<Endpo
     Ok(Endpoint::Unix(path))
 }
 
+fn pending_serial_endpoint(root: &std::path::Path, id: &str) -> Endpoint {
+    Endpoint::Unix(root.join("instances").join(id).join("sockets/serial.sock"))
+}
+
 async fn vnc_endpoint(
     state: &AppState,
     root: &std::path::Path,
@@ -288,13 +292,18 @@ pub(super) async fn issue_stream_ticket(
             let id_value = Id::new("instance", id.clone())?;
             if !matches!(
                 kind.as_str(),
-                "vnc" | "video" | "audio-dbus" | "usbredir" | "lcm" | "frontpanel"
+                "vnc" | "video" | "audio-dbus" | "usbredir" | "serial" | "lcm" | "frontpanel"
             ) {
                 return Err(RuntimeError::Process("unknown stream kind".into()));
             }
             if kind == "usbredir" && !request.control {
                 return Err(RuntimeError::Process(
                     "this stream requires control permission".into(),
+                ));
+            }
+            if kind == "serial" && !request.control {
+                return Err(RuntimeError::Process(
+                    "serial streams require control permission".into(),
                 ));
             }
             if request.takeover && (!request.control || !matches!(kind.as_str(), "vnc" | "video")) {
@@ -312,14 +321,21 @@ pub(super) async fn issue_stream_ticket(
                     .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
                 owner.attach()?
             };
-            let run = workspace
-                .live_run(&id_value)?
-                .ok_or_else(|| RuntimeError::Process("instance has no live run".into()))?;
+            let run = workspace.live_run(&id_value)?;
+            if kind != "serial" && run.is_none() {
+                return Err(RuntimeError::Process("instance has no live run".into()));
+            }
+            if kind == "serial" {
+                workspace.instance(&id_value)?;
+            }
             let root = workspace.root().to_owned();
             let endpoint = match kind.as_str() {
-                "vnc" => vnc_endpoint(&state, &root, &id, &run).await?,
-                "video" | "audio-dbus" => video_endpoint(&state, &root, &id, &run).await?,
+                "vnc" => vnc_endpoint(&state, &root, &id, run.as_ref().unwrap()).await?,
+                "video" | "audio-dbus" => {
+                    video_endpoint(&state, &root, &id, run.as_ref().unwrap()).await?
+                }
                 "usbredir" => socket_endpoint(workspace.root(), &id, "usbredir.sock")?,
+                "serial" => pending_serial_endpoint(workspace.root(), &id),
                 "lcm" => socket_endpoint(workspace.root(), &id, "display.sock")?,
                 "frontpanel" => socket_endpoint(workspace.root(), &id, "frontpanel.sock")?,
                 _ => unreachable!(),
@@ -339,7 +355,11 @@ pub(super) async fn issue_stream_ticket(
                 value.clone(),
                 StreamTicket {
                     instance_id: id,
-                    run_id: run.run_id.as_str().into(),
+                    run_id: run
+                        .as_ref()
+                        .map(|run| run.run_id.as_str())
+                        .unwrap_or("pending")
+                        .into(),
                     kind: kind.clone(),
                     control: request.control,
                     takeover: request.takeover,
@@ -570,7 +590,11 @@ fn claim_control(
     } else {
         ticket.kind.as_str()
     };
-    let key = format!("{}:{}:{group}", ticket.instance_id, ticket.run_id);
+    let key = if ticket.kind == "serial" {
+        format!("{}:serial", ticket.instance_id)
+    } else {
+        format!("{}:{}:{group}", ticket.instance_id, ticket.run_id)
+    };
     let revoked = Arc::new(AtomicBool::new(false));
     {
         let mut current = owners
@@ -626,7 +650,9 @@ pub(super) async fn connect_stream(
                     .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
                 workspace.live_run(&instance_id)?
             };
-            if !matches!(live, Some(ref run) if run.run_id.as_str() == ticket.run_id) {
+            if ticket.kind != "serial"
+                && !matches!(live, Some(ref run) if run.run_id.as_str() == ticket.run_id)
+            {
                 return Err(RuntimeError::Process(
                     "stream ticket belongs to an inactive run".into(),
                 ));
@@ -707,6 +733,23 @@ pub(super) async fn connect_stream(
 
 trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Transport for T {}
+
+async fn connect_pending_serial(path: &std::path::Path) -> std::io::Result<tokio::net::UnixStream> {
+    loop {
+        match tokio::net::UnixStream::connect(path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 struct RfbInputGate {
     handshake: VecDeque<usize>,
@@ -829,6 +872,11 @@ async fn relay(
     revoked: Option<Arc<AtomicBool>>,
 ) -> std::io::Result<()> {
     let stream: Box<dyn Transport> = match ticket.endpoint {
+        Endpoint::Unix(path) if ticket.kind == "serial" => {
+            // The ticket and WebSocket may predate VM start. Keep retrying the
+            // daemon-local UART until QEMU publishes it.
+            Box::new(connect_pending_serial(&path).await?)
+        }
         Endpoint::Unix(path) => Box::new(
             tokio::time::timeout(
                 Duration::from_secs(3),
@@ -1007,6 +1055,21 @@ async fn relay(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn pending_serial_connects_when_socket_appears() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("serial.sock");
+        let connecting = tokio::spawn({
+            let path = path.clone();
+            async move { connect_pending_serial(&path).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let (client, accepted) = tokio::join!(connecting, listener.accept());
+        client.unwrap().unwrap();
+        accepted.unwrap();
+    }
+
     #[test]
     fn view_only_rfb_filters_fragmented_keyboard_mouse_and_clipboard() {
         let mut gate = RfbInputGate::default();
@@ -1083,6 +1146,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(old.revoked.load(Ordering::Acquire));
+
+        let serial = claim_control(&ticket("serial", true, false), owners.clone())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            claim_control(&ticket("serial", true, false), owners.clone()),
+            Err(StatusCode::CONFLICT)
+        ));
+        drop(serial);
+        let replacement = claim_control(&ticket("serial", true, false), owners.clone())
+            .unwrap()
+            .unwrap();
+        drop(replacement);
         drop(old);
         assert!(owners.lock().unwrap().contains_key("lab01:run01:display"));
         drop(new);

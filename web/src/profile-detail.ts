@@ -17,6 +17,12 @@ export interface ProfileDetail {
   assetRequirements: ExternalAssetRequirement[];
 }
 
+export function profileId(profile: CatalogProfile): string {
+  const value = object(profile);
+  const metadata = object(value.metadata);
+  return text(value.id) ?? text(metadata.name) ?? "unknown";
+}
+
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -30,21 +36,23 @@ function text(value: unknown): string | undefined {
 /** Select only redistributable profile metadata that is useful to an operator. */
 export function profileDetail(profile: CatalogProfile): ProfileDetail {
   const value = object(profile);
-  const resources = Object.fromEntries(Object.entries(object(value.resources)).filter(
+  const spec = Object.keys(object(value.spec)).length ? object(value.spec) : value;
+  const resources = Object.fromEntries(Object.entries(object(spec.resources)).filter(
     ([, resource]) => typeof resource === "string" || typeof resource === "number",
   )) as Record<string, string | number>;
-  const devices = Object.entries(object(value.devices)).flatMap(([name, enabled]) => enabled === true ? [name] : []);
-  const assetRequirements = Array.isArray(value.external_assets) ? value.external_assets.flatMap((item) => {
+  const devices = Object.entries(object(spec.devices)).flatMap(([name, enabled]) => enabled === true ? [name] : []);
+  const assetRequirements = Array.isArray(spec.external_assets) ? spec.external_assets.flatMap((item) => {
     const asset = object(item);
     const id = text(asset.id);
     const kind = text(asset.kind);
     return id && kind ? [{ id, kind, required: asset.required === true, note: text(asset.note) }] : [];
   }) : [];
-  const network = object(value.network);
+  const network = object(spec.network);
+  const metadata = object(value.metadata);
   return {
-    id: text(value.id) ?? "unknown",
-    machine: text(value.machine) ?? "unknown",
-    target: text(value.target),
+    id: text(value.id) ?? text(metadata.name) ?? "unknown",
+    machine: text(spec.machine) ?? "unknown",
+    target: text(spec.target),
     resources,
     devices,
     networkMode: text(network.mode),

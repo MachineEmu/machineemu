@@ -14,6 +14,7 @@ pub struct PlanInput {
     pub release_set: Value,
     pub bundle_root: PathBuf,
     pub asset_root: Option<PathBuf>,
+    pub image_components: BTreeMap<String, PathBuf>,
     pub target: String,
     pub runtime_dir: PathBuf,
     pub state_dir: Option<PathBuf>,
@@ -72,40 +73,16 @@ pub struct DiskPreparation {
 
 pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
     let profile = object(&input.profile, "profile")?;
-    if number(profile, "schema_version")? != 1 {
-        return Err(Error::Invalid("profile schema_version must be 1".into()));
+    if number(profile, "schema_version")? != 2 {
+        return Err(Error::Invalid("profile schema_version must be 2".into()));
     }
     let profile_id = string(profile, "id")?;
     let machine = string(profile, "machine")?;
     validate_launch_settings(profile)?;
     let target = &input.target;
-    let track = string(
-        object(
-            profile
-                .get("engine")
-                .ok_or_else(|| invalid("profile.engine is required"))?,
-            "profile.engine",
-        )?,
-        "track",
-    )?;
-    let (engine, executable) =
-        resolve_engine(&input.release_set, &input.bundle_root, &track, target)?;
-    if let Some(expected) = profile
-        .get("engine")
-        .and_then(|engine| engine.get("build_digest"))
-        .and_then(Value::as_str)
-    {
-        let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
-        let actual = engine
-            .get("build_digest")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if expected != actual {
-            return Err(invalid(
-                "profile.engine.build_digest does not match the resolved engine",
-            ));
-        }
-    }
+    let tracks = engine_tracks(profile)?;
+    let (track, engine, executable) =
+        resolve_engine_ordered(&input.release_set, &input.bundle_root, &tracks, target)?;
     let swtpm = input.swtpm.unwrap_or_else(|| PathBuf::from("swtpm"));
     let bridge_helper = input.bridge_helper;
     let runtime = input
@@ -218,13 +195,16 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
             format!("file={},media=cdrom,readonly=on", seed.display()),
         ]);
     }
-    let assets = resolve_assets(profile, input.asset_root.as_deref())?;
+    let sources = SourceResolver {
+        components: &input.image_components,
+        base_dir: input.asset_root.as_deref(),
+    };
     let mut prep = Preparation::default();
     append_firmware(
         &mut argv,
         &mut prep,
         profile.get("firmware"),
-        &assets,
+        &sources,
         &state,
     )?;
     if machine == "udm-pro" {
@@ -238,7 +218,7 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
             }
         }
     }
-    append_direct_boot(&mut argv, profile.get("boot"), &assets)?;
+    append_direct_boot(&mut argv, profile.get("boot"), &sources)?;
     // Analysis device identity descriptors, forged onto the disk and VGA below.
     // They borrow the analysis plan, so this must precede its later move.
     let storage_desc = analysis
@@ -248,13 +228,13 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         .as_ref()
         .and_then(|a| a.payload.pointer("/analysis/device_descriptors/display"));
     if machine == "udm-pro" {
-        append_udm_storage(&mut argv, profile.get("storage"), &assets)?;
+        append_udm_storage(&mut argv, profile.get("storage"), &sources)?;
     } else {
         append_storage(
             &mut argv,
             &mut prep,
             profile.get("storage"),
-            &assets,
+            &sources,
             &machine,
             &state,
             storage_desc,
@@ -276,12 +256,7 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
     } else {
         None
     };
-    append_devices(
-        &mut argv,
-        profile.get("devices"),
-        profile.get("console"),
-        &runtime,
-    )?;
+    append_devices(&mut argv, profile.get("devices"), &runtime)?;
     let vsock_cid = profile
         .get("devices")
         .and_then(|devices| devices.get("vsock"))
@@ -311,7 +286,7 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
         && profile
             .get("devices")
             .and_then(|d| d.get("video"))
-            .and_then(|v| v.get("type"))
+            .and_then(|v| v.get("model"))
             .and_then(Value::as_str)
             == Some("vga")
     {
@@ -338,7 +313,7 @@ pub fn build_plan(input: PlanInput) -> Result<LaunchPlan, Error> {
     if let Some(analysis) = &analysis {
         argv.extend(analysis.argv.clone());
     }
-    let mut manifest = serde_json::json!({"schema_version":1,"profile_id":profile_id,"target":target,"machine":machine,"machine_argument":machine_arg,"engine":engine,"resources":{"memory":argv[argv.iter().position(|x|x=="-m").unwrap()+1],"vcpus":vcpus},"qmp_socket":qmp,"pidfile":pidfile,"assets":assets});
+    let mut manifest = serde_json::json!({"schema_version":1,"profile_id":profile_id,"target":target,"machine":machine,"machine_argument":machine_arg,"engine":engine,"engine_track":track,"resources":{"memory":argv[argv.iter().position(|x|x=="-m").unwrap()+1],"vcpus":vcpus},"qmp_socket":qmp,"pidfile":pidfile,"image_components":input.image_components});
     if let Some(analysis) = analysis {
         manifest["analysis_argv"] = serde_json::json!(analysis.argv);
         manifest["analysis_payload"] = analysis.payload;
@@ -400,10 +375,9 @@ fn validate_launch_settings(profile: &Map<String, Value>) -> Result<(), Error> {
         if ![
             "nic",
             "mac",
-            "vnc",
+            "console",
             "video",
             "audio",
-            "h264",
             "usb_tablet",
             "usb_mouse",
             "guest_agent",
@@ -427,22 +401,29 @@ fn validate_launch_settings(profile: &Map<String, Value>) -> Result<(), Error> {
     {
         return Err(invalid("profile.devices.vsock must be a boolean"));
     }
-    if devices
-        .get("vnc")
-        .is_some_and(|v| !v.is_boolean() && !v.is_object())
-    {
+    let console = devices
+        .get("console")
+        .map(|v| object(v, "profile.devices.console"))
+        .transpose()?;
+    let console_type = console
+        .and_then(|console| console.get("type").and_then(Value::as_str))
+        .unwrap_or("none");
+    if !matches!(console_type, "none" | "vnc" | "h264" | "serial") {
         return Err(invalid(
-            "profile.devices.vnc must be a boolean or a mapping",
+            "profile.devices.console.type must be none, vnc, h264, or serial",
         ));
     }
     if devices.get("guest_agent").is_some_and(|v| !v.is_boolean()) {
         return Err(invalid("profile.devices.guest_agent must be a boolean"));
     }
-    if devices
-        .get("serial")
-        .is_some_and(|v| !matches!(v.as_str(), Some("file" | "socket")))
-    {
-        return Err(invalid("profile.devices.serial must be file or socket"));
+    if let Some(serial) = devices.get("serial") {
+        let serial = object(serial, "profile.devices.serial")?;
+        let kind = serial.get("type").and_then(Value::as_str).unwrap_or("none");
+        if !matches!(kind, "none" | "file" | "socket" | "stdout") {
+            return Err(invalid(
+                "profile.devices.serial.type must be none, file, socket, or stdout",
+            ));
+        }
     }
     if devices
         .get("nic")
@@ -455,16 +436,13 @@ fn validate_launch_settings(profile: &Map<String, Value>) -> Result<(), Error> {
             .as_str()
             .ok_or_else(|| invalid("profile.devices.mac must be a string"))?)?;
     }
-    let vnc = devices
-        .get("vnc")
-        .is_some_and(|v| v.as_bool() == Some(true) || v.is_object());
     let video = devices
         .get("video")
         .map(|v| object(v, "profile.devices.video"))
         .transpose()?;
     if let Some(video) = video {
         for key in video.keys() {
-            if !["type", "heads", "primary"].contains(&key.as_str()) {
+            if !["model", "heads", "primary"].contains(&key.as_str()) {
                 return Err(invalid(&format!(
                     "profile.devices.video.{key} is not supported"
                 )));
@@ -480,21 +458,26 @@ fn validate_launch_settings(profile: &Map<String, Value>) -> Result<(), Error> {
             return Err(invalid("profile.devices.video.primary only supports true"));
         }
         let model = video
-            .get("type")
+            .get("model")
             .and_then(Value::as_str)
-            .ok_or_else(|| invalid("profile.devices.video.type is required"))?;
-        if vnc && matches!(model, "virtio-vga-gl" | "virtio-gpu-gl") {
-            return Err(invalid("profile.devices.vnc conflicts with GL video"));
-        }
-        if !matches!(model, "vga" | "virtio-vga-gl" | "virtio-gpu-gl") {
+            .ok_or_else(|| invalid("profile.devices.video.model is required"))?;
+        if console_type == "vnc" && matches!(model, "virtio-vga-gl" | "virtio-gpu-gl") {
             return Err(invalid(
-                "profile.devices.video.type is not supported by the launch planner",
+                "profile.devices.console=vnc conflicts with GL video",
             ));
         }
-        if matches!(model, "virtio-vga-gl" | "virtio-gpu-gl")
-            && devices.get("h264") != Some(&Value::Bool(true))
-        {
-            return Err(invalid("GL video requires profile.devices.h264=true"));
+        if !matches!(
+            model,
+            "vga" | "virtio-vga" | "virtio-vga-gl" | "virtio-gpu-gl"
+        ) {
+            return Err(invalid(&format!(
+                "profile.devices.video.model {model:?} is not supported by the launch planner; supported models: vga, virtio-vga, virtio-vga-gl, virtio-gpu-gl"
+            )));
+        }
+        if matches!(model, "virtio-vga-gl" | "virtio-gpu-gl") && console_type != "h264" {
+            return Err(invalid(
+                "GL video requires profile.devices.console.type=h264",
+            ));
         }
     }
     Ok(())
@@ -767,15 +750,14 @@ fn append_network(
 pub(super) fn append_devices(
     argv: &mut Vec<String>,
     v: Option<&Value>,
-    console: Option<&Value>,
     runtime: &Path,
 ) -> Result<(), Error> {
     let empty = Value::Object(Map::new());
     let devices = object(v.unwrap_or(&empty), "profile.devices")?;
-    let console = object(console.unwrap_or(&empty), "profile.console")?;
-    if console.get("uart").is_some_and(|value| !value.is_boolean()) {
-        return Err(invalid("profile.console.uart must be a boolean"));
-    }
+    let console = devices
+        .get("console")
+        .map(|value| object(value, "profile.devices.console"))
+        .transpose()?;
     if devices
         .get("guest_agent")
         .and_then(Value::as_bool)
@@ -794,11 +776,10 @@ pub(super) fn append_devices(
             "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0".into(),
         ]);
     }
-    let serial_mode = if console.get("uart").and_then(Value::as_bool) == Some(true) {
-        Some("socket")
-    } else {
-        devices.get("serial").and_then(Value::as_str)
-    };
+    let serial_mode = devices
+        .get("serial")
+        .and_then(|serial| serial.get("type"))
+        .and_then(Value::as_str);
     match serial_mode {
         Some("socket") => {
             let socket = runtime
@@ -824,16 +805,14 @@ pub(super) fn append_devices(
             "-serial".into(),
             format!("file:{}", runtime.join("serial.log").display()),
         ]),
+        Some("stdout") => argv.extend(["-serial".into(), "stdio".into()]),
         _ => {}
     }
-    let vnc = devices
-        .get("vnc")
-        .is_some_and(|value| value.as_bool() == Some(true) || value.is_object());
-    let h264 = match devices.get("h264") {
-        None => false,
-        Some(Value::Bool(value)) => *value,
-        _ => return Err(invalid("profile.devices.h264 must be a boolean")),
-    };
+    let console_type = console
+        .and_then(|console| console.get("type").and_then(Value::as_str))
+        .unwrap_or("none");
+    let vnc = console_type == "vnc";
+    let h264 = console_type == "h264";
     let usb_tablet = match devices.get("usb_tablet") {
         None => false,
         Some(Value::Bool(value)) => *value,
@@ -846,10 +825,20 @@ pub(super) fn append_devices(
     };
     let video_model = devices
         .get("video")
-        .and_then(|video| video.get("type"))
+        .and_then(|video| video.get("model"))
         .and_then(Value::as_str);
+    if video_model == Some("virtio-vga") {
+        argv.extend([
+            "-vga".into(),
+            "none".into(),
+            "-device".into(),
+            "virtio-vga,id=me-video".into(),
+        ]);
+    }
     if vnc && matches!(video_model, Some("virtio-vga-gl" | "virtio-gpu-gl")) {
-        return Err(invalid("profile.devices.vnc conflicts with GL video"));
+        return Err(invalid(
+            "profile.devices.console.type=vnc conflicts with GL video",
+        ));
     }
     if usb_tablet || usb_mouse {
         // Q35 does not necessarily create a usable USB bus by itself. Share
@@ -865,7 +854,7 @@ pub(super) fn append_devices(
     if h264 {
         if !matches!(video_model, Some("virtio-vga-gl" | "virtio-gpu-gl")) {
             return Err(invalid(
-                "profile.devices.h264 requires devices.video.type=virtio-vga-gl or virtio-gpu-gl",
+                "profile.devices.console.type=h264 requires devices.video.model=virtio-vga-gl or virtio-gpu-gl",
             ));
         }
         argv.extend([
@@ -945,8 +934,10 @@ pub(super) fn append_audio(
         } else {
             argv[display] = format!("dbus,p2p=on,audiodev={id}");
             let vnc = devices
-                .and_then(|d| d.get("vnc"))
-                .is_some_and(|value| value.as_bool() == Some(true) || value.is_object());
+                .and_then(|d| d.get("console"))
+                .and_then(|value| value.get("type"))
+                .and_then(Value::as_str)
+                == Some("vnc");
             if vnc {
                 argv.extend([
                     "-vnc".into(),
@@ -993,6 +984,7 @@ fn append_analysis_video(
     // do not, and "none" means the profile wants no adapter forged.
     let model = video
         .and_then(|v| v.get("type"))
+        .or_else(|| video.and_then(|v| v.get("model")))
         .and_then(Value::as_str)
         .unwrap_or("vga");
     if model != "vga" {
@@ -1038,58 +1030,62 @@ fn append_analysis_video(
     Ok(())
 }
 
-fn resolve_assets(
-    profile: &Map<String, Value>,
-    root: Option<&Path>,
-) -> Result<BTreeMap<String, PathBuf>, Error> {
-    let mut out = BTreeMap::new();
-    let Some(assets) = profile.get("assets") else {
-        return Ok(out);
-    };
-    let assets = object(assets, "profile.assets")?;
-    for (name, reference) in assets {
-        let r = reference.as_str().ok_or_else(|| {
-            invalid(&format!(
-                "profile.assets.{name} must be a file path or sha256 reference"
-            ))
-        })?;
-        let p = if let Some(digest) = r.strip_prefix("sha256:") {
-            if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(invalid(&format!(
-                    "profile.assets.{name} must be a file path or sha256 reference"
-                )));
+struct SourceResolver<'a> {
+    components: &'a BTreeMap<String, PathBuf>,
+    base_dir: Option<&'a Path>,
+}
+
+impl SourceResolver<'_> {
+    fn path(&self, v: Option<&Value>, where_: &str) -> Result<PathBuf, Error> {
+        let value = object(
+            v.ok_or_else(|| invalid(&format!("{where_}.source is required")))?,
+            &format!("{where_}.source"),
+        )?;
+        for key in value.keys() {
+            if !["path", "image_component"].contains(&key.as_str()) {
+                return Err(invalid(&format!("{where_}.source.{key} is not supported")));
             }
-            let root = root.ok_or_else(|| invalid("sha256 profile assets require --asset-root"))?;
-            root.join("sha256").join(digest)
-        } else {
-            PathBuf::from(r)
-        };
-        if !p.is_file() {
-            return Err(invalid(&format!("asset {name:?} is unavailable: {r}")));
         }
-        out.insert(name.clone(), p);
+        let raw_path = value.get("path").and_then(Value::as_str);
+        let component = value.get("image_component").and_then(Value::as_str);
+        match (raw_path, component) {
+            (Some(_), Some(_)) => Err(invalid(&format!(
+                "{where_}.source must choose path or image_component"
+            ))),
+            (Some(path), None) => {
+                let path = PathBuf::from(path);
+                let path = if path.is_absolute() {
+                    path
+                } else if let Some(base) = self.base_dir {
+                    base.join(path)
+                } else {
+                    path
+                };
+                if !path.is_file() {
+                    return Err(invalid(&format!(
+                        "{where_}.source.path is unavailable: {}",
+                        path.display()
+                    )));
+                }
+                Ok(path)
+            }
+            (None, Some(component)) => self.components.get(component).cloned().ok_or_else(|| {
+                invalid(&format!(
+                    "{where_}.source.image_component is unavailable: {component}"
+                ))
+            }),
+            (None, None) => Err(invalid(&format!(
+                "{where_}.source must include path or image_component"
+            ))),
+        }
     }
-    Ok(out)
 }
-fn asset(
-    assets: &BTreeMap<String, PathBuf>,
-    v: Option<&Value>,
-    where_: &str,
-) -> Result<PathBuf, Error> {
-    let n = v
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid(&format!("{where_} must name a profile asset")))?;
-    assets.get(n).cloned().ok_or_else(|| {
-        invalid(&format!(
-            "{where_} names an asset that is not imported: {n}"
-        ))
-    })
-}
+
 fn append_firmware(
     argv: &mut Vec<String>,
     prep: &mut Preparation,
     v: Option<&Value>,
-    assets: &BTreeMap<String, PathBuf>,
+    sources: &SourceResolver<'_>,
     state: &Path,
 ) -> Result<(), Error> {
     let Some(v) = v else { return Ok(()) };
@@ -1104,8 +1100,8 @@ fn append_firmware(
             .ok_or_else(|| invalid("profile.firmware requires both loader and nvram mappings"))?,
         "nvram",
     )?;
-    let code = asset(assets, loader.get("asset"), "profile.firmware.loader.asset")?;
-    let seed = asset(assets, nvram.get("asset"), "profile.firmware.nvram.asset")?;
+    let code = sources.path(loader.get("source"), "profile.firmware.loader")?;
+    let seed = sources.path(nvram.get("source"), "profile.firmware.nvram")?;
     let name = nvram
         .get("name")
         .and_then(Value::as_str)
@@ -1158,7 +1154,7 @@ fn append_storage(
     argv: &mut Vec<String>,
     prep: &mut Preparation,
     v: Option<&Value>,
-    assets: &BTreeMap<String, PathBuf>,
+    sources: &SourceResolver<'_>,
     machine: &str,
     state: &Path,
     storage_desc: Option<&Value>,
@@ -1179,7 +1175,7 @@ fn append_storage(
     )?;
     for key in disk.keys() {
         if ![
-            "asset",
+            "source",
             "bus",
             "format",
             "size",
@@ -1197,7 +1193,7 @@ fn append_storage(
             )));
         }
     }
-    let backing = asset(assets, disk.get("asset"), "profile.storage.disk.asset")?;
+    let backing = sources.path(disk.get("source"), "profile.storage.disk")?;
     if disk.get("bus").is_some_and(|v| !v.is_string()) {
         return Err(invalid("profile.storage.disk.bus must be a string"));
     }
@@ -1361,6 +1357,50 @@ fn append_tpm(argv: &mut Vec<String>, v: Option<&Value>, socket: &Path) -> Resul
     ]);
     Ok(())
 }
+
+fn engine_tracks(profile: &Map<String, Value>) -> Result<Vec<String>, Error> {
+    let Some(engine) = profile.get("engine") else {
+        return Ok(vec!["qemu-system".into()]);
+    };
+    let tracks = engine
+        .as_array()
+        .ok_or_else(|| invalid("profile.engine must be an array of engine track names"))?;
+    if tracks.is_empty() {
+        return Err(invalid("profile.engine must not be empty"));
+    }
+    tracks
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .filter(|track| !track.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "profile.engine[{index}] must be a non-empty string"
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn resolve_engine_ordered(
+    release: &Value,
+    bundle: &Path,
+    tracks: &[String],
+    target: &str,
+) -> Result<(String, Value, PathBuf), Error> {
+    let mut last_error = None;
+    for track in tracks {
+        match resolve_engine(release, bundle, track, target) {
+            Ok((engine, executable)) => return Ok((track.clone(), engine, executable)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| invalid("profile.engine must not be empty")))
+}
+
 fn resolve_engine(
     release: &Value,
     bundle: &Path,
@@ -1383,6 +1423,23 @@ fn resolve_engine(
             .ok_or_else(|| invalid(&format!("engine track is not in the release set: {track}")))?,
         "engine entry",
     )?;
+    // Resolved instances may carry a pinned executable directly. This avoids
+    // consulting mutable release metadata at start while retaining the same
+    // validation path for the selected build.
+    if let Some(executable) = entry.get("executable").and_then(Value::as_str) {
+        let executable = PathBuf::from(executable);
+        if !executable.is_file() {
+            return Err(invalid(&format!(
+                "engine executable is missing: {}",
+                executable.display()
+            )));
+        }
+        let engine = serde_json::json!({
+            "track_id": track,
+            "build_digest": string(entry, "build_digest")?,
+        });
+        return Ok((engine, executable));
+    }
     let relative_manifest = string(entry, "manifest")?;
     if Path::new(&relative_manifest).is_absolute() {
         return Err(invalid("engine manifest must be relative"));
@@ -1562,7 +1619,7 @@ fn append_udm_network(
 fn append_direct_boot(
     argv: &mut Vec<String>,
     boot: Option<&Value>,
-    assets: &BTreeMap<String, PathBuf>,
+    sources: &SourceResolver<'_>,
 ) -> Result<(), Error> {
     let Some(boot) = boot else { return Ok(()) };
     let mut options = Vec::new();
@@ -1639,11 +1696,8 @@ fn append_direct_boot(
         ("dtb", "-dtb"),
     ] {
         if let Some(reference) = boot.get(key).filter(|v| !v.is_null()) {
-            let path = asset(
-                assets,
-                reference.get("asset"),
-                &format!("profile.boot.{key}.asset"),
-            )?;
+            let reference = object(reference, &format!("profile.boot.{key}"))?;
+            let path = sources.path(reference.get("source"), &format!("profile.boot.{key}"))?;
             argv.extend([flag.into(), path.display().to_string()]);
         }
     }
@@ -1662,7 +1716,7 @@ fn append_direct_boot(
 fn append_udm_storage(
     argv: &mut Vec<String>,
     storage: Option<&Value>,
-    assets: &BTreeMap<String, PathBuf>,
+    sources: &SourceResolver<'_>,
 ) -> Result<(), Error> {
     let storage = object(
         storage.ok_or_else(|| invalid("UDM Pro requires boot and SPI storage"))?,
@@ -1675,11 +1729,8 @@ fn append_udm_storage(
         if disk.get("format").and_then(Value::as_str) != Some("raw") {
             return Err(invalid("UDM Pro storage requires raw images"));
         }
-        let path = asset(
-            assets,
-            disk.get("asset"),
-            &format!("profile.storage.{role}.asset"),
-        )?;
+        let disk = object(disk, &format!("profile.storage.{role}"))?;
+        let path = sources.path(disk.get("source"), &format!("profile.storage.{role}"))?;
         // The firmware rewrites its GPT: every process starts with pristine
         // backing images and discards writes when it exits.
         argv.extend([
@@ -1732,11 +1783,14 @@ fn append_udm_devices(
     }
     if enabled("bluetooth")? {
         if !matches!(
-            devices.get("serial").and_then(Value::as_str),
+            devices
+                .get("serial")
+                .and_then(|serial| serial.get("type"))
+                .and_then(Value::as_str),
             Some("file" | "socket")
         ) {
             return Err(invalid(
-                "UDM Pro Bluetooth requires devices.serial=file or socket to reserve ttyS0",
+                "UDM Pro Bluetooth requires devices.serial.type=file or socket to reserve ttyS0",
             ));
         }
         let path = runtime.join("bluetooth.sock");
@@ -1763,18 +1817,30 @@ mod video_storage_tests {
         &argv[idx + 1]
     }
 
+    fn sources() -> (BTreeMap<String, PathBuf>, SourceResolver<'static>) {
+        let mut components = BTreeMap::new();
+        components.insert("disk".into(), PathBuf::from("/backing"));
+        let leaked = Box::leak(Box::new(components));
+        (
+            leaked.clone(),
+            SourceResolver {
+                components: leaked,
+                base_dir: None,
+            },
+        )
+    }
+
     #[test]
     fn analysis_disk_carries_forged_model_and_serial() {
         let mut argv = Vec::new();
         let mut prep = Preparation::default();
-        let mut assets = BTreeMap::new();
-        assets.insert("disk".into(), PathBuf::from("/backing"));
+        let (_components, sources) = sources();
         let storage = json!({"disk_product": "SATA SSD", "disk_serial_prefix": "ANSSD"});
         append_storage(
             &mut argv,
             &mut prep,
-            Some(&json!({"disk": {"asset": "disk", "bus": "sata"}})),
-            &assets,
+            Some(&json!({"disk": {"source": {"image_component": "disk"}, "bus": "sata"}})),
+            &sources,
             "pc-q35-10.1",
             Path::new("/state"),
             Some(&storage),
@@ -1793,14 +1859,13 @@ mod video_storage_tests {
     fn explicit_disk_serial_wins_over_the_descriptor_prefix() {
         let mut argv = Vec::new();
         let mut prep = Preparation::default();
-        let mut assets = BTreeMap::new();
-        assets.insert("disk".into(), PathBuf::from("/backing"));
+        let (_components, sources) = sources();
         let storage = json!({"disk_serial_prefix": "ANSSD"});
         append_storage(
             &mut argv,
             &mut prep,
-            Some(&json!({"disk": {"asset": "disk", "bus": "sata", "serial": "SN-EXPLICIT"}})),
-            &assets,
+            Some(&json!({"disk": {"source": {"image_component": "disk"}, "bus": "sata", "serial": "SN-EXPLICIT"}})),
+            &sources,
             "pc-q35-10.1",
             Path::new("/state"),
             Some(&storage),
@@ -1813,14 +1878,13 @@ mod video_storage_tests {
     fn virtio_disk_takes_no_ata_identity() {
         let mut argv = Vec::new();
         let mut prep = Preparation::default();
-        let mut assets = BTreeMap::new();
-        assets.insert("disk".into(), PathBuf::from("/backing"));
+        let (_components, sources) = sources();
         let storage = json!({"disk_product": "SATA SSD", "disk_serial_prefix": "ANSSD"});
         append_storage(
             &mut argv,
             &mut prep,
-            Some(&json!({"disk": {"asset": "disk", "bus": "virtio"}})),
-            &assets,
+            Some(&json!({"disk": {"source": {"image_component": "disk"}, "bus": "virtio"}})),
+            &sources,
             "pc-q35-10.1",
             Path::new("/state"),
             Some(&storage),
@@ -1893,13 +1957,18 @@ mod boot_tests {
     #[test]
     fn firmware_boot_settings_are_combined_and_validated() {
         let mut args = Vec::new();
+        let components = BTreeMap::new();
+        let sources = SourceResolver {
+            components: &components,
+            base_dir: None,
+        };
         append_direct_boot(
             &mut args,
             Some(&serde_json::json!({
                 "from":"disk", "once":"cdrom", "menu":true, "strict":true,
                 "timeout":2500, "reboot_timeout":-1
             })),
-            &BTreeMap::new(),
+            &sources,
         )
         .unwrap();
         assert_eq!(
@@ -1914,7 +1983,7 @@ mod boot_tests {
                 append_direct_boot(
                     &mut Vec::new(),
                     Some(&serde_json::json!({"from":source})),
-                    &BTreeMap::new()
+                    &sources
                 )
                 .is_ok()
             );
@@ -1930,7 +1999,7 @@ mod boot_tests {
             serde_json::json!({"timeout":1.5}),
         ] {
             assert!(
-                append_direct_boot(&mut Vec::new(), Some(&invalid), &BTreeMap::new()).is_err(),
+                append_direct_boot(&mut Vec::new(), Some(&invalid), &sources).is_err(),
                 "{invalid}"
             );
         }

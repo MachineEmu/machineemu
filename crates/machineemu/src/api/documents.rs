@@ -12,8 +12,7 @@ pub(super) struct InstanceConfig {
     profile_id: String,
     revision: i64,
     auto_remove: bool,
-    profile: Option<Value>,
-    launch_plan: LaunchSpec,
+    domain_document: Value,
 }
 
 fn parse_document<T: serde::de::DeserializeOwned>(
@@ -65,27 +64,7 @@ fn bad_request(error: RuntimeError) -> Response {
         .into_response()
 }
 
-fn read_workspace_file(root: &FsPath, path: &FsPath) -> Result<Vec<u8>, RuntimeError> {
-    let canonical_root = fs::canonicalize(root).map_err(|source| RuntimeError::Io {
-        path: root.to_owned(),
-        source,
-    })?;
-    let canonical_path = fs::canonicalize(path).map_err(|source| RuntimeError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
-    if !canonical_path.starts_with(canonical_root) {
-        return Err(RuntimeError::Process(
-            "document path escapes the workspace".into(),
-        ));
-    }
-    fs::read(path).map_err(|source| RuntimeError::Io {
-        path: path.to_owned(),
-        source,
-    })
-}
-
-fn atomic_json(root: &FsPath, path: &FsPath, value: &impl Serialize) -> Result<(), RuntimeError> {
+fn atomic_yaml(root: &FsPath, path: &FsPath, value: &impl Serialize) -> Result<(), RuntimeError> {
     let parent = path
         .parent()
         .ok_or_else(|| RuntimeError::Process("document has no parent directory".into()))?;
@@ -123,11 +102,13 @@ fn atomic_json(root: &FsPath, path: &FsPath, value: &impl Serialize) -> Result<(
                 path: temporary.clone(),
                 source,
             })?;
-        serde_json::to_writer_pretty(&mut file, value)?;
-        file.write_all(b"\n").map_err(|source| RuntimeError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
+        let bytes = serde_yaml::to_string(value)
+            .map_err(|error| RuntimeError::Process(error.to_string()))?;
+        file.write_all(bytes.as_bytes())
+            .map_err(|source| RuntimeError::Io {
+                path: temporary.clone(),
+                source,
+            })?;
         file.sync_all().map_err(|source| RuntimeError::Io {
             path: temporary.clone(),
             source,
@@ -167,10 +148,12 @@ pub(super) async fn get_instance_config(
             profile_id: document.profile_id,
             revision,
             auto_remove: document.auto_remove,
-            profile: document.profile,
-            launch_plan: serde_json::from_value(document.launch_plan.ok_or_else(|| {
-                RuntimeError::Process("instance has no saved launch plan".into())
-            })?)?,
+            domain_document: document.domain_document.ok_or_else(|| {
+                RuntimeError::Process(
+                    "instance has no complete domain document; run machineemu-migrate before editing it"
+                        .into(),
+                )
+            })?,
         })
     })
     .await;
@@ -221,10 +204,6 @@ pub(super) async fn put_instance_config(
                 input.revision, current_revision
             )));
         }
-        let (old_plan, _) = workspace
-            .instance_launch(&instance_id)?
-            .ok_or_else(|| RuntimeError::Process("instance has no saved launch plan".into()))?;
-        let old_plan: LaunchSpec = serde_json::from_str(&old_plan)?;
         if input.instance_id != instance_id.as_str()
             || input.image_id != instance.image_id.as_str()
             || input.profile_id != instance.profile_id.as_str()
@@ -233,25 +212,11 @@ pub(super) async fn put_instance_config(
                 "instance, image and profile IDs cannot be changed here".into(),
             ));
         }
-        if input.launch_plan.preparation != old_plan.preparation {
-            return Err(RuntimeError::Process(
-                "disk, NVRAM and TPM preparation cannot change on an existing instance".into(),
-            ));
-        }
-        if let Some(profile) = &input.profile
-            && profile.get("id").and_then(Value::as_str) != Some(input.profile_id.as_str())
-        {
-            return Err(RuntimeError::Process(
-                "profile.id must match profile_id".into(),
-            ));
-        }
-        super::launch::validate_plan_paths(workspace.root(), &input.launch_plan)?;
-        let updated = workspace.replace_instance_configuration(
+        let updated = workspace.replace_domain_document(
             &instance_id,
             input.revision,
-            &serde_json::to_string(&input.launch_plan)?,
+            input.domain_document.clone(),
             input.auto_remove,
-            input.profile.as_ref(),
         )?;
         input.revision = updated;
         Ok(input)
@@ -263,16 +228,98 @@ pub(super) async fn put_instance_config(
     }
 }
 
-fn profile_path(root: &FsPath, id: &Id) -> (std::path::PathBuf, std::path::PathBuf) {
-    let workspace = root.join("profiles").join(format!("{}.json", id.as_str()));
-    let bundled_root = FsPath::new("profiles");
-    let bundled_root = if bundled_root.is_dir() {
-        bundled_root.to_owned()
-    } else {
-        FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles")
+pub(super) async fn upgrade_instance_engine(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = authorized(&headers, &state) {
+        return response.into_response();
+    }
+    let input: dto::EngineUpgrade = match parse_document(&headers, &body) {
+        Ok(input) => input,
+        Err(error) => return bad_request(error),
     };
-    let bundled = bundled_root.join(format!("{}.json", id.as_str()));
-    (workspace, bundled)
+    let result = blocking(move || -> Result<_, RuntimeError> {
+        let instance_id = Id::new("instance", id)?;
+        let lock = instance_lock(&state, instance_id.as_str())?;
+        let _guard = lock.blocking_lock();
+        let workspace = state
+            .workspace
+            .lock()
+            .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
+        let revision =
+            workspace.upgrade_instance_engine(&instance_id, input.revision, input.engine)?;
+        Ok(serde_json::json!({
+            "instance_id": instance_id.as_str(),
+            "revision": revision,
+            "status": "upgraded"
+        }))
+    })
+    .await;
+    match result {
+        Ok(document) => render_document(&headers, document),
+        Err(error) => bad_request(error),
+    }
+}
+
+fn profile_path(root: &FsPath, id: &Id) -> std::path::PathBuf {
+    root.join("profiles").join(format!("{}.yaml", id.as_str()))
+}
+
+pub(super) async fn list_profiles(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorized(&headers, &state) {
+        return response.into_response();
+    }
+    let result = blocking(move || -> Result<Vec<Value>, RuntimeError> {
+        let workspace = state
+            .workspace
+            .lock()
+            .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
+        let directory = workspace.root().join("profiles");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(RuntimeError::Io {
+                    path: directory,
+                    source,
+                });
+            }
+        };
+        let mut profiles: Vec<Value> = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|source| RuntimeError::Io {
+                    path: directory.clone(),
+                    source,
+                })?
+                .path();
+            if !matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("yaml")
+            ) || !path.is_file()
+            {
+                continue;
+            }
+            profiles.push(
+                machineemu_core::engine::load_document(&path)
+                    .map_err(|e| RuntimeError::Process(e.to_string()))?,
+            );
+        }
+        profiles.sort_by(|a, b| {
+            a.get("id")
+                .and_then(Value::as_str)
+                .cmp(&b.get("id").and_then(Value::as_str))
+        });
+        Ok(profiles)
+    })
+    .await;
+    match result {
+        Ok(profiles) => render_document(&headers, profiles),
+        Err(error) => bad_request(error),
+    }
 }
 
 pub(super) async fn get_profile(
@@ -289,27 +336,15 @@ pub(super) async fn get_profile(
             .workspace
             .lock()
             .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
-        let (workspace_path, bundled_path) = profile_path(workspace.root(), &profile_id);
-        let (path, from_workspace) = if workspace_path.is_file() {
-            (workspace_path, true)
-        } else {
-            (bundled_path, false)
-        };
+        let path = profile_path(workspace.root(), &profile_id);
         if !path.is_file() {
             return Err(RuntimeError::NotFound {
                 kind: "profile",
                 id: profile_id.as_str().to_owned(),
             });
         }
-        let bytes = if from_workspace {
-            read_workspace_file(workspace.root(), &path)?
-        } else {
-            fs::read(&path).map_err(|source| RuntimeError::Io {
-                path: path.clone(),
-                source,
-            })?
-        };
-        serde_json::from_slice(&bytes).map_err(RuntimeError::from)
+        machineemu_core::engine::load_document(&path)
+            .map_err(|error| RuntimeError::Process(error.to_string()))
     })
     .await;
     match result {
@@ -343,14 +378,22 @@ pub(super) async fn put_profile(
         let declared_id = document
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| RuntimeError::Process("profile.id is required".into()))?;
+            .or_else(|| {
+                document
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("name"))
+                    .and_then(Value::as_str)
+            })
+            .ok_or_else(|| {
+                RuntimeError::Process("profile.id or profile.metadata.name is required".into())
+            })?;
         Id::new("profile", declared_id)?;
         let workspace = state
             .workspace
             .lock()
             .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
-        let (path, _) = profile_path(workspace.root(), &profile_id);
-        atomic_json(workspace.root(), &path, &document)?;
+        let path = profile_path(workspace.root(), &profile_id);
+        atomic_yaml(workspace.root(), &path, &document)?;
         Ok(document)
     })
     .await;

@@ -1,4 +1,6 @@
+#[cfg(test)]
 use machineemu_core::{engine::Error, launch::LaunchSpec};
+#[cfg(test)]
 use std::{fs, io::Write, path::Path};
 
 #[derive(Debug, Default, clap::Args)]
@@ -37,12 +39,14 @@ pub(super) struct HardwareArgs {
     pub memory: Option<String>,
 }
 
+#[cfg(test)]
 fn invalid(s: impl Into<String>) -> Error {
     Error::Invalid(s.into())
 }
 
 // QEMU options with values are pairs, but standalone flags and the executable
 // remain untouched. Only remove options owned by the requested hardware setting.
+#[cfg(test)]
 fn remove(argv: &mut Vec<String>, predicate: impl Fn(&str, &str) -> bool) {
     let mut i = 1;
     while i + 1 < argv.len() {
@@ -53,9 +57,11 @@ fn remove(argv: &mut Vec<String>, predicate: impl Fn(&str, &str) -> bool) {
         }
     }
 }
+#[cfg(test)]
 fn field<'a>(value: &'a str, name: &str) -> Option<&'a str> {
     value.split(',').find_map(|v| v.strip_prefix(name))
 }
+#[cfg(test)]
 fn memory(value: &str) -> Result<String, Error> {
     let split = value
         .find(|c: char| !c.is_ascii_digit())
@@ -75,6 +81,7 @@ fn memory(value: &str) -> Result<String, Error> {
     };
     Ok(format!("{number}{unit}"))
 }
+#[cfg(test)]
 fn forwarding(value: &str) -> Result<(), Error> {
     let (host, guest) = value
         .split_once('-')
@@ -113,6 +120,7 @@ impl HardwareArgs {
             || self.memory.is_some()
     }
 
+    #[cfg(test)]
     pub fn apply(
         &self,
         plan: &mut LaunchSpec,
@@ -548,7 +556,7 @@ mod tests {
         for command in ["create", "run", "config"] {
             let mut args = vec!["machineemu", command];
             if command != "config" {
-                args.push("profile");
+                args.extend(["--profile", "profile"]);
             }
             args.extend([
                 "test",
@@ -575,7 +583,7 @@ mod tests {
                 "machineemu",
                 "create",
                 "--file",
-                "instance.json",
+                "instance.yaml",
                 "--cpus",
                 "4",
                 "--h264"

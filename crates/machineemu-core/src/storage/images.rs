@@ -30,7 +30,7 @@ impl Workspace {
                 path: directory.clone(),
                 source,
             })?;
-            let path = entry.path().join("manifest.json");
+            let path = manifest_path_for_dir(&entry.path());
             if !entry
                 .file_type()
                 .map_err(|source| Error::Io {
@@ -144,6 +144,33 @@ impl Workspace {
             engine_track,
             supported_engine_tracks: Vec::new(),
             target: target.into(),
+            components: [(
+                "disk".to_owned(),
+                ImageBundleComponent {
+                    path: "components/disk.qcow2".into(),
+                    sha256: format!("sha256:{disk_sha256}"),
+                },
+            )]
+            .into_iter()
+            .chain(firmware_sha256.iter().map(|digest| {
+                (
+                    "firmware".to_owned(),
+                    ImageBundleComponent {
+                        path: "components/firmware.fd".into(),
+                        sha256: format!("sha256:{digest}"),
+                    },
+                )
+            }))
+            .chain(tpm_state_sha256.iter().map(|digest| {
+                (
+                    "tpm_state".to_owned(),
+                    ImageBundleComponent {
+                        path: "components/tpm-state".into(),
+                        sha256: format!("sha256:{digest}"),
+                    },
+                )
+            }))
+            .collect(),
             disk_sha256,
             firmware_sha256,
             tpm_state_sha256,
@@ -224,23 +251,27 @@ impl Workspace {
             target: image.target,
             components,
         };
-        let manifest = serde_json::to_vec_pretty(&bundle)?;
-        fs::write(destination.join("manifest.json"), manifest).map_err(|source| Error::Io {
-            path: destination.join("manifest.json"),
+        let manifest =
+            serde_yaml::to_string(&bundle).map_err(|error| Error::Process(error.to_string()))?;
+        fs::write(destination.join("manifest.yaml"), manifest).map_err(|source| Error::Io {
+            path: destination.join("manifest.yaml"),
             source,
         })?;
         Ok(bundle)
     }
 
     pub fn import_image_bundle(&self, source: &Path) -> Result<(ImageManifest, String)> {
-        let manifest_path = source.join("manifest.json");
+        let manifest_path = source.join("manifest.yaml");
         let manifest: ImageBundleManifest =
-            serde_json::from_slice(&fs::read(&manifest_path).map_err(|source_error| {
+            serde_yaml::from_slice(&fs::read(&manifest_path).map_err(|source_error| {
                 Error::Io {
                     path: manifest_path.clone(),
                     source: source_error,
                 }
-            })?)?;
+            })?)
+            .map_err(|error| {
+                Error::InvalidBundlePath(format!("{}: {error}", manifest_path.display()))
+            })?;
         if manifest.schema_version != 1 {
             return Err(Error::InvalidBundlePath(
                 "unsupported schema_version".into(),
@@ -283,6 +314,7 @@ impl Workspace {
             engine_track: manifest.engine_track,
             supported_engine_tracks: manifest.supported_engine_tracks,
             target: manifest.target,
+            components: manifest.components.clone(),
             disk_sha256: disk,
             firmware_sha256: component("firmware", "firmware.fd")?,
             tpm_state_sha256: component("tpm_state", "tpm-state")?,
@@ -293,7 +325,7 @@ impl Workspace {
 
     pub fn register_image(&self, manifest: &ImageManifest) -> Result<String> {
         validate_manifest(manifest, manifest.image_id.as_str())?;
-        let digest = hex_digest(&serde_json::to_vec(manifest)?);
+        let digest = hex_digest(&bytes_for_digest(manifest)?);
         let path = manifest_path(&self.root, &manifest.image_id)?;
         match fs::metadata(&path) {
             Ok(_) => {
@@ -344,7 +376,9 @@ impl Workspace {
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let bytes = serde_json::to_vec_pretty(manifest)?;
+        let bytes = serde_yaml::to_string(manifest)
+            .map_err(|error| Error::Process(error.to_string()))?
+            .into_bytes();
         let result = (|| -> std::io::Result<()> {
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -364,7 +398,7 @@ impl Workspace {
             path: path.clone(),
             source,
         })?;
-        Ok(hex_digest(&serde_json::to_vec(manifest)?))
+        Ok(hex_digest(&bytes_for_digest(manifest)?))
     }
 
     pub fn image(&self, image_id: &Id) -> Result<ImageManifest> {
@@ -373,13 +407,23 @@ impl Workspace {
     }
 }
 
+fn bytes_for_digest<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
+    serde_yaml::to_string(value)
+        .map(|text| text.into_bytes())
+        .map_err(|error| Error::Process(error.to_string()))
+}
+
 fn image_root(root: &Path, id: &Id) -> Result<PathBuf> {
     Id::new("image", id.as_str())?;
     Ok(root.join("images").join(id.as_str()))
 }
 
 fn manifest_path(root: &Path, id: &Id) -> Result<PathBuf> {
-    Ok(image_root(root, id)?.join("manifest.json"))
+    Ok(manifest_path_for_dir(&image_root(root, id)?))
+}
+
+fn manifest_path_for_dir(directory: &Path) -> PathBuf {
+    directory.join("manifest.yaml")
 }
 
 fn hash_file(path: &Path) -> Result<String> {
@@ -488,7 +532,11 @@ fn validate_manifest(image: &ImageManifest, expected_id: &str) -> Result<()> {
             image.image_id.as_str()
         )));
     }
-    for digest in std::iter::once(&image.disk_sha256)
+    for digest in image
+        .components
+        .values()
+        .map(|component| &component.sha256)
+        .chain((!image.disk_sha256.is_empty()).then_some(&image.disk_sha256))
         .chain(image.firmware_sha256.iter())
         .chain(image.tpm_state_sha256.iter())
     {
@@ -507,8 +555,44 @@ fn read_manifest(path: &Path, id: &str) -> Result<ImageManifest> {
         path: path.to_owned(),
         source,
     })?;
-    let image = serde_json::from_slice(&bytes)
+    let value: serde_json::Value = serde_yaml::from_slice(&bytes)
         .map_err(|error| Error::InvalidBundlePath(format!("{}: {error}", path.display())))?;
+    let value = value.get("spec").cloned().unwrap_or(value);
+    let mut image: ImageManifest = serde_json::from_value(value)
+        .map_err(|error| Error::InvalidBundlePath(format!("{}: {error}", path.display())))?;
+    if !image.components.is_empty() {
+        if image.disk_sha256.is_empty()
+            && let Some(component) = image.components.get("disk")
+        {
+            image.disk_sha256 = component
+                .sha256
+                .strip_prefix("sha256:")
+                .unwrap_or(&component.sha256)
+                .to_owned();
+        }
+        if image.firmware_sha256.is_none()
+            && let Some(component) = image.components.get("firmware")
+        {
+            image.firmware_sha256 = Some(
+                component
+                    .sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&component.sha256)
+                    .to_owned(),
+            );
+        }
+        if image.tpm_state_sha256.is_none()
+            && let Some(component) = image.components.get("tpm_state")
+        {
+            image.tpm_state_sha256 = Some(
+                component
+                    .sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&component.sha256)
+                    .to_owned(),
+            );
+        }
+    }
     validate_manifest(&image, id)?;
     Ok(image)
 }
@@ -520,6 +604,9 @@ fn publish_manifest(path: &Path, image: &ImageManifest) -> Result<()> {
         source,
     })?;
     let temporary = directory.join(format!(".manifest-{}.tmp", std::process::id()));
+    let bytes = serde_yaml::to_string(image)
+        .map_err(|error| Error::Process(error.to_string()))?
+        .into_bytes();
     let mut created = false;
     let result = (|| -> std::io::Result<()> {
         let mut file = fs::OpenOptions::new()
@@ -527,8 +614,6 @@ fn publish_manifest(path: &Path, image: &ImageManifest) -> Result<()> {
             .create_new(true)
             .open(&temporary)?;
         created = true;
-        let mut bytes = serde_json::to_vec_pretty(image)?;
-        bytes.push(b'\n');
         file.write_all(&bytes)?;
         file.sync_all()?;
         // A hard link publishes atomically without overwriting an operator's file.

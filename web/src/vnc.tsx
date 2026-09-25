@@ -2,11 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import RFB from "@novnc/novnc";
 import { Link, useParams, useSearchParams } from "react-router";
 import { MachineEmuClient } from "./client";
-import { VncAudio } from "./vnc-audio";
 
-function socketUrl(instance: string, session: string, clientId: string): string {
+function socketUrl(instance: string, ticket: string): string {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${location.host}/ws/v1/sessions/${encodeURIComponent(instance)}/${encodeURIComponent(session)}/vnc?client_id=${encodeURIComponent(clientId)}`;
+  return `${scheme}://${location.host}/ws/v2/instances/${encodeURIComponent(instance)}/vnc?ticket=${encodeURIComponent(ticket)}`;
 }
 
 function client(): MachineEmuClient {
@@ -19,57 +18,23 @@ export function Vnc() {
   const instance = query.get("instance") ?? "";
   const host = useRef<HTMLDivElement>(null);
   const rfb = useRef<RFB | undefined>(undefined);
-  const [clientId] = useState(() => crypto.randomUUID().replaceAll("-", ""));
   const [connected, setConnected] = useState(false);
   const [viewOnly, setViewOnly] = useState(true);
   const [error, setError] = useState<string>();
 
   useEffect(() => {
     if (!instance || !id || !host.current) return;
-    const viewer = new RFB(host.current, socketUrl(instance, id, clientId));
-    viewer.viewOnly = true;
-    viewer.scaleViewport = true;
-    viewer.clipViewport = false;
-    viewer.resizeSession = false;
-    rfb.current = viewer;
-    const onConnect = () => {
-      setConnected(true);
-      setError(undefined);
-    };
-    const onDisconnect = () => {
-      setConnected(false);
-      setViewOnly(true);
-    };
-    viewer.addEventListener("connect", onConnect);
-    viewer.addEventListener("disconnect", onDisconnect);
-    return () => {
-      viewer.removeEventListener("connect", onConnect);
-      viewer.removeEventListener("disconnect", onDisconnect);
-      viewer.disconnect();
-      rfb.current = undefined;
-    };
-  }, [clientId, id, instance]);
-
-  async function claim(takeover = false) {
-    if (!connected) return;
-    try {
-      await client().vncControl(instance, id, { action: "claim", client_id: clientId, takeover });
-      if (rfb.current) rfb.current.viewOnly = false;
-      setViewOnly(false);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to claim VNC input.");
-    }
-  }
-
-  async function release() {
-    try {
-      await client().vncControl(instance, id, { action: "release", client_id: clientId });
-      if (rfb.current) rfb.current.viewOnly = true;
-      setViewOnly(true);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to release VNC input.");
-    }
-  }
+    let viewer: RFB | undefined;
+    let cancelled = false;
+    void client().streamTicket(instance, "vnc", { control: true }).then(({ ticket }) => {
+      if (cancelled || !host.current) return;
+      viewer = new RFB(host.current, socketUrl(instance, ticket));
+      viewer.viewOnly = false; viewer.scaleViewport = true; viewer.clipViewport = false; viewer.resizeSession = false; rfb.current = viewer;
+      viewer.addEventListener("connect", () => { setConnected(true); setViewOnly(false); setError(undefined); });
+      viewer.addEventListener("disconnect", () => { setConnected(false); setViewOnly(true); });
+    }).catch((reason) => setError(reason instanceof Error ? reason.message : "Unable to issue a VNC ticket."));
+    return () => { cancelled = true; viewer?.disconnect(); rfb.current = undefined; };
+  }, [id, instance]);
 
   return <main className="machineemu-page">
     <Link className="back-link" to={`/sessions/${encodeURIComponent(id)}?instance=${encodeURIComponent(instance)}`}>← Session</Link>
@@ -77,11 +42,8 @@ export function Vnc() {
     {!instance || !id ? <ErrorNotice>The VNC URL must include an instance ID.</ErrorNotice> : <>
       <p className="session-meta" role="status">{connected ? `Connected · ${viewOnly ? "view only" : "input enabled"}` : "Connecting…"}</p>
       <div className="actions">
-        {viewOnly ? <><button className="button" disabled={!connected} onClick={() => void claim()}>Take input</button>
-          <button className="button button-secondary" disabled={!connected} onClick={() => void claim(true)}>Take over</button></>
-          : <button className="button button-secondary" onClick={() => void release()}>Release input</button>}
+        <span className="session-meta">{viewOnly ? "View only" : "Input enabled"}</span>
         <button className="button button-secondary" disabled={viewOnly} onClick={() => rfb.current?.sendCtrlAltDel()}>Ctrl+Alt+Delete</button>
-        <VncAudio instanceId={instance} sessionId={id} />
       </div>
       {error && <ErrorNotice>{error}</ErrorNotice>}
       <div className="vnc-host" ref={host} aria-label="QEMU VNC display" />

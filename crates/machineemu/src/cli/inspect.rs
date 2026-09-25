@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! `machineemu inspect`: what an instance is running, what it listens on and
 //! what hardware the guest sees.
 //!

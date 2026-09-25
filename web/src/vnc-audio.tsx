@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SpiceAudioClient, type AudioStatus } from "./spice-audio/client";
-import { MachineEmuClient } from "./client";
 
 type Props = { instanceId: string; sessionId: string };
 
@@ -25,17 +24,7 @@ export function VncAudio({ instanceId, sessionId }: Props) {
   const [contended, setContended] = useState(false);
 
   useEffect(() => {
-    let active = true;
-    void new MachineEmuClient({ token: "" }).audioStatus(instanceId, sessionId)
-      .then((result) => {
-        if (active) setAvailability({ available: result.available, reason: result.reason ?? null, capture_held: result.capture_held });
-      })
-      .catch(() => {
-        if (active) setAvailability({ available: false, reason: null, capture_held: false });
-      });
-    return () => {
-      active = false;
-    };
+    setAvailability({ available: false, reason: "SPICE audio is not exposed by API v2 yet.", capture_held: false });
   }, [instanceId, sessionId]);
 
   useEffect(

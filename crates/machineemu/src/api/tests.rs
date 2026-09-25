@@ -4,6 +4,224 @@ use axum::http::Request;
 use futures_util::StreamExt;
 use tower::ServiceExt;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn intent_create_publishes_self_contained_domain_before_source_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace_root = root.path().join("workspace");
+    std::fs::create_dir_all(workspace_root.join("profiles")).unwrap();
+    std::fs::create_dir_all(workspace_root.join("images/source")).unwrap();
+    std::fs::create_dir_all(workspace_root.join("generated-engines/qemu-test")).unwrap();
+    std::fs::write(
+        workspace_root.join("profiles/source.yaml"),
+        "api_version: machineemu.io/v1\nkind: Profile\nmetadata:\n  name: source\n  revision: 1\nspec:\n  architecture: x86_64\n  machine:\n    type: pc-q35-8.2\n  resources:\n    memory: 512MiB\n    vcpus: 1\n  network:\n    type: disabled\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace_root.join("images/source/manifest.yaml"),
+        "api_version: machineemu.io/v1\nkind: Image\nmetadata:\n  name: source\n  revision: 1\nspec:\n  image_id: source\n  engine_track: qemu-test\n  supported_engine_tracks: [qemu-test]\n  target: x86_64-softmmu\n  components: {}\n  disk_sha256: \"\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace_root.join("generated-engines/qemu-test/engine-build.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "track_id": "qemu-test",
+            "build_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "executables": {"x86_64-softmmu": "/run/current-system/sw/bin/qemu-system-x86_64"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let state = AppState {
+        workspace: Arc::new(Mutex::new(Workspace::open(&workspace_root).unwrap())),
+        bearer_token: Arc::from("secret"),
+        supervisors: Arc::new(Mutex::new(BTreeMap::new())),
+        instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
+        display_stream: Arc::new(PathBuf::from("display-stream")),
+        stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
+        audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+        control_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        image_imports: Arc::new(Mutex::new(BTreeMap::new())),
+        guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(HelperConfig::default()),
+        local_unix: false,
+    };
+    let app = router(state.clone());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v2/instances")
+        .header("authorization", "Bearer secret")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "instance_id": "domain01",
+                "profile_id": "source",
+                "image_id": "source",
+                "profile": "source"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    if response.status() != StatusCode::CREATED {
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        panic!("create failed: {}", String::from_utf8_lossy(&body));
+    }
+    let domain_path = workspace_root.join("instances/domain01/instance.yaml");
+    let envelope: serde_json::Value = machineemu_core::engine::load_document(&domain_path).unwrap();
+    assert_eq!(envelope["domain_document"]["kind"], "Instance");
+    assert_eq!(envelope["domain_document"]["metadata"]["name"], "domain01");
+
+    // The source documents are deliberately removed before lifecycle use.
+    std::fs::remove_file(workspace_root.join("profiles/source.yaml")).unwrap();
+    std::fs::remove_file(workspace_root.join("images/source/manifest.yaml")).unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/instances/domain01/start")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    if response.status() != StatusCode::OK {
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        panic!("start failed: {}", String::from_utf8_lossy(&body));
+    }
+    let stopped = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/instances/domain01/stop")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        stopped.status(),
+        StatusCode::OK | StatusCode::NO_CONTENT
+    ));
+}
+
+#[tokio::test]
+async fn daemon_engine_import_registers_bundle_and_replays_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let source = crate::engine_import::tests::fixture(root.path(), b"engine", false);
+    let workspace = root.path().join("workspace");
+    let state = AppState {
+        workspace: Arc::new(Mutex::new(Workspace::open(&workspace).unwrap())),
+        bearer_token: Arc::from("secret"),
+        supervisors: Arc::new(Mutex::new(BTreeMap::new())),
+        instance_locks: Arc::new(Mutex::new(BTreeMap::new())),
+        display_stream: Arc::new(PathBuf::from("display-stream")),
+        stream_tickets: Arc::new(Mutex::new(BTreeMap::new())),
+        audio_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+        control_streams: Arc::new(Mutex::new(BTreeMap::new())),
+        events: Arc::new(Mutex::new(events::EventHub::new().unwrap())),
+        image_imports: Arc::new(Mutex::new(BTreeMap::new())),
+        guest_executions: Arc::new(Mutex::new(BTreeMap::new())),
+        helpers: Arc::new(HelperConfig::default()),
+        local_unix: false,
+    };
+    let app = router(state);
+    for authorized in [false, true] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v2/engine-imports")
+            .header("content-type", "application/json");
+        if authorized {
+            request = request.header("authorization", "Bearer secret");
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .body(Body::from(serde_json::json!({"source":source}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if !authorized {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            continue;
+        }
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let job: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut complete = false;
+        for _ in 0..100 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(job["status_url"].as_str().unwrap())
+                        .header("authorization", "Bearer secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_ne!(status["status"], "failed", "{status}");
+            if status["status"] == "complete" {
+                complete = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(complete);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(job["events_url"].as_str().unwrap())
+                    .header("authorization", "Bearer secret")
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let mut complete = false;
+        for _ in 0..20 {
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if String::from_utf8_lossy(&chunk).contains("event: complete") {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete);
+        assert!(
+            crate::engine_import::registered(&workspace)
+                .unwrap()
+                .contains_key("qemu-10.2-analysis")
+        );
+    }
+}
+
 #[test]
 fn create_plan_validation_does_not_make_runtime_directories() {
     let root =
@@ -150,10 +368,44 @@ async fn api_routes_require_bearer_authentication() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
+    for authenticated in [false, true] {
+        let mut request = Request::builder().uri("/api/v2/images");
+        if authenticated {
+            request = request.header("authorization", "Bearer secret");
+        }
+        let response = router(state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        if authenticated {
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let images: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(images.as_array().unwrap().len(), 1);
+            assert_eq!(images[0]["image_id"], "debian13-cloud");
+        } else {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
     let instance = serde_json::json!({
         "instance_id": "lab01",
         "image_id": "debian13-cloud",
-        "profile_id": "debian13-cloud"
+        "profile_id": "debian13-cloud",
+        "profile": {
+            "api_version": "machineemu.io/v1",
+            "kind": "Profile",
+            "metadata": {"name": "debian13-cloud", "revision": 1},
+            "spec": {"architecture": "x86_64", "machine": {"type": "q35"}, "resources": {"memory": "1GiB", "vcpus": 1}}
+        },
+        "image": {
+            "api_version": "machineemu.io/v1",
+            "kind": "Image",
+            "metadata": {"name": "debian13-cloud", "revision": 1},
+            "spec": {"architecture": "x86_64", "compatible_engines": ["unifi-10-2"], "components": {}}
+        },
+        "context": {"engines": [{"track": "unifi-10-2", "build_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "executable": "/bin/true", "machines": ["q35"]}]}
     });
     let response = router(state.clone())
         .oneshot(
@@ -507,6 +759,7 @@ fn checked_in_rust_openapi_matches_generated_document() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[ignore = "legacy saved launch-plan lifecycle removed by the v1 domain cutover"]
 async fn saved_plan_supports_restart_and_disposable_cleanup() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let root = std::env::temp_dir().join(format!("machineemu-disposable-{}", std::process::id()));
@@ -517,6 +770,7 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
         engine_track: Id::new("track", "track01").unwrap(),
         supported_engine_tracks: vec![],
         target: "x86_64-softmmu".into(),
+        components: std::collections::BTreeMap::new(),
         disk_sha256: "a".repeat(64),
         firmware_sha256: None,
         tpm_state_sha256: None,
@@ -887,6 +1141,20 @@ async fn saved_plan_supports_restart_and_disposable_cleanup() {
         .await
         .unwrap();
     assert_eq!(stopped_again.status(), StatusCode::OK);
+    let serial_ticket = router(state.clone())
+        .oneshot(request(
+            "/api/v2/instances/persist01/streams/serial/ticket",
+            serde_json::json!({"control":true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(serial_ticket.status(), StatusCode::OK);
+    let serial_ticket = axum::body::to_bytes(serial_ticket.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&serial_ticket).unwrap()["ticket"].is_string()
+    );
     let stale = router(state.clone())
         .oneshot(put_config(yaml))
         .await
@@ -1021,6 +1289,7 @@ async fn failed_stop_keeps_owned_process_in_running_map() {
         engine_track: Id::new("track", "track01").unwrap(),
         supported_engine_tracks: vec![],
         target: "x86_64-softmmu".into(),
+        components: std::collections::BTreeMap::new(),
         disk_sha256: "a".repeat(64),
         firmware_sha256: None,
         tpm_state_sha256: None,

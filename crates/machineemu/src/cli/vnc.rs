@@ -46,24 +46,18 @@ pub(super) fn resolve(
     selection: &str,
     password_override: Option<&Path>,
 ) -> Result<Option<Display>, Error> {
-    let declared = profile.pointer("/devices/vnc");
+    let declared = profile.pointer("/devices/console");
     let settings = declared.and_then(Value::as_object);
-    if let Some(declared) = declared
-        && !declared.is_boolean()
-        && settings.is_none()
-    {
-        return Err(invalid(
-            "profile.devices.vnc must be a boolean or an object",
-        ));
-    }
     if let Some(settings) = settings {
         for key in settings.keys() {
-            if !["port", "password_file"].contains(&key.as_str()) {
-                return Err(invalid(format!("profile.devices.vnc.{key} is unsupported")));
+            if !["type", "port", "password", "password_file"].contains(&key.as_str()) {
+                return Err(invalid(format!(
+                    "profile.devices.console.{key} is unsupported"
+                )));
             }
         }
     }
-    let enabled = declared == Some(&Value::Bool(true)) || settings.is_some();
+    let enabled = settings.and_then(|s| s.get("type")).and_then(Value::as_str) == Some("vnc");
     let selected = match selection {
         "profile" if enabled => Some(
             settings
@@ -144,7 +138,14 @@ pub(super) fn normalize_profile(profile: &mut Value, enabled: bool) -> Result<()
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or_else(|| invalid("profile.devices must be a mapping"))?;
-    devices.insert("vnc".into(), json!(enabled));
+    devices.insert(
+        "console".into(),
+        if enabled {
+            json!({"type":"vnc"})
+        } else {
+            json!({"type":"none"})
+        },
+    );
     Ok(())
 }
 
@@ -187,8 +188,8 @@ mod tests {
             fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
         }
         let available_port = (5900..=5999).rev().find(|port| available(*port)).unwrap();
-        let profile = json!({"devices":{"vnc":{"port":available_port,"password_file":"vnc.pass"}}});
-        let display = resolve(&profile, &root.join("profile.json"), "profile", None)
+        let profile = json!({"devices":{"console":{"type":"vnc","port":available_port,"password_file":"vnc.pass"}}});
+        let display = resolve(&profile, &root.join("profile.yaml"), "profile", None)
             .unwrap()
             .unwrap();
         assert_eq!(display.port, available_port);
@@ -205,24 +206,24 @@ mod tests {
         assert!(
             resolve(
                 &profile,
-                &root.join("profile.json"),
+                &root.join("profile.yaml"),
                 &available_port.to_string(),
                 None
             )
             .is_ok()
         );
-        assert!(resolve(&profile, &root.join("profile.json"), "59000", None).is_err());
+        assert!(resolve(&profile, &root.join("profile.yaml"), "59000", None).is_err());
         assert!(
             resolve(
-                &json!({"devices":{"vnc":false}}),
-                &root.join("profile.json"),
+                &json!({"devices":{"console":{"type":"none"}}}),
+                &root.join("profile.yaml"),
                 "none",
                 Some(&secret)
             )
             .is_err()
         );
         fs::write(&secret, b"too-long!\n").unwrap();
-        assert!(resolve(&profile, &root.join("profile.json"), "profile", None).is_err());
+        assert!(resolve(&profile, &root.join("profile.yaml"), "profile", None).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

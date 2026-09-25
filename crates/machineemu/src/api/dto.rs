@@ -12,6 +12,14 @@ pub(super) struct StartInstance {
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EngineUpgrade {
+    pub(super) revision: i64,
+    #[schema(value_type = Object)]
+    pub(super) engine: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateSnapshot {
     pub(super) snapshot_id: String,
 }
@@ -23,17 +31,32 @@ pub(super) struct CloneSnapshot {
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CreateInstance {
     pub(super) instance_id: String,
+    #[serde(default)]
     pub(super) image_id: String,
     #[serde(default = "custom_profile_id")]
     pub(super) profile_id: String,
     #[serde(default)]
-    pub(super) launch_plan: Option<LaunchSpec>,
-    #[serde(default)]
     pub(super) auto_remove: bool,
     #[serde(default)]
     pub(super) profile: Option<serde_json::Value>,
+    /// Optional domain documents used by the server-owned resolver.  The ID
+    /// fields remain the persisted references; these fields let callers send
+    /// a consistent read snapshot when the document is not in the workspace.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub(super) image: Option<machineemu_core::domain::ImageManifestDocument>,
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub(super) hardware_identity: Option<machineemu_core::domain::HardwareIdentityDocument>,
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub(super) overrides: machineemu_core::domain::CreateInstanceOverrides,
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub(super) context: machineemu_core::resolution::ResolutionContext,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]

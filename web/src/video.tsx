@@ -17,9 +17,9 @@ function validCursor(value: CursorRecord): boolean {
     && Array.isArray(value.data) && value.data.length === value.width * value.height * 4;
 }
 
-function socketUrl(instance: string, session: string, clientId: string): string {
+function socketUrl(instance: string, ticket: string): string {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${location.host}/ws/v1/sessions/${encodeURIComponent(instance)}/${encodeURIComponent(session)}/video?client_id=${encodeURIComponent(clientId)}`;
+  return `${scheme}://${location.host}/ws/v2/instances/${encodeURIComponent(instance)}/video?ticket=${encodeURIComponent(ticket)}`;
 }
 
 function client(): MachineEmuClient {
@@ -63,7 +63,6 @@ export function Video() {
   const canvas = useRef<HTMLCanvasElement>(null);
   const cursorCanvas = useRef<HTMLCanvasElement>(null);
   const socket = useRef<WebSocket | undefined>(undefined);
-  const [clientId] = useState(() => crypto.randomUUID().replaceAll("-", ""));
   const [connected, setConnected] = useState(false);
   const [inputOwned, setInputOwned] = useState(false);
   const [error, setError] = useState<string>();
@@ -96,9 +95,6 @@ export function Video() {
       shape.getContext("2d")?.putImageData(bitmap, 0, 0);
       context.drawImage(shape, cursor.x - cursor.hot_x, cursor.y - cursor.hot_y);
     };
-    const next = new WebSocket(socketUrl(instance, id, clientId));
-    next.binaryType = "arraybuffer";
-    socket.current = next;
     const fail = (reason: unknown) => { if (!stopped) setError(reason instanceof Error ? reason.message : "Video stream failed."); };
     const createDecoder = () => {
       decoder = new VideoDecoder({
@@ -119,10 +115,14 @@ export function Video() {
       });
     };
     createDecoder();
-    next.onopen = () => { setConnected(true); next.send(JSON.stringify({ type: "request_idr" })); };
-    next.onclose = () => { setConnected(false); setInputOwned(false); };
-    next.onerror = () => fail("The H.264 display stream disconnected");
-    next.onmessage = async (event) => {
+    let next: WebSocket | undefined;
+    void client().streamTicket(instance, "video", { control: true }).then(({ ticket }) => {
+      if (stopped) return;
+      next = new WebSocket(socketUrl(instance, ticket)); next.binaryType = "arraybuffer"; socket.current = next;
+      next.onopen = () => { setConnected(true); setInputOwned(true); next?.send(JSON.stringify({ type: "request_idr" })); };
+      next.onclose = () => { setConnected(false); setInputOwned(false); };
+      next.onerror = () => fail("The H.264 display stream disconnected");
+      next.onmessage = async (event) => {
       try {
         const incoming = new Uint8Array(event.data as ArrayBuffer);
         const merged = new Uint8Array(buffer.byteLength + incoming.byteLength); merged.set(buffer); merged.set(incoming, buffer.byteLength); buffer = merged;
@@ -147,19 +147,11 @@ export function Video() {
             if (value.type === "cursor" && validCursor(value)) { cursor = value; drawCursor(); }
           }
         }
-      } catch (reason) { fail(reason); next.close(); }
-    };
-    return () => { stopped = true; next.close(); if (decoder && decoder.state !== "closed") decoder.close(); };
-  }, [clientId, id, instance]);
-
-  async function claim(takeover = false) {
-    try { await client().vncControl(instance, id, { action: "claim", client_id: clientId, takeover }); setInputOwned(true); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to claim video input."); }
-  }
-  async function release() {
-    try { await client().vncControl(instance, id, { action: "release", client_id: clientId }); setInputOwned(false); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to release video input."); }
-  }
+      } catch (reason) { fail(reason); next?.close(); }
+      };
+    }).catch(fail);
+    return () => { stopped = true; next?.close(); if (decoder && decoder.state !== "closed") decoder.close(); };
+  }, [id, instance]);
   function send(type: string, fields: Record<string, unknown> = {}) {
     if (inputOwned && socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type, ...fields }));
   }
@@ -167,7 +159,7 @@ export function Video() {
     <Link className="back-link" to={`/sessions/${encodeURIComponent(id)}?instance=${encodeURIComponent(instance)}`}>← Session</Link>
     <header className="machineemu-header"><p className="eyebrow">LOCAL EMULATION</p><h1>H.264 display</h1></header>
     <p className="session-meta">{connected ? `Connected · ${inputOwned ? "input enabled" : "view only"}` : "Connecting…"}</p>
-    <div className="actions"><button className="button" disabled={!connected} onClick={() => void claim()}>Take input</button><button className="button button-secondary" disabled={!connected} onClick={() => void claim(true)}>Take over</button><button className="button button-secondary" disabled={!inputOwned} onClick={() => void release()}>Release input</button></div>
+    <div className="actions"><span className="session-meta">{inputOwned ? "Input enabled" : "View only"}</span></div>
     {error && <p className="notice notice-error" role="alert">{error}</p>}
     <div className="video-canvas-wrap"><canvas className="video-canvas" ref={canvas} aria-label="QEMU H.264 display" /><canvas className="video-cursor-canvas" ref={cursorCanvas} aria-hidden="true" /></div>
     <div className="actions"><button className="button button-secondary" onClick={() => socket.current?.send(JSON.stringify({ type: "request_idr" }))}>Refresh frame</button><button className="button button-secondary" disabled={!inputOwned} onClick={() => send("key_down", { key: "Escape" })}>Send Escape</button></div>

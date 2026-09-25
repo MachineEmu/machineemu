@@ -1,6 +1,12 @@
 use super::launch::{plan_paths, prepare_paths};
 use super::*;
+use machineemu_core::{
+    engine::{PlanInput, build_plan},
+    launch::{LaunchContext, LaunchSpec},
+};
+use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{collections::BTreeMap, path::PathBuf};
 
 static NEXT_LIFECYCLE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -13,6 +19,395 @@ fn lifecycle_id(prefix: &str) -> String {
         "{prefix}-{now:x}-{:x}",
         NEXT_LIFECYCLE_ID.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+/// Render the immutable resolved domain document into the runtime launch
+/// contract. This is the only compatibility boundary: the planner receives a
+/// normalized profile assembled from the resolved spec, never a source profile.
+fn render_domain_launch_plan(
+    workspace: &Workspace,
+    instance_id: &Id,
+    spec: &Value,
+) -> Result<LaunchSpec, RuntimeError> {
+    let mut profile = spec
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::Process("resolved instance spec must be an object".into()))?;
+    // The domain contract uses structured machine and resource values while
+    // the existing QEMU planner consumes the equivalent legacy scalar
+    // representation.  Normalize that representation at this one renderer
+    // boundary; no source profile or image is consulted here.
+    if let Some(machine) = profile.get("machine").cloned()
+        && let Some(machine_object) = machine.as_object()
+    {
+        let machine_type = machine_object
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                RuntimeError::Process("resolved instance machine.type is required".into())
+            })?;
+        profile.insert("machine".into(), Value::String(machine_type.into()));
+        if let Some(smm) = machine_object.get("smm") {
+            profile.insert("smm".into(), smm.clone());
+        }
+        if let Some(accelerator) = machine_object.get("accelerator") {
+            let resources = profile
+                .entry("resources")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Some(resources) = resources.as_object_mut() {
+                resources
+                    .entry("accelerator")
+                    .or_insert_with(|| accelerator.clone());
+            }
+        }
+    }
+    // The domain document uses structured machine/resources/engine values;
+    // the legacy planner's input contract is scalar machine, numeric vcpus,
+    // and an ordered engine-track list. Normalize that contract here so the
+    // renderer consumes the saved domain snapshot without rereading sources.
+    let machine = profile
+        .get("machine")
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .or_else(|| value.as_str())
+        })
+        .ok_or_else(|| RuntimeError::Process("resolved instance has no machine".into()))?
+        .to_owned();
+    profile.insert("machine".into(), Value::String(machine));
+    if let Some(resources) = profile.get_mut("resources").and_then(Value::as_object_mut) {
+        if let Some(memory) = resources.get("memory").cloned()
+            && let Some(memory_object) = memory.as_object()
+            && let Some(bytes) = memory_object.get("bytes").and_then(Value::as_u64)
+        {
+            resources.insert("memory".into(), Value::String(memory_size(bytes)?));
+        }
+        if let Some(vcpus) = resources.get("vcpus").cloned()
+            && let Some(vcpu_object) = vcpus.as_object()
+        {
+            let count = vcpu_object
+                .get("count")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    RuntimeError::Process(
+                        "resolved instance resources.vcpus.count is required".into(),
+                    )
+                })?;
+            resources.insert("vcpus".into(), Value::from(count));
+            let mut topology = serde_json::Map::new();
+            for key in ["sockets", "dies", "clusters", "cores", "threads"] {
+                if let Some(value) = vcpu_object.get(key) {
+                    topology.insert(key.into(), value.clone());
+                }
+            }
+            if !topology.is_empty() {
+                resources.insert("topology".into(), Value::Object(topology));
+            }
+        }
+    }
+    if let Some(firmware) = profile.get_mut("firmware").and_then(Value::as_object_mut) {
+        // Resolved artifacts are immutable bindings.  The planner's source
+        // resolver is retained as the final QEMU argument writer, so expose
+        // those bindings through its source.path vocabulary.
+        for (part, default_name) in [("loader", "OVMF_CODE.fd"), ("nvram", "OVMF_VARS.fd")] {
+            let Some(section) = firmware.get_mut(part).and_then(Value::as_object_mut) else {
+                continue;
+            };
+            if section.get("source").is_none()
+                && let Some(path) = section
+                    .get("artifact")
+                    .and_then(|artifact| artifact.get("path"))
+                    .cloned()
+            {
+                section.insert("source".into(), serde_json::json!({"path": path}));
+            }
+            if section.get("source").is_none()
+                && let Some(path) = section
+                    .get("template")
+                    .and_then(|template| template.get("artifact"))
+                    .and_then(|artifact| artifact.get("path"))
+                    .cloned()
+            {
+                section.insert("source".into(), serde_json::json!({"path": path}));
+            }
+            if part == "nvram" && section.get("name").is_none() {
+                section.insert("name".into(), Value::String(default_name.into()));
+            }
+        }
+    }
+    // Translate the normalized device collections into the planner's final
+    // QEMU-facing disk/network fields.  Selection and identity generation have
+    // already happened in resolution; this only copies pinned values.
+    if let Some(devices) = profile
+        .get("devices")
+        .cloned()
+        .and_then(|v| v.as_object().cloned())
+    {
+        let mut normalized_devices = serde_json::Map::new();
+        for key in [
+            "console",
+            "guest_agent",
+            "nic",
+            "mac",
+            "video",
+            "audio",
+            "usb_tablet",
+            "usb_mouse",
+            "serial",
+            "vsock",
+            "snapshots",
+            "usb",
+            "lcd",
+            "bluetooth",
+        ] {
+            if let Some(value) = devices.get(key) {
+                normalized_devices.insert(key.into(), value.clone());
+            }
+        }
+        if let Some(graphics) = devices
+            .get("graphics")
+            .and_then(Value::as_array)
+            .and_then(|values| values.first())
+        {
+            let graphics_type = graphics
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            normalized_devices.insert("console".into(), serde_json::json!({"type": graphics_type}));
+        }
+        if let Some(video) = devices
+            .get("video")
+            .and_then(Value::as_array)
+            .and_then(|values| values.first())
+        {
+            let mut video = video.clone();
+            if let Some(object) = video.as_object_mut() {
+                object.remove("id");
+                object.remove("primary");
+                object.remove("heads");
+            }
+            normalized_devices.insert("video".into(), video);
+        }
+        if let Some(serial) = devices
+            .get("serial")
+            .and_then(Value::as_array)
+            .and_then(|values| values.first())
+        {
+            let mut serial = serial.clone();
+            if let Some(object) = serial.as_object_mut() {
+                object.remove("id");
+            }
+            normalized_devices.insert("serial".into(), serial);
+        }
+        profile.insert("devices".into(), Value::Object(normalized_devices));
+        if profile.get("storage").is_none()
+            && let Some(disk) = devices
+                .get("disks")
+                .and_then(Value::as_array)
+                .and_then(|disks| {
+                    disks
+                        .iter()
+                        .find(|disk| disk.get("role").and_then(Value::as_str) == Some("root"))
+                        .or_else(|| disks.first())
+                })
+        {
+            let mut disk_spec = serde_json::Map::new();
+            if let Some(driver) = disk.get("driver").and_then(Value::as_object) {
+                if let Some(format) = driver.get("type") {
+                    disk_spec.insert("format".into(), format.clone());
+                }
+                if let Some(bus) = driver.get("bus") {
+                    disk_spec.insert("bus".into(), bus.clone());
+                }
+            }
+            if let Some(target_bus) = disk.pointer("/target/bus") {
+                disk_spec.insert("bus".into(), target_bus.clone());
+            }
+            if let Some(source) = disk.get("source").and_then(Value::as_object) {
+                let mut source_spec = serde_json::Map::new();
+                if let Some(path) = source
+                    .get("artifact")
+                    .and_then(|artifact| artifact.get("path"))
+                {
+                    source_spec.insert("path".into(), path.clone());
+                } else if let Some(component) = source.get("component") {
+                    source_spec.insert("image_component".into(), component.clone());
+                }
+                if !source_spec.is_empty() {
+                    disk_spec.insert("source".into(), Value::Object(source_spec));
+                }
+            }
+            if !disk_spec.contains_key("bus") {
+                disk_spec.insert("bus".into(), Value::String("virtio".into()));
+            }
+            profile.insert("storage".into(), serde_json::json!({"disk": disk_spec}));
+        }
+        if profile.get("network").is_none()
+            && let Some(interface) = devices
+                .get("interfaces")
+                .and_then(Value::as_array)
+                .and_then(|interfaces| interfaces.first())
+        {
+            let mut network = serde_json::Map::new();
+            let network_type = interface
+                .get("network")
+                .and_then(|value| {
+                    value
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .or_else(|| value.as_str())
+                })
+                .unwrap_or("user");
+            network.insert("type".into(), Value::String(network_type.into()));
+            profile.insert("network".into(), Value::Object(network));
+            if let Some(model) = interface
+                .get("model")
+                .or_else(|| interface.get("device"))
+                .cloned()
+            {
+                profile
+                    .entry("devices")
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                if let Some(devices) = profile.get_mut("devices").and_then(Value::as_object_mut) {
+                    devices.insert("nic".into(), model);
+                    if let Some(mac) = interface.get("mac") {
+                        devices.insert("mac".into(), mac.clone());
+                    }
+                }
+            }
+        }
+    }
+    let engine = profile
+        .get("engine")
+        .and_then(|v| v.get("track"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::Process("resolved instance has no pinned engine track".into())
+        })?
+        .to_owned();
+    let executable = profile
+        .get("engine")
+        .and_then(|v| v.get("executable"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::Process("resolved instance has no pinned engine executable".into())
+        })?
+        .to_owned();
+    if let Some(resources) = profile.get_mut("resources").and_then(Value::as_object_mut)
+        && let Some(vcpus) = resources.get("vcpus").cloned()
+        && let Some(count) = vcpus
+            .as_object()
+            .and_then(|value| value.get("count"))
+            .and_then(Value::as_u64)
+    {
+        resources.insert("vcpus".into(), Value::from(count));
+    }
+    let executable = {
+        let path = PathBuf::from(&executable);
+        if path.is_absolute() {
+            path
+        } else {
+            workspace
+                .root()
+                .join("generated-engines")
+                .join(&engine)
+                .join(path)
+        }
+    };
+    let target = profile
+        .get("target")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            profile
+                .get("image")
+                .and_then(|v| v.get("target"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("x86_64-softmmu")
+        .to_owned();
+    profile.insert("schema_version".into(), Value::from(2));
+    profile.insert("id".into(), Value::String(instance_id.as_str().to_owned()));
+    profile.insert("engine".into(), serde_json::json!([engine]));
+    let image_components = profile
+        .get("image")
+        .and_then(|v| v.get("components"))
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| {
+                    v.get("artifact")
+                        .and_then(|artifact| artifact.get("path"))
+                        .and_then(Value::as_str)
+                        .or_else(|| v.get("path").and_then(Value::as_str))
+                        .map(|p| {
+                            let path = PathBuf::from(p);
+                            let path = if path.is_absolute() {
+                                path
+                            } else {
+                                workspace.root().join(path)
+                            };
+                            (k.clone(), path)
+                        })
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let build_digest = spec
+        .get("engine")
+        .and_then(|v| v.get("build_digest"))
+        .and_then(Value::as_str)
+        .unwrap_or("0");
+    let plan = build_plan(PlanInput {
+        profile: Value::Object(profile),
+        release_set: serde_json::json!({"schema_version":1,"engines":{engine.clone():{"executable": executable, "build_digest": build_digest}}}),
+        bundle_root: workspace.root().join("generated-engines"),
+        asset_root: Some(workspace.root().to_owned()),
+        image_components,
+        target: target.clone(),
+        runtime_dir: workspace.root().join("instances").join(instance_id.as_str()),
+        state_dir: Some(workspace.root().join("instances").join(instance_id.as_str())),
+        seed: None, swtpm: None, bridge_helper: None,
+        mac: None, instance: Some(instance_id.as_str().to_owned()),
+    }).map_err(|e| RuntimeError::Process(e.to_string()))?;
+    let runtime = workspace
+        .root()
+        .join("instances")
+        .join(instance_id.as_str());
+    LaunchSpec::from_plan(
+        plan,
+        LaunchContext {
+            workspace: workspace.root(),
+            qmp_socket: &runtime.join("sockets/qmp.sock"),
+            stdout: Some(&runtime.join("qemu.stdout")),
+            stderr: Some(&runtime.join("qemu.stderr")),
+            tpm_seed: None,
+            vnc_auto: false,
+            helpers: Vec::new(),
+        },
+    )
+    .map_err(|e| RuntimeError::Process(e.to_string()))
+}
+
+fn memory_size(bytes: u64) -> Result<String, RuntimeError> {
+    const UNITS: &[(&str, u64)] = &[
+        ("T", 1 << 40),
+        ("G", 1 << 30),
+        ("M", 1 << 20),
+        ("K", 1 << 10),
+    ];
+    for (unit, size) in UNITS {
+        if bytes >= *size && bytes.is_multiple_of(*size) {
+            return Ok(format!("{}{}", bytes / *size, unit));
+        }
+    }
+    if bytes > 0 {
+        Ok(bytes.to_string())
+    } else {
+        Err(RuntimeError::Process(
+            "resolved instance memory must be positive".into(),
+        ))
+    }
 }
 
 async fn refresh_vnc_port(argv: &mut [String], auto: bool) -> Result<Option<u16>, RuntimeError> {
@@ -158,15 +553,27 @@ async fn start_instance_with_lock(
                 .map_err(|_| RuntimeError::Process("workspace lock poisoned".into()))?;
             owner.attach()?
         };
-        let document = workspace.instance_document(&instance_id)?;
-        workspace.materialize_document_profile(&document)?;
-        let mut plan: LaunchSpec =
-            serde_json::from_value(document.launch_plan.ok_or_else(|| {
-                RuntimeError::Process(format!(
-                    "instance {} has no launch plan in its document",
-                    instance_id.as_str()
-                ))
-            })?)?;
+        // A migrated/resolved instance is self-contained. Do not materialize
+        // or reread its source profile, image, or mutable defaults: the domain
+        // document is the authority. A cached launch plan is accepted only as
+        // an immutable field inside that complete domain snapshot.
+        let mut plan: LaunchSpec = if workspace.has_domain_instance_document(&instance_id)? {
+            let document = workspace.domain_instance_document(&instance_id)?;
+            let plan = document
+                .spec
+                .get("launch_plan")
+                .or_else(|| document.spec.get("rendered_launch_plan"))
+                .cloned();
+            match plan {
+                Some(plan) => serde_json::from_value(plan)?,
+                None => render_domain_launch_plan(&workspace, &instance_id, &document.spec)?,
+            }
+        } else {
+            return Err(RuntimeError::Process(format!(
+                "instance {} has no complete domain document; run machineemu-migrate before starting it",
+                instance_id.as_str()
+            )));
+        };
         super::launch::apply_daemon_helpers(&mut plan, &state.helpers);
         let (qmp, stdout, stderr) = plan_paths(workspace.root(), &plan)?;
         let workspace_root = workspace.root().to_owned();

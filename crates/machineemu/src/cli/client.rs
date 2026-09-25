@@ -82,10 +82,13 @@ pub(super) fn effective_client(
     Ok((endpoint, client.token.unwrap_or_else(|| token.to_owned())))
 }
 
-trait ReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+pub(super) trait ReadWrite:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
+{
+}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ReadWrite for T {}
 
-async fn connect_daemon(
+pub(super) async fn connect_daemon(
     endpoint: &str,
 ) -> Result<Box<dyn ReadWrite>, machineemu_core::engine::Error> {
     if let Some(path) = endpoint.strip_prefix("unix:") {

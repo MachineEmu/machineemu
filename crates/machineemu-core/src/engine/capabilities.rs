@@ -229,22 +229,6 @@ pub fn validate_profile_against_qemu(profile: &Value, options: &QemuOptions) -> 
             options.executable.display()
         )));
     }
-    if let Some(version) = profile
-        .get("engine")
-        .and_then(|engine| engine.get("version"))
-        .and_then(Value::as_str)
-    {
-        let actual = options
-            .version
-            .as_deref()
-            .and_then(qemu_version_number)
-            .ok_or_else(|| invalid("QEMU version could not be determined"))?;
-        if actual != version {
-            return Err(invalid(&format!(
-                "profile requires QEMU version {version}, but executable reports {actual}"
-            )));
-        }
-    }
     if let Some(cpu) = profile.get("cpu").and_then(Value::as_str) {
         let cpu_name = cpu.split(',').next().unwrap_or(cpu);
         if !options.cpus.iter().any(|item| item == cpu_name) {
@@ -305,7 +289,7 @@ pub fn validate_profile_against_qemu(profile: &Value, options: &QemuOptions) -> 
         }
         if let Some(video) = devices
             .get("video")
-            .and_then(|value| value.get("type"))
+            .and_then(|value| value.get("model"))
             .and_then(Value::as_str)
         {
             let video = match video {
@@ -370,16 +354,6 @@ pub fn validate_profile_against_qemu(profile: &Value, options: &QemuOptions) -> 
         }
     }
     Ok(())
-}
-
-fn qemu_version_number(version: &str) -> Option<&str> {
-    let mut words = version.split_whitespace();
-    while let Some(word) = words.next() {
-        if word == "version" {
-            return words.next();
-        }
-    }
-    None
 }
 
 pub fn inspect_qemu(

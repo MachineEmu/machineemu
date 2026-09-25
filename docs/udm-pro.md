@@ -38,11 +38,11 @@ command line masks the first-boot reboot and vendor Bluetooth service.
 LCD, Bluetooth, and the two-bridge topology are provided by the
 `udm-pro-lab` profile below.
 
-For an engine built in a Nix development shell, run it with that shell's
-runtime libraries available, or configure a wrapper executable as the engine
-path. QEMU's temporary snapshot directory must also be writable (`TMPDIR`
-can point at the workspace's `staging/` directory). A wrapper supplied with
-`--qemu` must use an absolute path.
+Configure `qemu-10.2-unifi` to point at the packaged engine root, for example
+`../qemu/.cache/packages/unifi-10.2`. The package carries the runtime libraries
+and firmware needed by `bin/qemu-system-aarch64`. QEMU's temporary snapshot
+directory must also be writable (`TMPDIR` can point at the workspace's
+`staging/` directory).
 
 The local smoke run with prepared firmware 5.1.19 reached systemd and
 identified `UDMPRO.al324.v5.1.19`. It was still starting the UI status DB
@@ -80,10 +80,11 @@ its bridge configuration (on this host, `/etc/qemu/bridge.conf` contains
 `allow br0` and `allow br10`). `--net profile` is the default. Supplying
 `--net bridge:br0` replaces the entire four-port mapping with one connection.
 
-For this checkout's locally prepared engine wrapper, add:
+For this checkout's locally prepared engine package, verify:
 
 ```sh
-  --qemu "$PWD/machineemu-workspace/udm-qemu"
+cargo run -p machineemu -- qemu-options \
+  --qemu ../qemu/.cache/packages/unifi-10.2/bin/qemu-system-aarch64
 ```
 
 The daemon starts and stops the simulated Bluetooth helper with the instance.

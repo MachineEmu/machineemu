@@ -1,11 +1,10 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router";
 import { createCatalogSession } from "./catalog-flow";
-import { MachineEmuClient, type CatalogProfile, type SessionSummary } from "./client";
-import { profileDetail, type ProfileDetail } from "./profile-detail";
+import { MachineEmuClient, type CatalogProfile, type Image, type SessionSummary } from "./client";
+import { profileDetail, profileId, type ProfileDetail } from "./profile-detail";
 import { Vnc } from "./vnc";
 import { Video } from "./video";
-import { Gdb } from "./gdb";
 
 function client(): MachineEmuClient {
   return new MachineEmuClient({ token: "" });
@@ -33,6 +32,7 @@ function Catalog() {
   const api = useMemo(client, []);
   const navigate = useNavigate();
   const [profiles, setProfiles] = useState<CatalogProfile[]>([]);
+  const [images, setImages] = useState<Image[]>([]);
   const [healthy, setHealthy] = useState<boolean>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -41,10 +41,12 @@ function Catalog() {
   const reload = useCallback(async () => {
     setLoading(true);
     setError(undefined);
-    const [profileResult, healthResult] = await Promise.allSettled([api.listProfiles(), api.health()]);
+    const [profileResult, imageResult, healthResult] = await Promise.allSettled([api.listProfiles(), api.listImages(), api.health()]);
     setHealthy(healthResult.status === "fulfilled");
     if (profileResult.status === "fulfilled") setProfiles(profileResult.value);
     else setError(errorMessage(profileResult.reason, "Unable to load catalog profiles."));
+    if (imageResult.status === "fulfilled") setImages(imageResult.value);
+    else setError(errorMessage(imageResult.reason, "Unable to load catalog images."));
     setLoading(false);
   }, [api]);
 
@@ -56,10 +58,9 @@ function Catalog() {
     setError(undefined);
     const form = new FormData(event.currentTarget);
     const instanceId = String(form.get("instance") ?? "").trim();
-    const sessionId = String(form.get("session") ?? "").trim();
     try {
       const result = await createCatalogSession(api, {
-        profileId: String(form.get("profile") ?? ""), instanceId, sessionId,
+        profileId: String(form.get("profile") ?? ""), imageId: String(form.get("image") ?? ""), instanceId, sessionId: instanceId,
       });
       navigate(`/sessions/${encodeURIComponent(result.session.session_id)}?instance=${encodeURIComponent(instanceId)}`);
     } catch (reason) {
@@ -78,15 +79,22 @@ function Catalog() {
         <label className="field">Profile
           <select name="profile" required disabled={loading || !profiles.length}>
             {!profiles.length && <option value="">{loading ? "Loading profiles…" : "No profiles available"}</option>}
-            {profiles.map((profile) => <option key={String(profile.id)} value={String(profile.id)}>
-              {String(profile.id)} ({String(profile.machine)})
+            {profiles.map((profile) => <option key={profileId(profile)} value={profileId(profile)}>
+              {profileId(profile)}
+            </option>)}
+          </select>
+        </label>
+        <label className="field">Image
+          <select name="image" required disabled={loading || !images.length}>
+            {!images.length && <option value="">{loading ? "Loading images…" : "No images available"}</option>}
+            {images.map((image) => <option key={String(image.image_id)} value={String(image.image_id)}>
+              {String(image.image_id)} · {String(image.target ?? "unknown target")}
             </option>)}
           </select>
         </label>
         <label className="field">Instance ID<input name="instance" required maxLength={64} /></label>
-        <label className="field">Session ID<input name="session" required maxLength={64} /></label>
         <div className="actions">
-          <button className="button" disabled={busy || loading || !profiles.length}>
+          <button className="button" disabled={busy || loading || !profiles.length || !images.length}>
             {busy ? "Creating…" : "Create session"}
           </button>
           <Link className="button button-secondary" to="/sessions">Open sessions</Link>
@@ -95,12 +103,12 @@ function Catalog() {
           </button>
         </div>
       </form>
-      {error ? <ErrorNotice>{error}</ErrorNotice> : !loading && !profiles.length ? <p className="notice">The service has no catalog profiles.</p> : null}
+      {error ? <ErrorNotice>{error}</ErrorNotice> : !loading && (!profiles.length || !images.length) ? <p className="notice">The service needs at least one profile and image.</p> : null}
     </section>
     {!loading && profiles.length ? <section className="profile-list" aria-labelledby="profiles-title">
       <h2 id="profiles-title">Available profiles</h2>
-      {profiles.map((profile) => <Link className="session-row" key={String(profile.id)} to={`/profiles/${encodeURIComponent(String(profile.id))}`}>
-        <strong>{String(profile.id)}</strong><span>{String(profile.machine)}</span>
+      {profiles.map((profile) => <Link className="session-row" key={profileId(profile)} to={`/profiles/${encodeURIComponent(profileId(profile))}`}>
+        <strong>{profileId(profile)}</strong><span>{profileDetail(profile).machine}</span>
       </Link>)}
     </section> : null}
   </main>;
@@ -175,8 +183,8 @@ function Sessions() {
         {sessions.map((session) => <Link className="session-row" key={session.session_id}
           to={`/sessions/${encodeURIComponent(session.session_id)}?instance=${encodeURIComponent(session.instance_id)}`}>
           <strong>{session.session_id}</strong>
-          <span>{session.machine} · {session.state}</span>
-          <span>{session.instance_id} · {Object.entries(session.capabilities ?? {}).filter(([, capability]) => capability.available).map(([name]) => name).join(", ") || "no declared views"}</span>
+          <span>{session.profile_id} · {session.state}</span>
+          <span>{session.instance_id} · image {session.image_id}{session.ip ? ` · ${session.ip}` : ""}</span>
         </Link>)}
       </div>
     </section>
@@ -189,11 +197,11 @@ function Session() {
   const [query] = useSearchParams();
   const instance = query.get("instance") ?? "";
   const [state, setState] = useState<string>();
-  const [files, setFiles] = useState<number>();
+  const [instanceData, setInstanceData] = useState<Record<string, unknown>>();
+  const [config, setConfig] = useState<Record<string, unknown>>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [qmp, setQmp] = useState<string>();
   const [screenshotUrl, setScreenshotUrl] = useState<string>();
   const validRoute = Boolean(instance && id);
 
@@ -202,12 +210,12 @@ function Session() {
     setLoading(true);
     setError(undefined);
     try {
-      const [session, inventory] = await Promise.all([
-        api.inspectSession(instance, id), api.inventoryInstanceState(instance),
+      const [session, instanceConfig] = await Promise.all([
+        api.inspectSession(instance, id), api.instanceConfig(instance),
       ]);
-      setState(String(session.state));
-      setFiles(Number(inventory.file_count));
-      void api.qmpStatus(instance, id).then((value) => setQmp(value.status)).catch(() => setQmp(undefined));
+      setInstanceData(session);
+      setConfig(instanceConfig);
+      setState(String(session.state ?? "unknown"));
     } catch (reason) {
       setError(errorMessage(reason, "Unable to inspect session."));
     } finally {
@@ -260,13 +268,12 @@ function Session() {
       <h2 id="session-title">Session</h2>
       {!validRoute ? <ErrorNotice>The session URL must include an instance ID.</ErrorNotice> : <>
         <p className="session-meta"><strong>{id}</strong> · {loading ? "Loading…" : state ?? "Unknown state"}</p>
-        <p className="session-meta">Instance: {instance}{files !== undefined && ` · ${files} managed state files`}</p>
-        {qmp && <p className="session-meta">QMP: {qmp}</p>}
+        <p className="session-meta">Instance: {instance} · profile {String(instanceData?.profile_id ?? "unknown")} · image {String(instanceData?.image_id ?? "unknown")}</p>
+        {config && <p className="session-meta">Configuration revision: {String(config.revision ?? "unknown")} · {config.auto_remove ? "auto-remove" : "persistent"}</p>}
         <div className="actions">
           <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/terminal?instance=${encodeURIComponent(instance)}`}>Terminal</Link>
           <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/vnc?instance=${encodeURIComponent(instance)}`}>VNC display</Link>
           <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/video?instance=${encodeURIComponent(instance)}`}>H.264 display</Link>
-          <Link className="button button-secondary" to={`/sessions/${encodeURIComponent(id)}/gdb?instance=${encodeURIComponent(instance)}`}>GDB console</Link>
           <button className="button button-secondary" disabled={busy || loading} onClick={() => void action("reconcile")}>
             {busy ? "Working…" : "Recover status"}
           </button>
@@ -295,9 +302,9 @@ function Session() {
   </main>;
 }
 
-function terminalUrl(instance: string, session: string, ticket: string): string {
+function terminalUrl(instance: string, ticket: string): string {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${location.host}/ws/v1/sessions/${encodeURIComponent(instance)}/${encodeURIComponent(session)}/terminal?ticket=${encodeURIComponent(ticket)}`;
+  return `${scheme}://${location.host}/ws/v2/instances/${encodeURIComponent(instance)}/serial?ticket=${encodeURIComponent(ticket)}`;
 }
 
 function Terminal() {
@@ -320,17 +327,13 @@ function Terminal() {
     setConnection("Requesting terminal access…"); setClaimed(false); setError(undefined);
     try {
       const ticket = await api.createTerminalTicket(instance, id);
-      const next = new WebSocket(terminalUrl(instance, id, ticket.ticket));
+      const next = new WebSocket(terminalUrl(instance, ticket.ticket));
       next.binaryType = "arraybuffer";
       socket.current = next;
-      next.onopen = () => setConnection("Connected · view only");
+      next.onopen = () => { setClaimed(true); setConnection("Connected · control enabled"); };
       next.onmessage = (event) => {
         if (typeof event.data === "string") {
-          try {
-            const message = JSON.parse(event.data) as { type?: string };
-            if (message.type === "terminal.claimed") { setClaimed(true); setConnection("Connected · control enabled"); }
-            if (message.type === "terminal.released") { setClaimed(false); setConnection("Connected · view only"); }
-          } catch { setError("Terminal control response was invalid."); }
+          setOutput((current) => (current + event.data).slice(-200_000));
           return;
         }
         if (event.data instanceof ArrayBuffer) {
@@ -344,9 +347,6 @@ function Terminal() {
   }, [api, id, instance, validRoute]);
 
   useEffect(() => { void connect(); return () => socket.current?.close(); }, [connect]);
-  function control(type: "terminal.claim" | "terminal.release") {
-    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ v: 1, type }));
-  }
   function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!claimed || !input || socket.current?.readyState !== WebSocket.OPEN) return;
@@ -360,14 +360,13 @@ function Terminal() {
       {!validRoute ? <ErrorNotice>The terminal URL must include an instance ID.</ErrorNotice> : <>
         <p className="session-meta" role="status">{connection}</p>
         <div className="actions">
-          {claimed ? <button className="button button-secondary" onClick={() => control("terminal.release")}>Release control</button>
-            : <button className="button" disabled={connection !== "Connected · view only"} onClick={() => control("terminal.claim")}>Take control</button>}
+          <span className="session-meta">Control is claimed by this ticket</span>
           <button className="button button-secondary" onClick={() => void connect()}>Reconnect</button>
         </div>
         {error && <ErrorNotice>{error}</ErrorNotice>}
         <pre className="terminal-output" aria-label="UART output">{output || "Waiting for UART output…"}</pre>
         <form className="terminal-input" onSubmit={send}><label>Send line<input value={input} disabled={!claimed} onChange={(event) => setInput(event.target.value)} /></label><button className="button" disabled={!claimed || !input}>Send</button></form>
-        <p className="session-meta">Input remains disabled until you explicitly take control. Output is capped locally at 200 kB.</p>
+        <p className="session-meta">The v2 serial ticket claims control for this connection. Output is capped locally at 200 kB.</p>
       </>}
     </section>
   </main>;
@@ -385,7 +384,6 @@ export function App() {
     <Route path="/sessions/:id/terminal" element={<Terminal />} />
     <Route path="/sessions/:id/vnc" element={<Vnc />} />
     <Route path="/sessions/:id/video" element={<Video />} />
-    <Route path="/sessions/:id/gdb" element={<Gdb />} />
     <Route path="/sessions/:id" element={<Session />} />
     <Route path="*" element={<NotFound />} />
   </Routes>;

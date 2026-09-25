@@ -279,10 +279,19 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v2/health", get(health))
         .route("/api/v2/openapi.json", get(openapi_document))
-        .route("/api/v2/images", post(register_image))
+        .route(
+            "/api/v2/images",
+            get(images::list_images).post(register_image),
+        )
         .route(
             "/api/v2/image-imports/vmmanager-base",
             post(start_vmmanager_base_import),
+        )
+        .route("/api/v2/engine-imports", post(engines::start_engine_import))
+        .route("/api/v2/engine-imports/:id", get(get_image_import))
+        .route(
+            "/api/v2/engine-imports/:id/events",
+            get(stream_image_import_events),
         )
         .route("/api/v2/image-imports/:id", get(get_image_import))
         .route(
@@ -293,13 +302,26 @@ fn router(state: AppState) -> Router {
             "/api/v2/images/:id",
             get(get_image).put(documents::put_image),
         )
+        .route("/api/v2/profiles", get(documents::list_profiles))
         .route(
             "/api/v2/profiles/:id",
             get(documents::get_profile).put(documents::put_profile),
         )
         .route(
+            "/api/v2/hardware-identities",
+            get(hardware_identities::list).post(hardware_identities::create),
+        )
+        .route(
+            "/api/v2/hardware-identities/:id",
+            get(hardware_identities::get).put(hardware_identities::put),
+        )
+        .route(
             "/api/v2/instances",
             get(list_instances).post(create_instance),
+        )
+        .route(
+            "/api/v2/instances/resolve",
+            post(instances::resolve_instance),
         )
         .route(
             "/api/v2/instances/:id",
@@ -308,6 +330,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/v2/instances/:id/config",
             get(documents::get_instance_config).put(documents::put_instance_config),
+        )
+        .route(
+            "/api/v2/instances/:id/engine-upgrade",
+            post(documents::upgrade_instance_engine),
         )
         .route("/api/v2/instances/:id/start", post(start_instance))
         .route(
@@ -328,6 +354,7 @@ fn router(state: AppState) -> Router {
         .route("/api/v2/instances/:id/resume", post(resume_instance))
         .route("/api/v2/instances/:id/reset", post(reset_instance))
         .route("/api/v2/instances/:id/events", get(events::stream_events))
+        .route("/api/v2/instances/:id/logs", get(console::logs))
         .route(
             "/api/v2/instances/:id/guest-agent",
             get(guest_agent::get_guest_agent_information),
@@ -435,13 +462,16 @@ async fn shutdown() {
 }
 
 mod auth;
+mod console;
 mod devices;
 mod display_control;
 mod documents;
 mod dto;
+mod engines;
 mod events;
 mod guest_agent;
 mod guest_exec;
+mod hardware_identities;
 mod helper_control;
 mod helpers;
 mod images;

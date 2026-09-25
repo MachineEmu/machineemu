@@ -217,17 +217,12 @@ impl Workspace {
     ) -> Result<Instance> {
         let snapshot = self.snapshot(snapshot_id)?;
         let source_instance = self.instance(&snapshot.instance_id)?;
-        // Restore before creating metadata: creation now publishes instance.json.
+        // Restore before creating metadata: creation now publishes instance.yaml.
         self.restore_snapshot(snapshot_id, destination)?;
         let owned = self.root.join("instances").join(instance_id.as_str());
         if destination == owned {
             // A clone must never launch the source machine's saved paths or identity.
-            for name in [
-                "instance.json",
-                "instance.yaml",
-                "instance.yml",
-                "profile.json",
-            ] {
+            for name in ["instance.yaml", "instance.yml", "profile.yaml"] {
                 let path = destination.join(name);
                 match fs::remove_file(&path) {
                     Ok(()) => {}

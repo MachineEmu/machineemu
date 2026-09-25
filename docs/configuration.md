@@ -26,19 +26,22 @@ engines:
     path: /run/current-system/sw/bin
     version: 10.2.4
   qemu-10.2-unifi:
-    path: /home/rick/projects-caddy/machineemu/qemu/.cache/qemu-build-10.2.4-unifi
+    path: /home/rick/projects-caddy/machineemu/qemu/.cache/packages/unifi-10.2
     version: 10.2.4
     target: aarch64-softmmu
+    build_digest: sha256:d569f3e0e61079430cdc02d944a3aa252ff378bd9eb965adeb95b31af82fd6e1
   qemu-10.2-analysis:
-    path: /home/rick/projects-caddy/machineemu/qemu/.cache/qemu-build-10.2.4-analysis
+    path: /home/rick/projects-caddy/machineemu/qemu/.cache/packages/analysis-10.2
     version: 10.2.4
     target: x86_64-softmmu
+    build_digest: sha256:a01e24d1cc568e842bea126f3b516cec8b20885d350370190904177b21fb31c5
 ```
 
-`engines.<track>.path` may point directly to a QEMU executable or to a build
-directory containing the executable for its `target`. When `machineemu run` is invoked
-without an explicit `--qemu`, it selects the engine matching the profile's
-`engine.track`, then falls back to `system`. This choice is saved in the new
+`engines.<track>.path` may point directly to a QEMU executable or to a packaged
+engine root containing `bin/qemu-system-<architecture>`. When `machineemu run`
+is invoked without an explicit `--qemu`, it selects the first configured engine
+listed by the profile's `engine` array, then falls back to `qemu-system` only
+when the profile does not name an engine. This choice is saved in the new
 instance's launch plan; changing an engine setting does not replan existing
 instances. `build_digest` is optional and can be added after a QEMU rebuild
 when the build should be pinned.
@@ -79,11 +82,35 @@ When the server uses `unix_socket`, the daemon creates the socket with mode
 listeners always require `bearer_token`. Relative paths are resolved relative
 to the configuration file.
 
-## Keeping local QEMU runtime libraries available
+## Verifying local engine packages
 
-Local engines may point directly at the sibling QEMU build directories, such as
-`../qemu/.cache/qemu-build-10.2.4-analysis`. Rebuild or re-enter the matching
-QEMU development shell when those binaries report missing runtime libraries.
+Import packaged engines through the daemon, using the same workspace and
+progress stream workflow as base-image imports:
+
+```sh
+machineemu install-engines --workspace ./machineemu-workspace --source \
+  /absolute/path/analysis-10.2-x86_64-linux.tar.gz \
+  /absolute/path/unifi-10.2-x86_64-linux.tar.gz
+```
+
+`import-engine` is an alias for `install-engines`. `--daemon` and `--token`
+select the daemon as with `import-vmmanager-base`. Source paths refer to files
+on the daemon host; archives are not uploaded. Prefer absolute source paths.
+The daemon verifies `SHA256SUMS` and the manifest's executable hashes before
+registering the bundle under `engines/<track>/<payload-digest>/` in its workspace.
+The archive must contain one directory, regular files and directories only,
+with a clean `engine-build.json` manifest and checksums for every payload file.
+
+The workspace's `engines/registry.json` records imported tracks. New instances
+can select them through the profile's `engine` array; explicitly configured
+engines take precedence over imported tracks with the same name. Re-importing
+an unchanged bundle reuses its verified installation. A different bundle gets
+a separate directory and updates the registry without changing existing instance
+launch plans. No host configuration file is rewritten.
+
+Local engines should point at the packaged roots emitted by the sibling QEMU
+build, such as `../qemu/.cache/packages/analysis-10.2`. The package carries its
+runtime libraries and firmware, so `LD_LIBRARY_PATH` is not required.
 Do not keep stale wrapper launchers under `machineemu-workspace/engines`; the
 saved instance launch plan should record the actual executable selected from the
 configured engine path.
@@ -91,5 +118,6 @@ configured engine path.
 Verify the configured analysis engine after rebuilding QEMU:
 
 ```sh
-../qemu/.cache/qemu-build-10.2.4-analysis/qemu-system-x86_64 --version
+cargo run -p machineemu -- qemu-options \
+  --qemu ../qemu/.cache/packages/analysis-10.2/bin/qemu-system-x86_64
 ```

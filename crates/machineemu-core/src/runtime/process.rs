@@ -54,6 +54,7 @@ impl ManagedProcess {
                         || message.contains("Failed to connect to bus")
                         || message.contains("exited before QEMU published its pid")
                         || message.contains("timed out waiting for scoped QEMU pid")
+                        || message.contains("invalid scoped QEMU pid")
                         || message.contains("Interactive authentication required") =>
                 {
                     Self::spawn(run_id, argv, stdout, stderr)

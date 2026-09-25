@@ -1,6 +1,8 @@
 //! Generated API v2 contract. Keep these operations in sync with `router`.
 #![allow(dead_code)] // Utoipa reads these schema-only functions and fields at compile time.
-use super::{devices, display_control, documents, dto, events, guest_agent, guest_exec, streams};
+use super::{
+    devices, display_control, documents, dto, engines, events, guest_agent, guest_exec, streams,
+};
 use utoipa::{Modify, OpenApi, ToSchema, openapi::OpenApi as Document};
 
 #[derive(ToSchema)]
@@ -68,11 +70,59 @@ macro_rules! body_endpoint {
 }
 
 endpoint!(health, get, "/api/v2/health", "Health check", 200);
+endpoint!(list_profiles, get, "/api/v2/profiles", "List profiles", 200);
+endpoint!(
+    list_hardware_identities,
+    get,
+    "/api/v2/hardware-identities",
+    "List hardware identities",
+    200
+);
+body_endpoint!(
+    create_hardware_identity,
+    post,
+    "/api/v2/hardware-identities",
+    "Create a hardware identity",
+    201,
+    serde_json::Value
+);
+endpoint!(
+    get_hardware_identity,
+    get,
+    "/api/v2/hardware-identities/{id}",
+    "Get a hardware identity",
+    200,
+    ("id" = String, Path)
+);
+body_endpoint!(
+    put_hardware_identity,
+    put,
+    "/api/v2/hardware-identities/{id}",
+    "Replace a hardware identity",
+    200,
+    serde_json::Value,
+    ("id" = String, Path)
+);
+endpoint!(
+    instance_logs,
+    get,
+    "/api/v2/instances/{id}/logs",
+    "Read instance logs",
+    200,
+    ("id" = String, Path, description = "Instance ID")
+);
 endpoint!(
     openapi_document,
     get,
     "/api/v2/openapi.json",
     "Get the API v2 OpenAPI document",
+    200
+);
+endpoint!(
+    list_images,
+    get,
+    "/api/v2/images",
+    "List registered images",
     200
 );
 body_endpoint!(
@@ -113,6 +163,30 @@ endpoint!(
     security(("bearerAuth" = []))
 )]
 fn stream_image_import_events() {}
+body_endpoint!(
+    start_engine_import,
+    post,
+    "/api/v2/engine-imports",
+    "Import and verify an engine bundle",
+    202,
+    engines::ImportEngine
+);
+endpoint!(
+    get_engine_import,
+    get,
+    "/api/v2/engine-imports/{id}",
+    "Get an engine import job",
+    200,
+    ("id" = String, Path)
+);
+#[utoipa::path(
+    get, path = "/api/v2/engine-imports/{id}/events",
+    summary = "Stream engine import progress",
+    params(("id" = String, Path), ("Last-Event-ID" = Option<String>, Header)),
+    responses((status = 200, description = "Engine import events", content_type = "text/event-stream", body = String)),
+    security(("bearerAuth" = []))
+)]
+fn stream_engine_import_events() {}
 endpoint!(
     get_image,
     get,
@@ -170,6 +244,14 @@ body_endpoint!(
     201,
     dto::CreateInstance
 );
+body_endpoint!(
+    resolve_instance,
+    post,
+    "/api/v2/instances/resolve",
+    "Resolve a complete instance without saving it",
+    200,
+    serde_json::Value
+);
 endpoint!(
     get_instance,
     get,
@@ -193,6 +275,15 @@ body_endpoint!(
     "Replace stopped instance profile and launch plan (JSON or YAML)",
     200,
     documents::InstanceConfig,
+    ("id" = String, Path)
+);
+body_endpoint!(
+    upgrade_instance_engine,
+    post,
+    "/api/v2/instances/{id}/engine-upgrade",
+    "Upgrade a stopped instance to a compatible engine build",
+    200,
+    dto::EngineUpgrade,
     ("id" = String, Path)
 );
 #[utoipa::path(
@@ -453,7 +544,7 @@ body_endpoint!(
     get,
     path = "/ws/v2/instances/{id}/{kind}",
     summary = "Open a ticketed WebSocket stream",
-    description = "Use a one-use ticket issued by the stream or SPICE ticket endpoint. Kinds: vnc, video, audio-dbus, usbredir, lcm, frontpanel, spice-main, spice-playback, spice-record. See docs/operations/api-v2-streams-devices.md for binary framing and input messages.",
+        description = "Use a one-use ticket issued by the stream or SPICE ticket endpoint. Kinds: vnc, video, audio-dbus, usbredir, serial, lcm, frontpanel, spice-main, spice-playback, spice-record. See docs/operations/api-v2-streams-devices.md for binary framing and input messages.",
     params(("id" = String, Path), ("kind" = String, Path), ("ticket" = String, Query)),
     responses((status = 101, description = "WebSocket upgrade"))
 )]
@@ -462,7 +553,7 @@ fn connect_stream() {}
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        health, openapi_document, register_image, start_vmmanager_base_import, get_image_import, stream_image_import_events, get_image, put_image, get_profile, put_profile, list_instances, create_instance,
+        health, openapi_document, list_profiles, list_hardware_identities, create_hardware_identity, get_hardware_identity, put_hardware_identity, instance_logs, list_images, register_image, start_vmmanager_base_import, get_image_import, stream_image_import_events, start_engine_import, get_engine_import, stream_engine_import_events, get_image, put_image, get_profile, put_profile, list_instances, create_instance, resolve_instance, upgrade_instance_engine,
         get_instance, get_instance_config, put_instance_config, stream_events, guest_agent_information, start_guest_execution, stream_guest_execution,
         remove_instance, get_instance_tombstone, start_instance, stop_instance, restart_instance, send_key, screenshot, pause_instance,
         resume_instance, reset_instance, create_snapshot, get_snapshot, clone_snapshot,

@@ -70,7 +70,10 @@ The workspace image manifest is the source of truth for image configuration.
 For example, edit `machineemu-workspace/images/win11-dev/manifest.json` to add
 an engine to `supported_engine_tracks`. The CLI and daemon read the file on
 each lookup, so no re-registration or restart is required after an edit.
-`machineemu images` shows the editable path. These workspace manifests contain
+`machineemu images` lists the daemon's registered images through `GET /api/v2/images`.
+It uses the configured client connection, with `--daemon` and `--token` overrides;
+`--json` prints the API response. Editable manifests live at
+`images/<id>/manifest.json` in the daemon's workspace. These workspace manifests contain
 `disk_sha256`, optional `firmware_sha256` and `tpm_state_sha256`, `target`,
 `engine_track`, and optional `supported_engine_tracks`. The `image_id` must
 match the enclosing directory name. Keep the component digests intact when

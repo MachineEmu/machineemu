@@ -1,8 +1,10 @@
 import { MachineEmuClient } from "./client";
 import { createCatalogSession } from "./catalog-flow";
+import { profileId } from "./profile-detail";
 
 export interface CatalogScreenClient {
   listProfiles: MachineEmuClient["listProfiles"];
+  listImages: MachineEmuClient["listImages"];
   createCatalogSession: MachineEmuClient["createCatalogSession"];
 }
 
@@ -26,18 +28,26 @@ export async function mountCatalogScreen(root: HTMLElement, client: CatalogScree
   submit.textContent = "Create session";
   const status = document.createElement("p");
   status.setAttribute("role", "status");
-  form.append(profile, instance, session, submit);
+  const image = document.createElement("select");
+  image.name = "image_id";
+  form.append(profile, image, instance, session, submit);
   root.append(heading, form, status);
 
   try {
-    const profiles = await client.listProfiles();
+    const [profiles, images] = await Promise.all([client.listProfiles(), client.listImages()]);
     for (const item of profiles) {
       const option = document.createElement("option");
-      option.value = String(item.id);
-      option.textContent = `${item.id} (${String(item.machine)})`;
+      option.value = profileId(item);
+      option.textContent = profileId(item);
       profile.append(option);
     }
-    status.textContent = profiles.length ? "Choose a profile." : "No profiles are available.";
+    for (const item of images) {
+      const option = document.createElement("option");
+      option.value = String(item.image_id);
+      option.textContent = `${item.image_id} (${String(item.target ?? "unknown target")})`;
+      image.append(option);
+    }
+    status.textContent = profiles.length && images.length ? "Choose a profile and image." : "No profiles or images are available.";
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : "Unable to load profiles.";
     return;
@@ -50,10 +60,11 @@ export async function mountCatalogScreen(root: HTMLElement, client: CatalogScree
     try {
       const result = await createCatalogSession(client, {
         profileId: profile.value,
+        imageId: image.value,
         instanceId: instance.value,
         sessionId: session.value,
       });
-      status.textContent = `Created ${result.session.session_id} from ${result.profile.id}.`;
+      status.textContent = `Created ${result.session.session_id} from ${profileId(result.profile)}.`;
     } catch (error) {
       status.textContent = error instanceof Error ? error.message : "Unable to create session.";
     } finally {

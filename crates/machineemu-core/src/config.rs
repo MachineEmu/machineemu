@@ -9,9 +9,16 @@ use std::{
 pub struct MachineEmuConfig {
     pub server: Option<ServerConfig>,
     pub client: Option<ClientConfig>,
+    pub defaults: Option<DefaultConfig>,
     pub helpers: Option<HelperConfig>,
     #[serde(default)]
     pub engines: std::collections::BTreeMap<String, EngineConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DefaultConfig {
+    pub profile: Option<String>,
+    pub engine: Option<String>,
 }
 
 /// Host programs a run needs beside the engine. They are resolved through PATH

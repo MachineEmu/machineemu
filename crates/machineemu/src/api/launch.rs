@@ -47,6 +47,7 @@ pub(super) fn plan_paths(
     plan_paths_inner(root, plan, true)
 }
 
+#[cfg(test)]
 pub(super) fn validate_plan_paths(
     root: &std::path::Path,
     plan: &LaunchSpec,

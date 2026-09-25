@@ -1,16 +1,19 @@
-# Bundled profiles
+# Profile templates
 
-Profiles live in `profiles/` and are optional creation templates. They contain
-redistributable launch metadata only. Each created instance keeps its own
+Runtime profiles live in `<workspace>/profiles/` and are optional creation
+templates. `machineemu init` creates the default workspace-local templates. The
+checked-in `profiles/` directory is kept as source examples and test fixtures;
+named launches no longer fall back to it. Each created instance keeps its own
 resolved settings in `instances/<id>/instance.json` (or YAML); later template
 edits do not change it.
-They refer to engine tracks, logical asset identifiers, resources, devices, and
+They refer to ordered engine tracks, image components, resources, devices, and
 policy. Firmware, prepared disks, credentials, and host-specific paths remain
-external and must be imported through the asset boundary with content hashes.
+external and are resolved from the selected image bundle or explicit local
+paths.
 
-Bundled and workspace profiles use JSON (`<id>.json`). An explicit
-profile path may point to a YAML (`.yaml` or `.yml`) file. The selected
-profile's `id` supplies template provenance in the instance document.
+Workspace profiles use JSON (`<id>.json`). An explicit profile path may point
+to a YAML (`.yaml` or `.yml`) file. The selected profile's `id` supplies
+template provenance in the instance document.
 
 `devices.nic` names the NIC model and `devices.mac` may pin its address. A
 profile that pins one is asserting an identity every instance launched from it

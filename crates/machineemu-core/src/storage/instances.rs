@@ -45,11 +45,18 @@ impl Workspace {
     pub fn save_instance_launch(
         &self,
         instance_id: &Id,
-        plan_json: &str,
+        _plan_json: &str,
         auto_remove: bool,
     ) -> Result<()> {
         let mut document = self.instance_document(instance_id)?;
-        document.launch_plan = Some(serde_json::from_str(plan_json)?);
+        if document.domain_document.is_none() {
+            return Err(Error::Process(
+                "cannot save a launch plan; instance requires a complete domain document".into(),
+            ));
+        }
+        // Launch plans are derived data.  Keep this method only for the
+        // migration-era storage API; a runtime caller must never replace the
+        // authoritative domain snapshot with client-generated arguments.
         document.auto_remove = auto_remove;
         self.write_instance_document_at(&self.instance_document_path(instance_id)?, &document)
     }
@@ -59,10 +66,11 @@ impl Workspace {
             return Ok(None);
         }
         let document = self.instance_document(instance_id)?;
-        document
-            .launch_plan
-            .map(|plan| Ok((serde_json::to_string(&plan)?, document.auto_remove)))
-            .transpose()
+        if document.domain_document.is_some() {
+            Ok(Some((String::new(), document.auto_remove)))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn record_instance_tombstone(
@@ -292,7 +300,18 @@ impl Workspace {
                 )));
             }
         }
-        let profile = self.read_legacy_profile(staged)?;
+        let profile = self.read_staged_profile(staged)?;
+        let domain_document = {
+            let path = staged.join("domain_document.yaml");
+            match fs::read(&path) {
+                Ok(_) => Some(
+                    crate::engine::load_document(&path)
+                        .map_err(|error| Error::Process(error.to_string()))?,
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(source) => return Err(Error::Io { path, source }),
+            }
+        };
         let document = InstanceDocument {
             schema_version: 1,
             instance_id: instance_id.as_str().into(),
@@ -301,8 +320,9 @@ impl Workspace {
             auto_remove,
             profile,
             launch_plan: serde_json::from_str(plan_json)?,
+            domain_document,
         };
-        self.write_instance_document_at(&staged.join("instance.json"), &document)?;
+        self.write_instance_document_at(&staged.join("instance.yaml"), &document)?;
         fs::write(staged.join(".machineemu-create"), b"staged\n").map_err(|source| Error::Io {
             path: staged.join(".machineemu-create"),
             source,

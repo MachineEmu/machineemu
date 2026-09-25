@@ -428,8 +428,6 @@ pub(super) fn plan(
         "identity_seed",
         "clone",
         "collection",
-        "overlay",
-        "telemetry",
         "patch_revision",
         "smbios",
         "acpi",
@@ -480,10 +478,8 @@ pub(super) fn plan(
     {
         return Err(invalid("analysis.clone must be a safe identifier"));
     }
-    for key in ["collection", "overlay", "telemetry"] {
-        if raw.get(key).is_some_and(|v| !v.is_boolean()) {
-            return Err(invalid(format!("analysis.{key} must be boolean")));
-        }
+    if raw.get("collection").is_some_and(|v| !v.is_boolean()) {
+        return Err(invalid("analysis.collection must be boolean"));
     }
     let revision = raw
         .get("patch_revision")
@@ -542,7 +538,7 @@ pub(super) fn plan(
     let descriptors = validate_descriptors(raw.get("device_descriptors"))?;
     let sensors = validate_sensors(raw.get("sensors"))?;
     let pci = validate_pci(raw.get("pci"))?;
-    let normalized = json!({"schema_version":1,"profile":"malware-analysis","identity_seed_sha256":seed_hash,"identity":identity,"clone":clone,"collection":raw.get("collection").cloned().unwrap_or(json!(false)),"overlay":raw.get("overlay").cloned().unwrap_or(json!(true)),"telemetry":raw.get("telemetry").cloned().unwrap_or(json!(true)),"patch_revision":revision,"smbios":smbios,"acpi":acpi,"device_descriptors":descriptors,"sensors":sensors,"pci":pci});
+    let normalized = json!({"schema_version":1,"profile":"malware-analysis","identity_seed_sha256":seed_hash,"identity":identity,"clone":clone,"collection":raw.get("collection").cloned().unwrap_or(json!(false)),"patch_revision":revision,"smbios":smbios,"acpi":acpi,"device_descriptors":descriptors,"sensors":sensors,"pci":pci});
     let cpu = profile.get("cpu").cloned().unwrap_or(json!("host,kvm=off"));
     let cpu_text = cpu
         .as_str()
@@ -613,8 +609,19 @@ mod tests {
 
     fn bundled_profile() -> Value {
         let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles/malware-analysis-x64.json");
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles/malware-analysis-x64.yaml");
+        let document: Value = serde_yaml::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut profile = document.get("spec").cloned().unwrap_or(document);
+        let identity_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../hardware-identities/malware-analysis-nuc11.yaml");
+        let identity: Value =
+            serde_yaml::from_slice(&std::fs::read(identity_path).unwrap()).unwrap();
+        if let Some(analysis) = identity.get("spec").and_then(|spec| spec.get("analysis")) {
+            profile["analysis"] = analysis.clone();
+        }
+        profile["schema_version"] = serde_json::json!(2);
+        profile["id"] = serde_json::json!("malware-analysis-x64");
+        profile
     }
 
     #[test]
