@@ -103,7 +103,7 @@ fn image_document(
 ) -> Result<ImageManifestDocument, RuntimeError> {
     let id = Id::new("image", image_id)?;
     let image = workspace.image(&id)?;
-    let components = image
+    let mut components = image
         .components
         .iter()
         .map(|(name, component)| {
@@ -124,6 +124,39 @@ fn image_document(
             )
         })
         .collect::<Map<_, _>>();
+    // Older registered manifests contain only component digests. Expose the
+    // durable component paths in the domain image document as well, so a
+    // profile binding such as `image_component: firmware` can be validated.
+    if components.is_empty() {
+        let mut add = |name: &str, path: &str, digest: Option<&str>| {
+            let Some(digest) = digest.filter(|digest| !digest.is_empty()) else {
+                return;
+            };
+            let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
+            components.insert(
+                name.into(),
+                serde_json::json!({
+                    "path": path,
+                    "sha256": format!("sha256:{digest}"),
+                    "artifact": {
+                        "digest": format!("sha256:{digest}"),
+                        "path": format!("objects/sha256/{digest}")
+                    }
+                }),
+            );
+        };
+        add("disk", "components/disk.qcow2", Some(&image.disk_sha256));
+        add(
+            "firmware",
+            "components/firmware.fd",
+            image.firmware_sha256.as_deref(),
+        );
+        add(
+            "tpm_state",
+            "components/tpm-state",
+            image.tpm_state_sha256.as_deref(),
+        );
+    }
     Ok(ImageManifestDocument {
         api_version: "machineemu.io/v1".into(),
         kind: "Image".into(),

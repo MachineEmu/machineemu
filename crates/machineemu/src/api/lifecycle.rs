@@ -358,6 +358,14 @@ fn render_domain_launch_plan(
         .and_then(|v| v.get("build_digest"))
         .and_then(Value::as_str)
         .unwrap_or("0");
+    let vnc_auto = profile
+        .get("devices")
+        .and_then(Value::as_object)
+        .and_then(|devices| devices.get("console"))
+        .and_then(Value::as_object)
+        .and_then(|console| console.get("type"))
+        .and_then(Value::as_str)
+        == Some("vnc");
     let plan = build_plan(PlanInput {
         profile: Value::Object(profile),
         release_set: serde_json::json!({"schema_version":1,"engines":{engine.clone():{"executable": executable, "build_digest": build_digest}}}),
@@ -382,7 +390,7 @@ fn render_domain_launch_plan(
             stdout: Some(&runtime.join("qemu.stdout")),
             stderr: Some(&runtime.join("qemu.stderr")),
             tpm_seed: None,
-            vnc_auto: false,
+            vnc_auto,
             helpers: Vec::new(),
         },
     )
@@ -411,9 +419,10 @@ fn memory_size(bytes: u64) -> Result<String, RuntimeError> {
 }
 
 async fn refresh_vnc_port(argv: &mut [String], auto: bool) -> Result<Option<u16>, RuntimeError> {
-    let display = argv
-        .windows(2)
-        .position(|pair| pair[0] == "-display" && pair[1].starts_with("vnc=127.0.0.1:"));
+    let display = argv.windows(2).position(|pair| {
+        pair[0] == "-display"
+            && (pair[1].starts_with("vnc=127.0.0.1:") || pair[1].starts_with("vnc=:"))
+    });
     let Some(index) = display else {
         if auto {
             return Err(RuntimeError::Process(
@@ -423,8 +432,10 @@ async fn refresh_vnc_port(argv: &mut [String], auto: bool) -> Result<Option<u16>
         return Ok(None);
     };
     let setting = &argv[index + 1];
-    let prefix = "vnc=127.0.0.1:";
-    let tail = &setting[prefix.len()..];
+    let tail = setting
+        .strip_prefix("vnc=127.0.0.1:")
+        .or_else(|| setting.strip_prefix("vnc=:"))
+        .expect("display matched a supported VNC form");
     let (display_number, suffix) = tail.split_once(',').unwrap_or((tail, ""));
     let number: u16 = display_number
         .parse()
@@ -443,7 +454,7 @@ async fn refresh_vnc_port(argv: &mut [String], auto: bool) -> Result<Option<u16>
             drop(listener);
             if auto {
                 argv[index + 1] = format!(
-                    "{prefix}{}{}",
+                    "vnc=127.0.0.1:{}{}",
                     candidate - 5900,
                     if suffix.is_empty() {
                         String::new()

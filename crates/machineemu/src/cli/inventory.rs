@@ -106,17 +106,33 @@ pub(super) async fn profiles(daemon: &str, token: &str, json: bool) -> Result<()
     for profile in profiles {
         println!(
             "{:<28} {:<20}",
-            profile
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?"),
-            profile
-                .get("target")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?")
+            profile_id(&profile).unwrap_or("?"),
+            profile_target(&profile).unwrap_or("?")
         );
     }
     Ok(())
+}
+
+fn profile_id(profile: &serde_json::Value) -> Option<&str> {
+    profile
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            profile
+                .pointer("/metadata/name")
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+fn profile_target(profile: &serde_json::Value) -> Option<&str> {
+    profile
+        .get("target")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            profile
+                .pointer("/spec/target")
+                .and_then(serde_json::Value::as_str)
+        })
 }
 
 #[cfg(test)]
@@ -142,5 +158,15 @@ mod tests {
         fs::write(workspace.join("profiles/broken.json"), "invalid").unwrap();
         assert!(list_profiles(&workspace).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_summary_supports_native_documents() {
+        let profile = serde_json::json!({
+            "metadata": {"name": "default-uefi"},
+            "spec": {"target": "x86_64-softmmu"}
+        });
+        assert_eq!(profile_id(&profile), Some("default-uefi"));
+        assert_eq!(profile_target(&profile), Some("x86_64-softmmu"));
     }
 }
